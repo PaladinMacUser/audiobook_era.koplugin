@@ -313,6 +313,12 @@ function SyncController:_skipCarriedPrefix(parsed, consume)
     else
         overlap = _sharedPrefixLen(remain, t)
     end
+    -- Never cut inside a multi-byte character.  The page and the peek
+    -- extraction can differ by one character (a quote variant, a stray
+    -- mark) whose leading bytes still match, and a byte-level cut then
+    -- leaves that character's tail at the start of the remainder: the
+    -- reader hears one character again at the page turn.
+    overlap = Utils.snapToCharBoundary(t, overlap)
     local uttered = (spoken and #spoken > 0 and (
         spoken:sub(-#t) == t
         or (#remain >= 8 and spoken:sub(-#remain) == remain)
@@ -463,7 +469,23 @@ function SyncController:_beginReading(text, created_bar, keep_text)
     if keep_text then
         self._tts_carry_skip = nil
         self._spoken_norm = {}
-        dlog("from-here-keep", "chars", text and #text or 0)
+        -- The playback bar resizes the page when reading starts, so the
+        -- reader re-lays out the text.  The suffix sliced before that
+        -- reflow can start at a sentence that is no longer on the visible
+        -- page, and the highlight then matches nothing while the
+        -- auto-advance skips text (issue #96: a from-here sentence moved
+        -- to the previous page).  Re-anchor it in the settled page text.
+        local fresh
+        if self.plugin and self.plugin.getCurrentPageText then
+            pcall(function() fresh = self.plugin:getCurrentPageText() end)
+        end
+        local reanchored = Utils.reanchorFromHere(fresh, text)
+        if reanchored then
+            dlog("from-here-reanchor", #text, #reanchored)
+            text = reanchored
+        else
+            dlog("from-here-keep", "chars", text and #text or 0)
+        end
     elseif self.plugin and self.plugin.getCurrentPageText then
         local fresh
         pcall(function() fresh = self.plugin:getCurrentPageText() end)

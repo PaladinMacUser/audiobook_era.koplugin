@@ -460,6 +460,63 @@ function Utils.hasSpacelessScript(s)
     return false
 end
 
+--- Largest byte offset <= n that ends a complete UTF-8 character in `s`.
+--- Cutting a string at a byte offset that lands inside a multi-byte
+--- character leaves that character's continuation bytes at the start of
+--- the remainder: on a page turn that re-reads part of a CJK character
+--- (heard as one character repeated) or drops it into mojibake.  Used
+--- wherever a matched byte length is turned into a substring cut.
+-- @param s string
+-- @param n number  Candidate byte offset (0..#s)
+-- @return number   Offset with a character boundary after it
+function Utils.snapToCharBoundary(s, n)
+    if not s or n <= 0 then return 0 end
+    if n >= #s then return #s end
+    local i = n + 1
+    while i > 1 do
+        local b = s:byte(i)
+        if b and b >= 0x80 and b < 0xC0 then
+            i = i - 1   -- continuation byte: step back into the character
+        else
+            break
+        end
+    end
+    return i - 1
+end
+
+--- Re-anchor a "read from here" suffix in page text captured after the
+--- layout settled.  Starting read-aloud inserts the playback bar, the
+--- reader re-lays out the page, and the suffix sliced before that reflow
+--- can begin at a sentence that no longer sits on the visible page: the
+--- highlight then matches nothing and the auto-advance skips text
+--- (issue #96: a from-here sentence jumped to the previous page).
+-- @param fresh string     Page text captured after the reflow
+-- @param captured string  Suffix captured before the reflow
+-- @return string|nil      Text to read instead, or nil to keep `captured`
+function Utils.reanchorFromHere(fresh, captured)
+    if not fresh or fresh == "" or not captured or captured == "" then
+        return nil
+    end
+    -- A byte cap, snapped so the probe never ends inside a character.
+    local anchor = captured:sub(1, Utils.snapToCharBoundary(captured, 40))
+    if #anchor >= 6 then
+        local a = Utils.findIgnoringSpaces(fresh, Utils.ws(anchor))
+        if a then
+            local anchored = fresh:sub(a)
+            if Utils.ws(anchored) == Utils.ws(captured) then
+                return nil   -- same place, same text: nothing to do
+            end
+            return anchored
+        end
+    end
+    -- Not on the settled page at all: reading from the top of what is
+    -- actually visible beats driving a highlight against absent text.
+    if Utils.ws(fresh) ~= Utils.ws(captured) then
+        return fresh
+    end
+    return nil
+end
+
 --- Find `needle` inside `haystack` while IGNORING all whitespace, returning
 --- the (1-based, inclusive) byte range in the ORIGINAL haystack, or nil.
 ---

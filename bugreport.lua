@@ -306,6 +306,7 @@ local function collectPluginInfo(plugin)
             lock_koreader_page_margins = tostring(plugin:getSetting("lock_koreader_page_margins", false)),
             smil_sync_offset_ms = tostring(plugin:getSetting("smil_sync_offset_ms", 0)),
             media_follow_page_turn = tostring(plugin:getSetting("media_follow_page_turn", false)),
+            android_prefetch = tostring(plugin:getSetting("android_prefetch", false)),
         }
     end
 
