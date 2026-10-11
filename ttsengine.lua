@@ -367,19 +367,27 @@ function TTSEngine:detectBackend()
             self._wav_play_lib = plugin_dir .. "/wav-play/lib"
             logger.dbg("TTSEngine: Found bundled wav-play at", wav_play_bin)
         end
-        -- Check for bundled sanoTTS engine (int8 neural TTS, ~700KB voice).
+        -- Check for bundled sanoTTS engine (neural TTS, 0.7-6.3 MB voices).
         -- Same FIFO/JSON protocol as Piper; slots between Piper and espeak
         -- in the quality tiers and runs comfortably on 512MB devices.
         local sanotts_dir = plugin_dir .. "/sanotts"
         local sanotts_server = sanotts_dir .. "/snt_server"
         local found_sanotts = false
         if ensureBinary(sanotts_server) and binaryRunsOnHost(sanotts_server) then
-            -- Voice inventory: amy (piperlite int8, ~1.5 MB across four
-            -- blob files, the quality voice) and kristin (R7 int8, ~700 KB,
-            -- the light voice).  Either alone is enough to offer the
-            -- backend; the active one is the persisted setting when its
-            -- blobs exist, else amy, else kristin.
+            -- Voice inventory with per-voice engine config.  amy (piperlite
+            -- int8, ~1.5 MB across four blob files, the English quality
+            -- voice), kristin (R7 int8, ~700 KB, the light voice, noticeably
+            -- less accurate) and fr (fp32 piperlite pair, ~6.3 MB, French,
+            -- converted from upstream's fp16 package).  Either voice alone
+            -- is enough to offer the backend; the active one is the
+            -- persisted setting when its blobs exist, else amy, else the
+            -- next best available.
             self.sanotts_voices = {}
+            self.sanotts_voice_defs = {
+                amy = { engine = "pq8", espeak_voice = "en-us", phonemes = "en" },
+                fr = { engine = "f32", espeak_voice = "fr", phonemes = "fr" },
+                kristin = { engine = "int8", espeak_voice = "en-us", phonemes = "en" },
+            }
             local af = io.open(sanotts_dir .. "/voice-amy/front_meta_q8.bin", "r")
             local aw = io.open(sanotts_dir .. "/voice-amy/front_weights_q8.bin", "r")
             local dm = io.open(sanotts_dir .. "/voice-amy/meta_q8.bin", "r")
@@ -394,10 +402,19 @@ function TTSEngine:detectBackend()
                 kf:close(); km:close()
                 self.sanotts_voices.kristin = sanotts_dir .. "/voice"
             end
+            local ff = io.open(sanotts_dir .. "/voice-fr/front_meta.bin", "r")
+            local fw = io.open(sanotts_dir .. "/voice-fr/front_weights_f32.bin", "r")
+            local df = io.open(sanotts_dir .. "/voice-fr/dec_meta.bin", "r")
+            local dwf = io.open(sanotts_dir .. "/voice-fr/dec_weights_f32.bin", "r")
+            if ff and fw and df and dwf then
+                ff:close(); fw:close(); df:close(); dwf:close()
+                self.sanotts_voices.fr = sanotts_dir .. "/voice-fr"
+            end
             local voice_name = self.sanotts_voice_name or "amy"
             if not self.sanotts_voices[voice_name] then
                 voice_name = self.sanotts_voices.amy and "amy"
-                    or (self.sanotts_voices.kristin and "kristin" or nil)
+                    or (self.sanotts_voices.fr and "fr"
+                    or (self.sanotts_voices.kristin and "kristin" or nil))
             end
             if voice_name then
                 found_sanotts = true
@@ -405,6 +422,7 @@ function TTSEngine:detectBackend()
                 self.sanotts_server = sanotts_server
                 self.sanotts_voice_name = voice_name
                 self.sanotts_voice_dir = self.sanotts_voices[voice_name]
+                self.sanotts_voice_cfg = self.sanotts_voice_defs[voice_name]
                 logger.dbg("TTSEngine: Found bundled sanoTTS at", sanotts_server,
                     "voice:", voice_name)
             else
@@ -5050,11 +5068,11 @@ function TTSEngine:findAudioPlayer()
         -- which meant paired-but-idle devices never triggered startup
         -- and audio fell through to a bare aplay with "no soundcards"
         -- (issue #8).
-        if not bt:isBluealsaRunning()
+        if bt:getStackType() == "bluez"
             and bt:hasBluealsaAvailable()
-            and bt:getStackType() == "bluez" then
-            logger.warn("TTSEngine: BlueALSA bundled but not running, starting it")
-            local ba_ok = bt:startBluealsa()
+            and (not bt:isBluealsaRunning() or not bt:isBluealsaHealthy()) then
+            logger.warn("TTSEngine: BlueALSA needs (re)starting for BT playback")
+            local ba_ok = bt:ensureBluealsa()
             if not ba_ok then
                 -- startBluealsa() polls internally, but on single-core Kobos
                 -- the daemon may still be registering with D-Bus/ALSA.  Give
@@ -7354,10 +7372,13 @@ function TTSEngine:listSanottsVoices()
     local out = {}
     local v = self.sanotts_voices or {}
     if v.amy then
-        table.insert(out, { name = "amy", label = "amy (quality, 1.5 MB)", dir = v.amy })
+        table.insert(out, { name = "amy", label = "amy (English, 1.5 MB)", dir = v.amy })
+    end
+    if v.fr then
+        table.insert(out, { name = "fr", label = "fr-siwis (French, 6.3 MB)", dir = v.fr })
     end
     if v.kristin then
-        table.insert(out, { name = "kristin", label = "kristin (light, 0.7 MB)", dir = v.kristin })
+        table.insert(out, { name = "kristin", label = "kristin (English light, less accurate)", dir = v.kristin })
     end
     return out
 end
@@ -7372,6 +7393,7 @@ function TTSEngine:setSanottsVoice(name)
     local old = self.sanotts_voice_name
     self.sanotts_voice_name = name
     self.sanotts_voice_dir = self.sanotts_voices[name]
+    self.sanotts_voice_cfg = self.sanotts_voice_defs and self.sanotts_voice_defs[name] or nil
     logger.dbg("TTSEngine: sanoTTS voice set to", name)
     if old and old ~= name and self._piper then
         self._piper:stopServers()

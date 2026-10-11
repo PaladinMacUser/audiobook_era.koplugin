@@ -27,6 +27,7 @@ local _ = require("audiobook_gettext")
 local BTManager = {}
 
 -- D-Bus constants (DBUS_DEST is set by detectStack)
+local BLUEALSA_START_LOG = "/tmp/.bluealsa_start.log"
 local DBUS_DEST = "org.bluez"  -- safe default; overridden for MTK
 local ADAPTER_PATH = "/org/bluez/hci0"
 local ROOT_PATH = "/"
@@ -853,7 +854,7 @@ function BTManager:powerOn()
     -- Network is down" and playback races the link (issue #93 second
     -- report).
     if bt_stack == "bluez" and self:hasBluealsaAvailable() and self:isPowered() then
-        local ba_ok = self:startBluealsa()
+        local ba_ok = self:ensureBluealsa()
         if not ba_ok then
             logger.err("BTManager: BlueALSA failed to start during power-on")
         end
@@ -1043,7 +1044,7 @@ end
 -- the bundled build is cross-built against a modern glibc and needs
 -- the bundled ld-linux to even start (issue #93 on Sage fw 4.38).
 -- @treturn bool success
-function BTManager:startBluealsa()
+function BTManager:startBluealsa(health_retried)
     detectStack()
     if bt_stack ~= "bluez" then return false end
     if self:isBluealsaRunning() then
@@ -1140,7 +1141,7 @@ function BTManager:startBluealsa()
     -- Include wav-play/lib which reliably bundles libasound.so.2.
     -- Include /usr/lib:/lib as a last resort for other system libs.
     -- Log stderr to a temp file for diagnostics instead of discarding.
-    local ba_log = "/tmp/.bluealsa_start.log"
+    local ba_log = BLUEALSA_START_LOG
 
     -- Launch candidates, best first:
     -- 1) the firmware's own binary, executed plainly: it is linked
@@ -1220,6 +1221,20 @@ function BTManager:startBluealsa()
         return running
     end
 
+    -- A daemon that started before the controller answers logs
+    -- "Couldn't get HCI version" and never registers its A2DP endpoints.
+    -- It is alive and useless, and a headset connecting to it comes up
+    -- with only the HID profile, so playback has no audio path at all
+    -- (issue #93: Sage with connected Pixel Buds Pro, no A2DP UUID, the
+    -- overlay stuck at position 0).  Restart it once now that the
+    -- adapter is up.
+    if not health_retried and not self:isBluealsaHealthy() then
+        logger.warn("BTManager: bluealsa could not reach the controller at startup, restarting it")
+        os.execute("killall bluealsa 2>/dev/null")
+        os.execute("sleep 1")
+        return self:startBluealsa(true)
+    end
+
     -- A headset that (re)connected while the daemon was down carries no
     -- A2DP transport: BlueZ only negotiates the profile through the
     -- registered endpoints, and the daemon was not there.  Cycle the
@@ -1238,6 +1253,41 @@ function BTManager:startBluealsa()
 
     logger.warn("BTManager: bluealsa started:", running)
     return running
+end
+
+--- Whether the running BlueALSA daemon reached the controller at startup.
+-- The daemon queries the HCI version when it starts and registers its
+-- A2DP endpoints at the same time.  Launched while the link is not
+-- answering yet, it logs "Couldn't get HCI version" (or "Network is
+-- down") and never registers the endpoints, so BlueZ cannot negotiate
+-- audio with a headset even though the process is alive and
+-- isBluealsaRunning() reports yes.  A headset that connects to that
+-- daemon comes up with only the HID profile and playback has no audio
+-- path at all (issue #93: connected Pixel Buds Pro on a Sage, overlay
+-- position stuck at 0 while the startup log showed the HCI timeout).
+-- @treturn bool
+function BTManager:isBluealsaHealthy()
+    local lf = io.open(BLUEALSA_START_LOG, "r")
+    if not lf then return true end
+    local content = lf:read("*a") or ""
+    lf:close()
+    return not (content:find("Couldn't get HCI version", 1, true)
+        or content:find("Network is down", 1, true))
+end
+
+--- Ensure a BlueALSA daemon that can actually serve audio is running:
+-- leave a healthy one alone, restart a wedged one, start a missing one.
+-- @treturn bool
+function BTManager:ensureBluealsa()
+    if not self:hasBluealsaAvailable() then return false end
+    if self:isBluealsaRunning() and self:isBluealsaHealthy() then
+        return true
+    end
+    if self:isBluealsaRunning() then
+        logger.warn("BTManager: bluealsa never reached the controller, restarting it")
+        self:stopBluealsa()
+    end
+    return self:startBluealsa()
 end
 
 --- Stop the BlueALSA daemon.
@@ -1369,8 +1419,8 @@ function BTManager:restoreSavedDevice(plugin)
         -- Stack healthy, device connected (e.g. KSM launch, where
         -- koreader.sh never touched BT).  Only bluealsa may need
         -- starting, and ttsengine re-checks it lazily anyway.
-        if not self:isBluealsaRunning() and self:hasBluealsaAvailable() then
-            self:startBluealsa()
+        if not self:isBluealsaRunning() or not self:isBluealsaHealthy() then
+            self:ensureBluealsa()
         end
         return true
     end
@@ -1839,7 +1889,7 @@ function BTManager:connect(address)
         -- was already connected when the plugin loaded would never trigger
         -- the post-connect BlueALSA startup (issue #8).
         if bt_stack == "bluez" and self:hasBluealsaAvailable() then
-            self:startBluealsa()
+            self:ensureBluealsa()
         end
         return true
     end
@@ -1921,7 +1971,7 @@ function BTManager:connect(address)
         os.execute("sleep 2")
         -- Start bluealsa daemon if bundled (provides ALSA PCM for BT audio)
         if self:hasBluealsaAvailable() then
-            self:startBluealsa()
+            self:ensureBluealsa()
         end
         logger.warn("BTManager: BlueZ device connected, A2DP profile settling")
         return true

@@ -1639,13 +1639,13 @@ function MediaEngine:_bluealsaSinkCommand()
         end
     end
     if not connected then return nil end
-    if not bt:isBluealsaRunning() then
-        if not bt:hasBluealsaAvailable() then return nil end
-        logger.warn("MediaEngine: BlueALSA not running, starting it for BT playback")
-        if not bt:startBluealsa() and not bt:isBluealsaRunning() then
-            logger.warn("MediaEngine: BlueALSA did not start, falling back to aplay")
-            return nil
-        end
+    if not bt:hasBluealsaAvailable() then return nil end
+    -- ensureBluealsa also replaces a daemon that started while the
+    -- controller was not answering: it is alive but registered no A2DP
+    -- endpoints, so every PCM open fails (issue #93).
+    if not bt:ensureBluealsa() and not bt:isBluealsaRunning() then
+        logger.warn("MediaEngine: BlueALSA did not start, falling back to aplay")
+        return nil
     end
     return bt:getBluealsaEnv()
         .. "aplay -f S16_LE -r 44100 -c 2 -D " .. bt:getBluealsaDevice()
@@ -1661,6 +1661,7 @@ function MediaEngine:_playFfmpegPipe(gen)
     local offset = self._seek_offset or 0
     local path = self.current_path:gsub('"', '\\"')
     local ffmpeg = self.backend_cmd
+    self._used_bluealsa_sink = false
 
     -- Detect whether to use gstreamer + mtkbtmwrpcaudiosink or fall back to aplay
     local has_mtk_sink = false
@@ -1689,7 +1690,13 @@ function MediaEngine:_playFfmpegPipe(gen)
                 and self.plugin and self.plugin.bt_manager then
             local bt_cmd = self:_bluealsaSinkCommand()
             if bt_cmd then
-                player_cmd = bt_cmd
+                -- Capture the sink's stderr: a PCM open failure is how a
+                -- missing A2DP transport shows up, and the completion
+                -- watcher reads it to trigger the recovery (issue #93).
+                self._media_err_file = self:_getTempDir() .. "/media-err-" .. gen
+                os.remove(self._media_err_file)
+                player_cmd = bt_cmd .. " 2>>" .. self._media_err_file
+                self._used_bluealsa_sink = true
             end
         end
     end
@@ -2835,6 +2842,45 @@ function MediaEngine:_startCompletionWatcher(gen)
                 self.is_paused = false
                 self.audio_pid = nil
 
+                -- BlueALSA with no A2DP transport: the sink exits at once
+                -- and the pipeline dies with "Couldn't get BlueALSA PCM:
+                -- PCM not found".  The device is connected, but its audio
+                -- profile was never negotiated, usually because it
+                -- attached before the daemon registered its endpoints or
+                -- the daemon never reached the controller at all
+                -- (issue #93).  Cycle the connection once and restart at
+                -- the same position, with a cooldown so a gone headset
+                -- cannot cause a reconnect per clip.
+                if self._used_bluealsa_sink
+                        and (UIManager:getTime() - (self._pcm_recovery_at or 0)) > 30
+                        and self.plugin and self.plugin.bt_manager then
+                    local sink_err = ""
+                    local ef = self._media_err_file and io.open(self._media_err_file, "r")
+                    if ef then
+                        sink_err = ef:read("*a") or ""
+                        ef:close()
+                    end
+                    if sink_err:find("PCM not found", 1, true)
+                            or sink_err:find("audio open error", 1, true)
+                            or (premature and pos < 1.0) then
+                        local fail_cb = self._on_fail
+                        local complete_cb = self._on_complete
+                        self._on_fail = nil
+                        self._on_complete = nil
+                        self._pcm_recovery_at = UIManager:getTime()
+                        logger.warn("MediaEngine: BlueALSA sink failed (",
+                            sink_err:gsub("\n", " "):sub(1, 160),
+                            "), cycling the BT connection and retrying")
+                        self.plugin.bt_manager:recoverMissingPcm()
+                        self._seek_offset = math.max(0, pos)
+                        UIManager:scheduleIn(0.5, function()
+                            if self.play_generation ~= gen then return end
+                            self:play(complete_cb, fail_cb)
+                        end)
+                        return
+                    end
+                end
+
                 if premature and self:_isKindle() then
                     logger.warn("MediaEngine: premature pipeline exit at", pos,
                         "dur=", dur, "— treating as fail (A2DP recovery)")
@@ -3228,6 +3274,12 @@ function MediaEngine:stop()
     if self._system_raw_file then
         os.remove(self._system_raw_file)
         self._system_raw_file = nil
+    end
+
+    -- Remove the BlueALSA sink stderr capture from the last play.
+    if self._media_err_file then
+        os.remove(self._media_err_file)
+        self._media_err_file = nil
     end
 
     -- Remove the ffmpeg -progress feed and disable progress-based position
