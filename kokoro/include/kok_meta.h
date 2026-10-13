@@ -92,6 +92,11 @@ const kok_slot *kok_find(const kok_meta *m, const char *name);
  * *rc = 0 on success, or sets *rc negative (-8 not found, -9 count mismatch). */
 const kok_slot *kok_find_n(const kok_meta *m, const char *name, long count, int *rc);
 
+/* Blob-scoped lookup with a count check: the text and decoder halves each have a
+ * "style" slot, so a name alone is ambiguous. rc -8 not found, -9 count. */
+const kok_slot *kok_find_blob(const kok_meta *m, const char *name, int blob_id,
+                              long count, int *rc);
+
 /* f32 view of a slot inside its blob (NULL when the dtype is not f32). Pass the
  * blob that matches slot->blob_id. */
 const float *kok_f32(const kok_slot *s, const void *blob);

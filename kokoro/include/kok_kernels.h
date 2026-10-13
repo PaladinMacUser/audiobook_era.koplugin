@@ -26,7 +26,7 @@ size_t kok_arena_peak(const kok_arena *a);
 
 /* ---- linear algebra ---- */
 void kok_conv1d(float *out, const float *x, const float *w, const float *b,
-                int Cin, int Cout, int T, int K, int pad, int dil);
+                int Cin, int Cout, int T, int K, int stride, int pad, int dil);
 void kok_convtr1d(float *out, const float *x, const float *w, const float *b,
                   int Cin, int Cout, int T, int K, int stride, int pad,
                   int out_pad, int groups);
@@ -79,6 +79,55 @@ typedef struct {
     const float *pool_w, *pool_b;   /* NULL unless upsampling */
     int dim_in, dim_out, upsample;
 } kok_arb;
+
+/* ------------------------------------------------------------------------- */
+/* spectral: the author's ConvSTFT as convolutions over DFT bases             */
+/* ------------------------------------------------------------------------- */
+typedef struct {
+    int n, hop, K;      /* K = number of bins in [bin_lo, bin_hi] */
+    int bin_lo;
+    float *fwd;         /* [2K, n]: rows 0..K-1 cosine, K..2K-1 -sine, both windowed */
+    float *inv;         /* [2K, n]: inverse bases, scaled 1/n with the DC/Nyquist halving */
+    float *w2;          /* [n]: squared window, for the overlap envelope */
+} kok_stft;
+
+/* Floats needed for the bases: 4K*n + n. */
+long kok_stft_mem_floats(int n, int bin_lo, int bin_hi);
+int kok_stft_init(kok_stft *s, int n, int hop, int bin_lo, int bin_hi, float *mem);
+
+/* x [T] -> mag, phase [K, frames]; reflect padding like torch.stft(center=True). */
+int kok_stft_transform(const kok_stft *s, const float *x, int T, float *mag,
+                       float *phase, kok_arena *a);
+/* Raw basis convolutions (no magnitude/angle): re, im [K, frames]. The phase
+ * lock needs these, not the polar form. */
+int kok_stft_transform_raw(const kok_stft *s, const float *x, int T, float *re,
+                           float *im, kok_arena *a);
+/* mag, phase [K, frames] -> out, with the window-overlap envelope divided out. */
+int kok_stft_inverse(const kok_stft *s, const float *mag, const float *phase,
+                     int frames, float *out, long *out_len, kok_arena *a);
+
+/* ------------------------------------------------------------------------- */
+/* generator blocks                                                           */
+/* ------------------------------------------------------------------------- */
+typedef struct {
+    const float *fc_w, *fc_b, *norm_w, *norm_b;
+} kok_adain_w;
+
+/* Kokoro's AdaINResBlock1: 3 branches, dilations 1/3/5, Snake activations,
+ * residual outside. */
+typedef struct {
+    kok_adain_w a1[3], a2[3];
+    const float *c1w[3], *c1b[3], *c2w[3], *c2b[3];
+    const float *alpha1[3], *alpha2[3];
+    int channels, kernel;
+} kok_res1;
+
+/* (out = sum of branches / 3 is done by the caller) */
+int kok_res1_forward(float *out, const float *x, const kok_res1 *b, const float *s,
+                     int style_dim, int T, kok_arena *a);
+
+/* x [C, T] -> out [C, 2T] by nearest-neighbour duplication (F.interpolate). */
+void kok_upsample_nearest2(float *out, const float *x, int C, int T);
 
 /* Kokoro's AdainResBlk1d: AdaIN -> leaky(0.2) -> [depthwise ConvT upsample] ->
  * conv1 -> AdaIN -> leaky(0.2) -> conv2, plus a nearest-upsampled (and 1x1

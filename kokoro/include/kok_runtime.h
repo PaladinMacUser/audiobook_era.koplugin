@@ -63,16 +63,56 @@ typedef struct {
     float *nz;            /* [2 * n_frames] */
 } kok_text_out;
 
+/* ---- decoder half ---- */
+typedef struct {
+    kok_arb encode;                 /* (asr_dim + 2) -> width */
+    kok_arb decode[4];              /* the last one upsampling */
+    const float *f0_conv_w, *f0_conv_b, *n_conv_w, *n_conv_b;
+    const float *asr_res_w, *asr_res_b;
+    const float *style;
+    /* generator */
+    kok_res1 noise_res[2];
+    kok_res1 resblocks[6];
+    const float *ups_w[2], *ups_b[2];
+    const float *noise_w[2], *noise_b[2];
+    const float *conv_post_w, *conv_post_b;
+    const float *src_w, *src_b;      /* the harmonic source's l_linear */
+    /* dims */
+    int width, uic, kernels[3], uprate[2], upkern[2], istft_n, istft_hop, style_dim;
+    int asr_dim;
+} kok_dec_w;
+
 typedef struct {
     kok_meta meta;
     const void *text_blob;
     const void *dec_blob;
     kok_text_w tw;
+    kok_dec_w dw;
 } kok_model;
 
 int kok_model_init(kok_model *mo, const void *meta_blob, size_t meta_bytes,
                    const void *text_blob, const void *dec_blob);
 int kok_text_w_bind(kok_text_w *tw, const kok_meta *m, const void *text_blob);
+
+/* shared internal helper: bind one Kokoro AdainResBlk1d by name prefix */
+int kok_bind_arb(kok_arb *b, const kok_meta *m, const void *blob, int blob_id,
+                 const char *prefix, int dim_in, int dim_out, int upsample,
+                 int style_dim);
+
+int kok_dec_w_bind(kok_dec_w *dw, const kok_meta *m, const void *blob);
+
+/* the 2-8 kHz phase-lock post-filter, exposed for testing */
+int kok_lock_apply(const kok_config *c, const float *s, long n, const float *src,
+                   const float *f0, long n_f0, float *out, kok_arena *a);
+
+/* Run the decoder half: asr [asr_dim, F], f0 and nz [2F], the harmonic source
+ * src [6 * F * F0S] (see kok_dec_forward for the exact length) -> wave. */
+int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f0,
+                    const float *nz, const float *src, float *wave, long *wave_len,
+                    float *pre_lock_out, kok_arena *a);
+
+/* The harmonic-source length the decoder expects for F frames. */
+long kok_dec_source_floats(const kok_model *mo, int F);
 
 /* Run the text half. ids are phoneme ids (padded at both ends by the caller,
  * as the model expects). mode 0 = durations only, 1 = also the aligned stages. */

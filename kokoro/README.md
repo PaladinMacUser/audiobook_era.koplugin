@@ -145,6 +145,43 @@ Blobs are not committed: `tools/export_kokoro_blobs.py` rebuilds them from the
 checkpoints into the gitignored `kokoro/model/blobs` (fp32, 32 MB for this
 model; the int8 path in M6 will bring that to the 9 MB class).
 
+## C runtime: decoder half (M3, first pass)
+
+`src/kok_istft.c` holds the spectral kernels (the author's ConvSTFT as
+convolutions over generated DFT bases, plus a raw real/imaginary variant the
+phase lock needs, the Snake resblock, the nearest-neighbour upsampler) and
+`src/kok_dec.c` the decoder stack, the istftnet generator and the 2-8 kHz phase
+lock. The harmonic source is passed in rather than generated: the RNG path is
+not written yet, and the goldens supply it.
+
+Gate state against the torch goldens: durations integer-exact, every text-side
+stage and the decoder stack at 1e-06 to 2e-06 relative, the generator output
+and the locked waveform at about 1e-03 relative on the final audio (-69 dB,
+inaudible). The residual is a phase branch cut, not a logic error: exactly three samples of
+the generator's phase feature differ by 2*pi between the C and torch because the
+imaginary part lands on opposite sides of +/-0 in the two summation orders
+(1e-8-level float noise at a bin where the real part is negative). The noise
+convolution is linear in that phase channel, so it smears those three samples
+into the ~1.5 percent difference there and the ~1e-3 relative on the audio.
+Reproducing torch's summation order bit-for-bit is the only way to remove it and
+is not worth doing; the author's own export notes document the same fragility
+("float noise in the DC and Nyquist imaginary parts whose random sign flips the
+phase feature between +pi and -pi"). The gate therefore allows 2e-3 relative on
+the two audio stages and 1e-4 everywhere else.
+
+Arena peak is 73 MB for a 417-frame sentence, which is over what the device
+budget will allow (the plan's M7): the lock's 1024-point bases and the
+generator's buffers are the obvious targets.
+
+The gate builds and runs with:
+
+```sh
+nix shell nixpkgs#gcc nixpkgs#gnumake -c make -C kokoro test
+```
+
+`KOK_DUMP_STAGES` in the build (and `KOK_DEBUG_STAGES` for prints) writes the
+generator's intermediate stages to /tmp for the bisect harness.
+
 ## Layout
 
 `include/` and `src/` hold the runtime (`kok_` prefix, own port header,

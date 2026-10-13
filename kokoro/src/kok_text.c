@@ -10,13 +10,23 @@
 #define BIND(dst, name, count)                                                  \
     do {                                                                        \
         int rc_ = 0;                                                            \
-        const kok_slot *sl_ = kok_find_n(m, name, (count), &rc_);               \
+        const kok_slot *sl_ = kok_find_blob(m, name, 0, (count), &rc_);               \
         if (!sl_) {                                                             \
             fprintf(stderr, "bind: %s (want %ld) rc %d\n", name, (long)(count), rc_); \
             return rc_;                                                         \
         }                                                                       \
         (dst) = kok_f32(sl_, blob);                                             \
         if (!(dst)) { fprintf(stderr, "bind: %s not f32\n", name); return -10; } \
+    } while (0)
+
+/* like BIND, but for the shared AdainResBlk1d binder, which serves both blobs */
+#define ARBBIND(dst, name, count)                                               \
+    do {                                                                        \
+        int rc_ = 0;                                                            \
+        const kok_slot *sl_ = kok_find_blob(m, name, blob_id, (count), &rc_);   \
+        if (!sl_) return rc_;                                                   \
+        (dst) = kok_f32(sl_, blob);                                             \
+        if (!(dst)) return -10;                                                 \
     } while (0)
 
 #define BIND_OPT(dst, name, count)                                              \
@@ -50,46 +60,47 @@ static int bind_bilstm(kok_bilstm_w *b, const kok_meta *m, const void *blob,
     return 0;
 }
 
-static int bind_arb(kok_arb *b, const kok_meta *m, const void *blob, const char *prefix,
-                    int dim_in, int dim_out, int upsample, int style_dim) {
+int kok_bind_arb(kok_arb *b, const kok_meta *m, const void *blob, int blob_id,
+                 const char *prefix, int dim_in, int dim_out, int upsample,
+                 int style_dim) {
     char name[256];
     memset(b, 0, sizeof *b);
     b->dim_in = dim_in;
     b->dim_out = dim_out;
     b->upsample = upsample;
     snprintf(name, sizeof name, "%s.norm1.fc.weight", prefix);
-    BIND(b->n1_fc_w, name, 2L * dim_in * style_dim);
+    ARBBIND(b->n1_fc_w, name, 2L * dim_in * style_dim);
     snprintf(name, sizeof name, "%s.norm1.fc.bias", prefix);
-    BIND(b->n1_fc_b, name, 2L * dim_in);
+    ARBBIND(b->n1_fc_b, name, 2L * dim_in);
     snprintf(name, sizeof name, "%s.norm1.norm.weight", prefix);
-    BIND(b->n1_norm_w, name, dim_in);
+    ARBBIND(b->n1_norm_w, name, dim_in);
     snprintf(name, sizeof name, "%s.norm1.norm.bias", prefix);
-    BIND(b->n1_norm_b, name, dim_in);
+    ARBBIND(b->n1_norm_b, name, dim_in);
     snprintf(name, sizeof name, "%s.norm2.fc.weight", prefix);
-    BIND(b->n2_fc_w, name, 2L * dim_out * style_dim);
+    ARBBIND(b->n2_fc_w, name, 2L * dim_out * style_dim);
     snprintf(name, sizeof name, "%s.norm2.fc.bias", prefix);
-    BIND(b->n2_fc_b, name, 2L * dim_out);
+    ARBBIND(b->n2_fc_b, name, 2L * dim_out);
     snprintf(name, sizeof name, "%s.norm2.norm.weight", prefix);
-    BIND(b->n2_norm_w, name, dim_out);
+    ARBBIND(b->n2_norm_w, name, dim_out);
     snprintf(name, sizeof name, "%s.norm2.norm.bias", prefix);
-    BIND(b->n2_norm_b, name, dim_out);
+    ARBBIND(b->n2_norm_b, name, dim_out);
     snprintf(name, sizeof name, "%s.conv1.weight", prefix);
-    BIND(b->c1_w, name, 3L * dim_out * dim_in);
+    ARBBIND(b->c1_w, name, 3L * dim_out * dim_in);
     snprintf(name, sizeof name, "%s.conv1.bias", prefix);
-    BIND(b->c1_b, name, dim_out);
+    ARBBIND(b->c1_b, name, dim_out);
     snprintf(name, sizeof name, "%s.conv2.weight", prefix);
-    BIND(b->c2_w, name, 3L * dim_out * dim_out);
+    ARBBIND(b->c2_w, name, 3L * dim_out * dim_out);
     snprintf(name, sizeof name, "%s.conv2.bias", prefix);
-    BIND(b->c2_b, name, dim_out);
+    ARBBIND(b->c2_b, name, dim_out);
     if (dim_in != dim_out) {
         snprintf(name, sizeof name, "%s.conv1x1.weight", prefix);
-        BIND(b->sc_w, name, (long)dim_out * dim_in);
+        ARBBIND(b->sc_w, name, (long)dim_out * dim_in);
     }
     if (upsample) {
         snprintf(name, sizeof name, "%s.pool.weight", prefix);
-        BIND(b->pool_w, name, 3L * dim_in);
+        ARBBIND(b->pool_w, name, 3L * dim_in);
         snprintf(name, sizeof name, "%s.pool.bias", prefix);
-        BIND(b->pool_b, name, dim_in);
+        ARBBIND(b->pool_b, name, dim_in);
     }
     return 0;
 }
@@ -168,10 +179,10 @@ int kok_text_w_bind(kok_text_w *tw, const kok_meta *m, const void *blob) {
         int din = (i == 2) ? dhid / 2 : dhid;
         int dout = (i == 0) ? dhid : dhid / 2;
         snprintf(name, sizeof name, "predictor.F0.%d", i);
-        int rc = bind_arb(&tw->f0_blk[i], m, blob, name, din, dout, i == 1, sd);
+        int rc = kok_bind_arb(&tw->f0_blk[i], m, blob, 0, name, din, dout, i == 1, sd);
         if (rc) return rc;
         snprintf(name, sizeof name, "predictor.N.%d", i);
-        rc = bind_arb(&tw->n_blk[i], m, blob, name, din, dout, i == 1, sd);
+        rc = kok_bind_arb(&tw->n_blk[i], m, blob, 0, name, din, dout, i == 1, sd);
         if (rc) return rc;
     }
     BIND(tw->f0_proj_w, "predictor.F0_proj.weight", dhid / 2);
@@ -298,7 +309,7 @@ static int textenc_forward(const kok_text_w *tw, const kok_config *c, const int 
         for (int d = 0; d < ch; d++) out[d * T + t] = e[d];
     }
     for (int i = 0; i < depth; i++) {
-        kok_conv1d(buf, out, tw->te_cnn[i].w, tw->te_cnn[i].b, ch, ch, T, K, pad, 1);
+        kok_conv1d(buf, out, tw->te_cnn[i].w, tw->te_cnn[i].b, ch, ch, T, K, 1, pad, 1);
         kok_layer_norm(buf, tw->te_cnn[i].ln_w, tw->te_cnn[i].ln_b, ch, T, 1e-5f);
         kok_leaky_relu(buf, (long)ch * T, 0.2f);
         memcpy(out, buf, (size_t)ch * T * sizeof(float));
@@ -436,7 +447,9 @@ int kok_model_init(kok_model *mo, const void *meta_blob, size_t meta_bytes,
     if (rc) return rc;
     mo->text_blob = text_blob;
     mo->dec_blob = dec_blob;
-    return kok_text_w_bind(&mo->tw, &mo->meta, text_blob);
+    rc = kok_text_w_bind(&mo->tw, &mo->meta, text_blob);
+    if (rc) return rc;
+    return kok_dec_w_bind(&mo->dw, &mo->meta, dec_blob);
 }
 
 int kok_text_forward(const kok_model *mo, const int *ids, long n_tokens, int mode,

@@ -51,24 +51,27 @@ static int report(const char *stage, const float *mine, const float *ref, long n
 int main(int argc, char **argv) {
     const char *meta_path = "kokoro/model/blobs/kok_meta.bin";
     const char *text_path = "kokoro/model/blobs/kok_text.bin";
+    const char *dec_path = "kokoro/model/blobs/kok_dec.bin";
     const char *fx = "kokoro/test/fixtures/paradee-8m";
     const char *which = NULL;
     double tol = 1e-4;
     for (int i = 1; i < argc - 1; i++) {
         if (!strcmp(argv[i], "--meta")) meta_path = argv[++i];
         else if (!strcmp(argv[i], "--text")) text_path = argv[++i];
+        else if (!strcmp(argv[i], "--dec")) dec_path = argv[++i];
         else if (!strcmp(argv[i], "--fixtures")) fx = argv[++i];
         else if (!strcmp(argv[i], "--sentences")) which = argv[++i];
         else if (!strcmp(argv[i], "--tol")) tol = atof(argv[++i]);
     }
 
-    size_t meta_bytes, text_bytes;
+    size_t meta_bytes, text_bytes, dec_bytes;
     void *meta = xload(meta_path, &meta_bytes);
     void *text = xload(text_path, &text_bytes);
-    if (!meta || !text) return 2;
+    void *dec = xload(dec_path, &dec_bytes);
+    if (!meta || !text || !dec) return 2;
 
     kok_model mo;
-    int rc = kok_model_init(&mo, meta, meta_bytes, text, NULL);
+    int rc = kok_model_init(&mo, meta, meta_bytes, text, dec);
     if (rc) { fprintf(stderr, "kok_model_init rc %d\n", rc); return 2; }
     const kok_config *c = &mo.meta.cfg;
     const int dhid = c->v[KOK_D_PROSODY_D_HID], sd = c->v[KOK_D_TEXT_STYLE_DIM];
@@ -77,7 +80,7 @@ int main(int argc, char **argv) {
            c->v[KOK_D_N_TOKEN], c->v[KOK_D_ALBERT_LAYERS], c->v[KOK_D_ALBERT_HEADS],
            dhid, sd, asr, mo.meta.n_slots);
 
-    const size_t ARENA_FLOATS = 24u * 1024 * 1024;   /* 96 MB of scratch */
+    const size_t ARENA_FLOATS = 72u * 1024 * 1024;   /* 288 MB of scratch (host gate) */
     float *arena_mem = malloc(ARENA_FLOATS * sizeof(float));
     if (!arena_mem) return 2;
 
@@ -149,6 +152,51 @@ int main(int argc, char **argv) {
             else if (!report(stages[k].stage, stages[k].mine, ref, rn, tol))
                 all_ok = 0;
             free(ref);
+        }
+        /* decoder half: the generator output and the locked waveform */
+        {
+            char p2[512];
+            size_t nb;
+            snprintf(p2, sizeof p2, "%s/s%d_src.bin", fx, s);
+            float *src = xload(p2, &nb);
+            long src_n = (long)(nb / sizeof(float));
+            if (!src) { all_ok = 0; }
+            else {
+                long cap = src_n * 2;
+                float *wav = malloc((size_t)cap * sizeof(float));
+                float *pre = malloc((size_t)cap * sizeof(float));
+                long wlen = 0;
+                kok_arena_reset(&arena);
+                rc = kok_dec_forward(&mo, out.asr, (int)F, out.f0, out.nz, src, wav,
+                                     &wlen, pre, &arena);
+                if (rc) { fprintf(stderr, "s%d: dec rc %d\n", s, rc); return 2; }
+                printf("    decoder: %ld samples (arena peak %.1f MB)\n", wlen,
+                       (double)kok_arena_peak(&arena) * sizeof(float) / 1048576.0);
+                {
+                    double dmax = 0.0;
+                    for (long q = 0; q < wlen; q++) {
+                        double d = fabs((double)wav[q] - (double)pre[q]);
+                        if (d > dmax) dmax = d;
+                    }
+                    printf("    lock correction |max| %.6f\n", dmax);
+                }
+                const char *names[2] = {"wave_pre_lock", "waveform"};
+                float *mine[2] = {pre, wav};
+                for (int q = 0; q < 2; q++) {
+                    snprintf(p2, sizeof p2, "%s/s%d_%s.bin", fx, s, names[q]);
+                    float *ref = xload(p2, &nb);
+                    long rn = (long)(nb / sizeof(float));
+                    if (!ref) { all_ok = 0; }
+                    else if (rn != wlen)
+                        printf("    %-14s size mismatch: C %ld, golden %ld\n", names[q], wlen, rn);
+                    /* the generator's phase branch cut (see kokoro/README.md)
+                     * puts the audio at ~1e-3 relative; everything else is 1e-6 */
+                    else if (!report(names[q], mine[q], ref, rn, 2e-3))
+                        all_ok = 0;
+                    free(ref);
+                }
+                free(src); free(wav); free(pre);
+            }
         }
         /* integer stages */
         {

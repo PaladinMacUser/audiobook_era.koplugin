@@ -108,6 +108,23 @@ const kok_slot *kok_find_n(const kok_meta *m, const char *name, long count, int 
     return s;
 }
 
+const kok_slot *kok_find_blob(const kok_meta *m, const char *name, int blob_id,
+                              long count, int *rc) {
+    static kok_slot scratch;
+    if (!m || !name) { if (rc) *rc = -1; return NULL; }
+    for (uint32_t i = 0; i < m->n_slots; i++) {
+        uint32_t ni = rd_u32(m->slots_raw + (size_t)i * 36);
+        if ((int)rd_i32(m->slots_raw + (size_t)i * 36 + 4) != blob_id) continue;
+        if (!name_eq(m, ni, name)) continue;
+        slot_at(m, i, &scratch);
+        if (scratch.count != count) { if (rc) *rc = -9; return NULL; }
+        if (rc) *rc = 0;
+        return &scratch;
+    }
+    if (rc) *rc = -8;
+    return NULL;
+}
+
 const float *kok_f32(const kok_slot *s, const void *blob) {
     if (!s || !blob || s->dtype != KOK_DT_F32) return NULL;
     return (const float *)(const void *)((const unsigned char *)blob + s->offset);

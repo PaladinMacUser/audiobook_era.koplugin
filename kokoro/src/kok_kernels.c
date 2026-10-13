@@ -25,15 +25,15 @@ size_t kok_arena_peak(const kok_arena *a) { return a->top; }
 
 /* ---- linear algebra ---- */
 void kok_conv1d(float *out, const float *x, const float *w, const float *b,
-                int Cin, int Cout, int T, int K, int pad, int dil) {
-    int Tp = T + 2 * pad - dil * (K - 1);
+                int Cin, int Cout, int T, int K, int stride, int pad, int dil) {
+    int Tp = (T + 2 * pad - dil * (K - 1) - 1) / stride + 1;
     for (int o = 0; o < Cout; o++) {
         float *orow = out + (size_t)o * Tp;
         const float *wrow = w + (size_t)o * Cin * K;
         for (int t = 0; t < Tp; t++) {
             float acc = b ? b[o] : 0.0f;
             for (int k = 0; k < K; k++) {
-                int ti = t + k * dil - pad;
+                int ti = t * stride + k * dil - pad;
                 if (ti < 0 || ti >= T) continue;
                 for (int c = 0; c < Cin; c++)
                     acc += x[(size_t)c * T + ti] * wrow[(size_t)c * K + k];
@@ -301,15 +301,15 @@ int kok_arb_forward(float *out, const float *x, const kok_arb *b, const float *s
         float *up = kok_arena_alloc(a, (size_t)Cin * T_out);
         if (!up) return -1;
         kok_convtr1d(up, buf, b->pool_w, b->pool_b, Cin, Cin, T, 3, 2, 1, 1, Cin);
-        kok_conv1d(res, up, b->c1_w, b->c1_b, Cin, Cout, T_out, 3, 1, 1);
+        kok_conv1d(res, up, b->c1_w, b->c1_b, Cin, Cout, T_out, 3, 1, 1, 1);
     } else {
-        kok_conv1d(res, buf, b->c1_w, b->c1_b, Cin, Cout, T, 3, 1, 1);
+        kok_conv1d(res, buf, b->c1_w, b->c1_b, Cin, Cout, T, 3, 1, 1, 1);
     }
     /* AdaIN -> leaky -> conv2 */
     kok_adain1d(buf, res, Cout, T_out, s, style_dim, b->n2_fc_w, b->n2_fc_b,
                 b->n2_norm_w, b->n2_norm_b, 1e-5f);
     kok_leaky_relu(buf, (long)Cout * T_out, 0.2f);
-    kok_conv1d(res, buf, b->c2_w, b->c2_b, Cout, Cout, T_out, 3, 1, 1);
+    kok_conv1d(res, buf, b->c2_w, b->c2_b, Cout, Cout, T_out, 3, 1, 1, 1);
 
     /* shortcut: nearest upsample (PyTorch interpolate), then 1x1 if the widths differ */
     if (b->upsample) {
@@ -319,12 +319,12 @@ int kok_arb_forward(float *out, const float *x, const kok_arb *b, const float *s
             for (int t = 0; t < T; t++) { srow[2 * t] = xrow[t]; srow[2 * t + 1] = xrow[t]; }
         }
         if (b->sc_w)
-            kok_conv1d(out, shc, b->sc_w, NULL, Cin, Cout, T_out, 1, 0, 1);
+            kok_conv1d(out, shc, b->sc_w, NULL, Cin, Cout, T_out, 1, 1, 0, 1);
         else
             memcpy(out, shc, (size_t)Cin * T_out * sizeof(float));
     } else {
         if (b->sc_w)
-            kok_conv1d(out, x, b->sc_w, NULL, Cin, Cout, T, 1, 0, 1);
+            kok_conv1d(out, x, b->sc_w, NULL, Cin, Cout, T, 1, 1, 0, 1);
         else
             memcpy(out, x, (size_t)Cin * T * sizeof(float));
     }

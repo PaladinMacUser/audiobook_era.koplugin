@@ -10,7 +10,7 @@ CC ?= cc
 CFLAGS ?= -O2 -std=c99 -Wall -Wextra -Iinclude
 LDLIBS ?= -lm
 
-SRC = src/kok_meta.c src/kok_kernels.c src/kok_text.c
+SRC = src/kok_meta.c src/kok_kernels.c src/kok_istft.c src/kok_text.c src/kok_dec.c
 BUILD = build
 
 all: $(BUILD)/text_golden_test

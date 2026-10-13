@@ -80,6 +80,31 @@
       834
      ],
      "note": "[2F]"
+    },
+    "src": {
+     "name": "s0_src.bin",
+     "dtype": "<f4",
+     "shape": [
+      1,
+      250200
+     ],
+     "note": "harmonic source, 6 * F * F0S samples"
+    },
+    "wave_pre_lock": {
+     "name": "s0_wave_pre_lock.bin",
+     "dtype": "<f4",
+     "shape": [
+      250200
+     ],
+     "note": "generator output before the phase lock"
+    },
+    "waveform": {
+     "name": "s0_waveform.bin",
+     "dtype": "<f4",
+     "shape": [
+      250200
+     ],
+     "note": "final waveform"
     }
    }
   },
@@ -162,9 +187,33 @@
       482
      ],
      "note": "[2F]"
+    },
+    "src": {
+     "name": "s1_src.bin",
+     "dtype": "<f4",
+     "shape": [
+      1,
+      144600
+     ],
+     "note": "harmonic source, 6 * F * F0S samples"
+    },
+    "wave_pre_lock": {
+     "name": "s1_wave_pre_lock.bin",
+     "dtype": "<f4",
+     "shape": [
+      144600
+     ],
+     "note": "generator output before the phase lock"
+    },
+    "waveform": {
+     "name": "s1_waveform.bin",
+     "dtype": "<f4",
+     "shape": [
+      144600
+     ],
+     "note": "final waveform"
     }
    }
   }
- ],
- "note": "Two sentences are committed as the versioned contract; the full five-sentence set is regenerated with tools/dump_stage_bin.py (see kokoro/README.md)."
+ ]
 }
