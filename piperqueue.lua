@@ -954,6 +954,23 @@ function PiperQueue:_mapSentencesToClauses(side, cleaned_parts, ref)
     return out, bounds
 end
 
+--[[--
+Note which timing source an utterance used, for the bug report.
+@param real boolean  True when the engine's own per-phoneme durations were
+                     used, false when TTSEngine:generateTimingEstimates ran
+                     instead.  Counters live on the engine so the bug report
+                     can read them off plugin.tts_engine.
+--]]
+function PiperQueue:_noteTimingSource(real)
+    local e = self.engine
+    if not e then return end
+    if real then
+        e._piper_timing_real = (e._piper_timing_real or 0) + 1
+    else
+        e._piper_timing_estimated = (e._piper_timing_estimated or 0) + 1
+    end
+end
+
 -- ── Queue management ─────────────────────────────────────────────────
 
 --[[--
@@ -1123,6 +1140,7 @@ function PiperQueue:launchNext()
                         WavUtils.applyFade(combined_audio_file, 15)
                         local real = side and pq:_buildSentenceTiming(
                             side, 1, #side.clauses, 0, side.total, primary_text)
+                        pq:_noteTimingSource(real ~= nil)
                         if real then
                             primary_entry.timing = real
                             logger.warn("PiperQueue: real word timing for",
@@ -1206,6 +1224,7 @@ function PiperQueue:launchNext()
                                     local real = plan and pq:_buildSentenceTiming(
                                         side, plan[i].first, plan[i].last,
                                         plan[i].seg_start, plan[i].seg_end, t)
+                                    pq:_noteTimingSource(real ~= nil)
                                     if real then
                                         e.timing = real
                                         real_count = real_count + 1
@@ -1306,6 +1325,7 @@ function PiperQueue:launchNext()
                     local sside = pq:_parseTimingSidecar(sc)
                     local real = sside and pq:_buildSentenceTiming(
                         sside, 1, #sside.clauses, 0, sside.total, text_to_launch)
+                    pq:_noteTimingSource(real ~= nil)
                     if real then
                         e.timing = real
                     else
@@ -1373,6 +1393,7 @@ function PiperQueue:tryFinalize(text)
             local sside = self:_parseTimingSidecar(sc)
             local real = sside and self:_buildSentenceTiming(
                 sside, 1, #sside.clauses, 0, sside.total, text)
+            self:_noteTimingSource(real ~= nil)
             if real then
                 entry.timing = real
             else

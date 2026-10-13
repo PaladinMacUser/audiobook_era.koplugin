@@ -109,6 +109,18 @@ ok(PiperQueue:_mapSentencesToClauses(side, { "unrelated text", "more" }, ref) ==
 ok(PiperQueue:_mapSentencesToClauses(side, { "Hello," }, "Hello,") == nil,
     "rejects parts that leave later clauses unclaimed")
 
+-- 7. Timing-source counters, which the bug report reads.
+local fake_engine = {}
+local fake_queue = setmetatable({ engine = fake_engine }, { __index = PiperQueue })
+fake_queue:_noteTimingSource(true)
+fake_queue:_noteTimingSource(true)
+fake_queue:_noteTimingSource(false)
+ok(fake_engine._piper_timing_real == 2, "counts real-timing utterances")
+ok(fake_engine._piper_timing_estimated == 1, "counts estimated utterances")
+local pct = math.floor(100 * fake_engine._piper_timing_real
+    / (fake_engine._piper_timing_real + fake_engine._piper_timing_estimated) + 0.5)
+ok(pct == 67, "percentage the bug report prints, got " .. tostring(pct))
+
 os.execute("rm -rf " .. tmp)
 
 if #failures == 0 then

@@ -203,6 +203,22 @@ local function collectPluginInfo(plugin)
         info.audio_player_cached = engine._cached_player or "not set"
         info.no_real_audio_output = engine._no_real_audio_output and "yes" or "no"
 
+        -- Word timing source, counted over utterances served by the piper /
+        -- sanoTTS queue. The pq8 and f32 engines report their own per-phoneme
+        -- durations in a sidecar next to each WAV; every other backend, and
+        -- any sentence whose spoken word count does not reconcile, falls back
+        -- to TTSEngine:generateTimingEstimates. On a "the highlight lags"
+        -- report this says which of the two the reader was seeing. Zero and
+        -- zero means the queue never ran (espeak, Piper or Android backend).
+        local t_real = engine._piper_timing_real or 0
+        local t_est = engine._piper_timing_estimated or 0
+        info.piper_timing_real = tostring(t_real)
+        info.piper_timing_estimated = tostring(t_est)
+        if t_real + t_est > 0 then
+            info.piper_timing_real_pct = string.format("%d%%",
+                math.floor(100 * t_real / (t_real + t_est) + 0.5))
+        end
+
         -- Android bridge state: on Android every CLI probe fails by design,
         -- so the bundled-binary fields alone make a working setup look
         -- broken (issue #44).  Report the JNI bridge explicitly.
