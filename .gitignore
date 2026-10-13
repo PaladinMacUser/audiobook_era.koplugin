@@ -39,11 +39,14 @@ zipfile
 EOF
 
 # i18n tooling caches
-tools/__pycache__/
 tools/_msgids.json
 tools/_mt_cache.json
 tools/_missing.json
-tools/*.pyc
+
+# Python caches (any directory, not just tools/ and kokoro/tools/)
+__pycache__/
+*.pyc
+*.pyo
 
 # Local working artifacts
 koreader-src/
