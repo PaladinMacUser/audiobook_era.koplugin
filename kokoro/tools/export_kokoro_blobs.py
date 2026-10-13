@@ -97,7 +97,9 @@ def require(tensors, name, shape):
 # Budgets kept in fp32 even when quantising: everything 1-D (norms, biases,
 # Snake alpha, style vectors) plus the small heads the plan calls out. They are
 # negligible in size and the most sensitive numerically.
-FP32_KEEP = ("duration_proj", "F0_proj", "N_proj", "m_source", "style")
+FP32_KEEP = ("duration_proj", "F0_proj", "N_proj", "m_source", "style",
+             "norm1.", "norm2.", "ada", "lstms.", "predictor.F0.", "predictor.N.",
+             "embedding", "lstm", "shared", "alpha")
 
 
 def quantize_int8(arr, per_row):
@@ -124,7 +126,7 @@ def build_slots(tensors, blob_id, int8=False):
     extra_names = []
     for i, name in enumerate(names):
         arr = np.ascontiguousarray(tensors[name], dtype=np.float32)
-        keep = (not int8 or name.startswith(FP32_KEEP) or arr.ndim < 2)
+        keep = (not int8 or arr.ndim < 2 or any(k in name for k in FP32_KEEP))
         # ConvTranspose1d weights are [in, out, k], so "dim 0" is not the output
         # channel; those get one scale for the whole tensor instead.
         convtr = (name.endswith(".weight") and arr.ndim == 3 and "ups." in name)

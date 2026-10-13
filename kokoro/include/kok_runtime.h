@@ -26,28 +26,33 @@ typedef struct {
 typedef struct {
     /* ALBERT: one shared layer applied albert_layers times */
     const float *word_emb, *pos_emb, *tok_emb, *emb_ln_w, *emb_ln_b;
-    const float *map_w, *map_b;
-    const float *q_w, *q_b, *k_w, *k_b, *v_w, *v_b;
-    const float *dense_w, *dense_b, *att_ln_w, *att_ln_b;
-    const float *ffn_w, *ffn_b, *ffn_out_w, *ffn_out_b, *full_ln_w, *full_ln_b;
+    kok_w map_w;
+    const float *map_b;
+    kok_w q_w, k_w, v_w, dense_w, ffn_w, ffn_out_w;
+    const float *q_b, *k_b, *v_b, *dense_b, *ffn_b, *ffn_out_b;
+    const float *att_ln_w, *att_ln_b, *full_ln_w, *full_ln_b;
     /* BERT -> prosody projection */
-    const float *be_w, *be_b;
+    kok_w be_w;
+    const float *be_b;
     /* duration encoder: alternating biLSTM and AdaLayerNorm */
     int de_layers;
     struct { kok_bilstm_w lstm; kok_adaln_w adaln; } de[KOK_MAX_BLOCKS];
     /* prosody predictor */
     kok_bilstm_w pros_lstm, pros_shared;
-    const float *dur_w, *dur_b;
+    kok_w dur_w;
+    const float *dur_b;
     kok_arb f0_blk[3], n_blk[3];
-    const float *f0_proj_w, *f0_proj_b, *n_proj_w, *n_proj_b;
+    kok_w f0_proj_w, n_proj_w;
+    const float *f0_proj_b, *n_proj_b;
     const float *style_text;
     /* text encoder */
     const float *te_emb;
     int te_depth;
-    struct { const float *w, *b, *ln_w, *ln_b; } te_cnn[KOK_MAX_BLOCKS];
+    struct { kok_w w; const float *b, *ln_w, *ln_b; } te_cnn[KOK_MAX_BLOCKS];
     kok_bilstm_w te_lstm;
     /* asr projection: Linear -> GELU -> Linear */
-    const float *ap0_w, *ap0_b, *ap2_w, *ap2_b;
+    kok_w ap0_w, ap2_w;
+    const float *ap0_b, *ap2_b;
 } kok_text_w;
 
 typedef struct {
@@ -68,16 +73,18 @@ typedef struct {
 typedef struct {
     kok_arb encode;                 /* (asr_dim + 2) -> width */
     kok_arb decode[4];              /* the last one upsampling */
-    const float *f0_conv_w, *f0_conv_b, *n_conv_w, *n_conv_b;
-    const float *asr_res_w, *asr_res_b;
+    kok_w f0_conv_w, n_conv_w, asr_res_w;
+    const float *f0_conv_b, *n_conv_b, *asr_res_b;
     const float *style;
     /* generator */
     kok_res1 noise_res[2];
     kok_res1 resblocks[6];
-    const float *ups_w[2], *ups_b[2];
-    const float *noise_w[2], *noise_b[2];
-    const float *conv_post_w, *conv_post_b;
-    const float *src_w, *src_b;      /* the harmonic source's l_linear */
+    kok_w ups_w[2], noise_w[2];
+    const float *ups_b[2], *noise_b[2];
+    kok_w conv_post_w;
+    const float *conv_post_b;
+    kok_w src_w;                     /* the harmonic source's l_linear, kept fp32 */
+    const float *src_b;
     /* dims */
     int width, uic, kernels[3], uprate[2], upkern[2], istft_n, istft_hop, style_dim;
     int asr_dim;

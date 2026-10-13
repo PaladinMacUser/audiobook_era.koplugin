@@ -117,7 +117,7 @@ const kok_slot *kok_find_blob(const kok_meta *m, const char *name, int blob_id,
         if ((int)rd_i32(m->slots_raw + (size_t)i * 36 + 4) != blob_id) continue;
         if (!name_eq(m, ni, name)) continue;
         slot_at(m, i, &scratch);
-        if (scratch.count != count) { if (rc) *rc = -9; return NULL; }
+        if (count >= 0 && scratch.count != count) { if (rc) *rc = -9; return NULL; }
         if (rc) *rc = 0;
         return &scratch;
     }

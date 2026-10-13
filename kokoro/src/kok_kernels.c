@@ -24,74 +24,65 @@ void kok_arena_reset(kok_arena *a) { a->top = 0; }
 size_t kok_arena_peak(const kok_arena *a) { return a->top; }
 
 /* ---- linear algebra ---- */
-void kok_conv1d(float *restrict out, const float *restrict x, const float *restrict w,
-                const float *restrict b,
-                int Cin, int Cout, int T, int K, int stride, int pad, int dil) {
+void kok_conv1d(float *restrict out, const float *restrict x, const kok_w *restrict w,
+                const float *restrict b, int Cin, int Cout, int T, int K,
+                int stride, int pad, int dil) {
     int Tp = (T + 2 * pad - dil * (K - 1) - 1) / stride + 1;
+    const int quant = w->q != NULL;
     for (int o = 0; o < Cout; o++) {
         float *orow = out + (size_t)o * Tp;
         float bias = b ? b[o] : 0.0f;
-        for (int t = 0; t < Tp; t++) orow[t] = bias;
-        const float *wrow = w + (size_t)o * Cin * K;
-        /* For each tap the inputs that land on valid outputs form one
-         * contiguous run of output indices, so the inner loop is branch-free:
-         * the guard is hoisted out of it. The input index walks with stride,
-         * which is also what lets the compiler vectorise. */
+        float wscale = quant ? (w->per_row ? w->scale[o] : w->scale[0]) : 1.0f;
+        for (int t = 0; t < Tp; t++) orow[t] = quant ? 0.0f : bias;
         for (int c = 0; c < Cin; c++) {
             const float *xrow = x + (size_t)c * T;
-            const float *wc = wrow + (size_t)c * K;
             for (int k = 0; k < K; k++) {
-                float wv = wc[k];
+                size_t wi = ((size_t)o * Cin + c) * K + k;
+                float wv = quant ? (float)w->q[wi] : w->f[wi];
                 if (wv == 0.0f) continue;
-                int off = k * dil - pad;                  /* ti = t*stride + off */
+                /* The inputs that land on valid outputs form one contiguous run
+                 * of output indices, so the guard is hoisted out of the inner
+                 * loop. Unrolled by four where the taps are contiguous (stride
+                 * 1: every resblock and AdainResBlk1d convolution), in plain
+                 * arithmetic so the host gate tests what the device runs. */
+                int off = k * dil - pad;
                 int t_lo = off >= 0 ? 0 : ((-off + stride - 1) / stride);
                 int t_hi = Tp;
                 if (off + (long)(Tp - 1) * stride >= T) {
-                    /* last t whose ti is still < T */
                     int max_ti = T - 1 - off;
                     t_hi = max_ti / stride + 1;
                     if (t_hi > Tp) t_hi = Tp;
                 }
-                {
-                    int ti = off + t_lo * stride;
-                    int t = t_lo;
-                    /* Unroll by four where the taps are contiguous (stride 1:
-                     * every resblock and AdainResBlk1d convolution). Plain
-                     * arithmetic rather than intrinsics so the host gate tests
-                     * the same code the device runs, and so gcc can vectorise
-                     * it. A hand-written NEON version of this loop was 1.9x
-                     * faster on the device but carried index arithmetic the
-                     * host never exercised, and it silently broke the audio. */
-                    if (stride == 1) {
-                        for (; t + 4 <= t_hi; t += 4, ti += 4) {
-                            orow[t] += wv * xrow[ti];
-                            orow[t + 1] += wv * xrow[ti + 1];
-                            orow[t + 2] += wv * xrow[ti + 2];
-                            orow[t + 3] += wv * xrow[ti + 3];
-                        }
-                    }
-                    for (; t < t_hi; t++, ti += stride)
+                int ti = off + t_lo * stride;
+                int t = t_lo;
+                if (stride == 1) {
+                    for (; t + 4 <= t_hi; t += 4, ti += 4) {
                         orow[t] += wv * xrow[ti];
+                        orow[t + 1] += wv * xrow[ti + 1];
+                        orow[t + 2] += wv * xrow[ti + 2];
+                        orow[t + 3] += wv * xrow[ti + 3];
+                    }
                 }
+                for (; t < t_hi; t++, ti += stride) orow[t] += wv * xrow[ti];
             }
         }
+        if (quant)
+            for (int t = 0; t < Tp; t++) orow[t] = orow[t] * wscale + bias;
     }
 }
 
 void kok_convtr1d(float *restrict out, const float *restrict x,
-                  const float *restrict w, const float *restrict b,
+                  const kok_w *restrict w, const float *restrict b,
                   int Cin, int Cout, int T, int K, int stride, int pad,
                   int out_pad, int groups) {
     int Tp = (T - 1) * stride - 2 * pad + K + out_pad;
     int cig = Cin / groups, cog = Cout / groups;
+    const int quant = w->q != NULL;
     for (int o = 0; o < Cout; o++) {
         float bias = b ? b[o] : 0.0f;
         float *orow = out + (size_t)o * Tp;
-        for (int t = 0; t < Tp; t++) orow[t] = bias;
+        for (int t = 0; t < Tp; t++) orow[t] = quant ? 0.0f : bias;
     }
-    /* Scatter form, but with the tap loop outside the time loop and the valid
-     * output range hoisted: to = t*stride + off, so for a fixed tap the
-     * contributing inputs are one contiguous run of t with no branch inside. */
     for (int g = 0; g < groups; g++) {
         for (int ci = 0; ci < cig; ci++) {
             const float *xrow = x + (size_t)(g * cig + ci) * T;
@@ -106,7 +97,8 @@ void kok_convtr1d(float *restrict out, const float *restrict x,
                 }
                 if (t_lo >= t_hi) continue;
                 for (int co = 0; co < cog; co++) {
-                    float wv = w[((size_t)(g * cig + ci) * cog + co) * K + k];
+                    size_t wi = ((size_t)(g * cig + ci) * cog + co) * K + k;
+                    float wv = quant ? (float)w->q[wi] : w->f[wi];
                     if (wv == 0.0f) continue;
                     float *orow = out + (size_t)(g * cog + co) * Tp + off + t_lo * stride;
                     const float *xin = xrow + t_lo;
@@ -116,18 +108,25 @@ void kok_convtr1d(float *restrict out, const float *restrict x,
             }
         }
     }
+    if (quant)
+        for (int o = 0; o < Cout; o++) {
+            float bias = b ? b[o] : 0.0f;
+            float oscale = w->per_row ? w->scale[o] : w->scale[0];
+            float *orow = out + (size_t)o * Tp;
+            for (int t = 0; t < Tp; t++) orow[t] = orow[t] * oscale + bias;
+        }
 }
 
-void kok_linear(float *restrict out, const float *restrict x, const float *restrict w,
-                const float *restrict b,
-                int Cin, int Cout, int T) {
+void kok_linear(float *restrict out, const float *restrict x, const kok_w *restrict w,
+                const float *restrict b, int Cin, int Cout, int T) {
+    const int quant = w->q != NULL;
     for (int o = 0; o < Cout; o++) {
-        const float *wrow = w + (size_t)o * Cin;
         float bias = b ? b[o] : 0.0f;
+        float wscale = quant ? (w->per_row ? w->scale[o] : w->scale[0]) : 1.0f;
         float *orow = out + (size_t)o * T;
-        for (int t = 0; t < T; t++) orow[t] = bias;
+        for (int t = 0; t < T; t++) orow[t] = quant ? 0.0f : bias;
         for (int c = 0; c < Cin; c++) {
-            float wv = wrow[c];
+            float wv = quant ? (float)w->q[(size_t)o * Cin + c] : w->f[(size_t)o * Cin + c];
             if (wv == 0.0f) continue;
             const float *xrow = x + (size_t)c * T;
             int t = 0;
@@ -139,6 +138,8 @@ void kok_linear(float *restrict out, const float *restrict x, const float *restr
             }
             for (; t < T; t++) orow[t] += wv * xrow[t];
         }
+        if (quant)
+            for (int t = 0; t < T; t++) orow[t] = orow[t] * wscale + bias;
     }
 }
 
@@ -356,16 +357,16 @@ int kok_arb_forward(float *out, const float *x, const kok_arb *b, const float *s
     if (b->upsample) {
         float *up = kok_arena_alloc(a, (size_t)Cin * T_out);
         if (!up) return -1;
-        kok_convtr1d(up, buf, b->pool_w, b->pool_b, Cin, Cin, T, 3, 2, 1, 1, Cin);
-        kok_conv1d(res, up, b->c1_w, b->c1_b, Cin, Cout, T_out, 3, 1, 1, 1);
+        kok_convtr1d(up, buf, &b->pool_w, b->pool_b, Cin, Cin, T, 3, 2, 1, 1, Cin);
+        kok_conv1d(res, up, &b->c1_w, b->c1_b, Cin, Cout, T_out, 3, 1, 1, 1);
     } else {
-        kok_conv1d(res, buf, b->c1_w, b->c1_b, Cin, Cout, T, 3, 1, 1, 1);
+        kok_conv1d(res, buf, &b->c1_w, b->c1_b, Cin, Cout, T, 3, 1, 1, 1);
     }
     /* AdaIN -> leaky -> conv2 */
     kok_adain1d(buf, res, Cout, T_out, s, style_dim, b->n2_fc_w, b->n2_fc_b,
                 b->n2_norm_w, b->n2_norm_b, 1e-5f);
     kok_leaky_relu(buf, (long)Cout * T_out, 0.2f);
-    kok_conv1d(res, buf, b->c2_w, b->c2_b, Cout, Cout, T_out, 3, 1, 1, 1);
+    kok_conv1d(res, buf, &b->c2_w, b->c2_b, Cout, Cout, T_out, 3, 1, 1, 1);
 
     /* shortcut: nearest upsample (PyTorch interpolate), then 1x1 if the widths differ */
     if (b->upsample) {
@@ -374,13 +375,13 @@ int kok_arb_forward(float *out, const float *x, const kok_arb *b, const float *s
             float *srow = shc + (size_t)c * T_out;
             for (int t = 0; t < T; t++) { srow[2 * t] = xrow[t]; srow[2 * t + 1] = xrow[t]; }
         }
-        if (b->sc_w)
-            kok_conv1d(out, shc, b->sc_w, NULL, Cin, Cout, T_out, 1, 1, 0, 1);
+        if (b->sc_w.f || b->sc_w.q)
+            kok_conv1d(out, shc, &b->sc_w, NULL, Cin, Cout, T_out, 1, 1, 0, 1);
         else
             memcpy(out, shc, (size_t)Cin * T_out * sizeof(float));
     } else {
-        if (b->sc_w)
-            kok_conv1d(out, x, b->sc_w, NULL, Cin, Cout, T, 1, 1, 0, 1);
+        if (b->sc_w.f || b->sc_w.q)
+            kok_conv1d(out, x, &b->sc_w, NULL, Cin, Cout, T, 1, 1, 0, 1);
         else
             memcpy(out, x, (size_t)Cin * T * sizeof(float));
     }

@@ -12,6 +12,7 @@
 #define KOK_KERNELS_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct {
     float *base;
@@ -24,14 +25,29 @@ void *kok_arena_alloc(kok_arena *a, size_t floats);   /* NULL when exhausted */
 void kok_arena_reset(kok_arena *a);
 size_t kok_arena_peak(const kok_arena *a);
 
+/* A weight tensor in either precision: fp32, or per-output-channel symmetric
+ * int8 with its scales. The int8 form carries one scale per output channel
+ * (per_row) or a single one for the whole tensor (ConvTranspose1d, whose dim 0
+ * is the input channel). The kernels branch once per call, not per tap, and the
+ * int8 path applies the row's scale to the accumulated output row at the end,
+ * which is what weight-only quantisation means: no activation quantisation. */
+typedef struct {
+    const float *f;      /* fp32 weights, NULL when quantised */
+    const int8_t *q;     /* int8 weights, NULL when fp32 */
+    const float *scale;  /* per-row when per_row, else a single value */
+    int per_row;
+} kok_w;
+
 /* ---- linear algebra ---- */
-void kok_conv1d(float *out, const float *x, const float *w, const float *b,
-                int Cin, int Cout, int T, int K, int stride, int pad, int dil);
-void kok_convtr1d(float *out, const float *x, const float *w, const float *b,
+void kok_conv1d(float *restrict out, const float *restrict x, const kok_w *restrict w,
+                const float *restrict b, int Cin, int Cout, int T, int K,
+                int stride, int pad, int dil);
+void kok_convtr1d(float *restrict out, const float *restrict x,
+                  const kok_w *restrict w, const float *restrict b,
                   int Cin, int Cout, int T, int K, int stride, int pad,
                   int out_pad, int groups);
-void kok_linear(float *out, const float *x, const float *w, const float *b,
-                int Cin, int Cout, int T);
+void kok_linear(float *restrict out, const float *restrict x, const kok_w *restrict w,
+                const float *restrict b, int Cin, int Cout, int T);
 
 /* ---- normalisation ---- */
 void kok_layer_norm(float *x, const float *gamma, const float *beta,
@@ -74,9 +90,11 @@ int kok_bilstm(float *out, const float *x, int Cin, int T, int H,
 typedef struct {
     const float *n1_fc_w, *n1_fc_b, *n1_norm_w, *n1_norm_b;
     const float *n2_fc_w, *n2_fc_b, *n2_norm_w, *n2_norm_b;
-    const float *c1_w, *c1_b, *c2_w, *c2_b;
-    const float *sc_w;              /* NULL when dim_in == dim_out */
-    const float *pool_w, *pool_b;   /* NULL unless upsampling */
+    kok_w c1_w, c2_w;
+    const float *c1_b, *c2_b;
+    kok_w sc_w;                     /* f == NULL when dim_in == dim_out */
+    kok_w pool_w;                   /* f == NULL unless upsampling */
+    const float *pool_b;
     int dim_in, dim_out, upsample;
 } kok_arb;
 
@@ -117,7 +135,8 @@ typedef struct {
  * residual outside. */
 typedef struct {
     kok_adain_w a1[3], a2[3];
-    const float *c1w[3], *c1b[3], *c2w[3], *c2b[3];
+    kok_w c1w[3], c2w[3];
+    const float *c1b[3], *c2b[3];
     const float *alpha1[3], *alpha2[3];
     int channels, kernel;
 } kok_res1;

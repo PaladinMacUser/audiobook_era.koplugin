@@ -71,6 +71,7 @@ static int write_wav(const char *path, const float *pcm, long n, int rate) {
 int main(int argc, char **argv) {
     const char *meta_p = NULL, *text_p = NULL, *dec_p = NULL;
     const char *ids_p = NULL, *out_p = "out.wav";
+    const char *src_p = NULL;   /* optional fixed harmonic source, for A/B */
     unsigned long long seed = 1234;
     double arena_mb = 128.0;
     int quiet = 0;
@@ -80,6 +81,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--dec")) dec_p = argv[++i];
         else if (!strcmp(argv[i], "--ids")) ids_p = argv[++i];
         else if (!strcmp(argv[i], "--out")) out_p = argv[++i];
+        else if (!strcmp(argv[i], "--src")) src_p = argv[++i];
         else if (!strcmp(argv[i], "--seed")) seed = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--arena-mb")) arena_mb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
@@ -136,11 +138,20 @@ int main(int argc, char **argv) {
     double t_text = now_s() - t_a;
 
     long src_len = kok_dec_source_floats(&mo, (int)F);
+    float *src_fixed = NULL;
+    if (src_p) {
+        size_t sn = 0;
+        src_fixed = xload(src_p, &sn);
+        if (!src_fixed || sn != (size_t)src_len * sizeof(float)) {
+            fprintf(stderr, "kok_tts: --src must be %ld float32\n", src_len);
+            return 2;
+        }
+    }
     float *wav = malloc((size_t)src_len * 2 * sizeof(float));
     if (!wav) { fprintf(stderr, "kok_tts: no memory for the waveform\n"); return 2; }
     double t_b = now_s();
     long wlen = 0;
-    rc = kok_dec_forward(&mo, out.asr, (int)F, out.f0, out.nz, NULL, (uint64_t)seed,
+    rc = kok_dec_forward(&mo, out.asr, (int)F, out.f0, out.nz, src_fixed, (uint64_t)seed,
                          wav, &wlen, NULL, &arena);
     if (rc) { fprintf(stderr, "kok_tts: decoder rc %d\n", rc); return 2; }
     double t_dec = now_s() - t_b;

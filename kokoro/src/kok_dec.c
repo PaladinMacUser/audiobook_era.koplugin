@@ -16,6 +16,37 @@
 #include "kok_fft.h"
 #include "kok_runtime.h"
 
+/* DBINDW: as DBIND, but the destination is a kok_w and may be int8, with its
+ * companion <name>.scale slot resolved alongside (blob 1: the decoder). */
+#define DBINDW(dst, name, want)                                                 \
+    do {                                                                        \
+        int rc_ = 0;                                                            \
+        const kok_slot *sl_ = kok_find_blob(m, name, 1, (want), &rc_);          \
+        if (!sl_) {                                                             \
+            fprintf(stderr, "dec bind: %s (want %ld) rc %d\n", name,              \
+                    (long)(want), rc_);                                         \
+            return rc_;                                                         \
+        }                                                                       \
+        if (sl_->dtype == KOK_DT_I8) {                                          \
+            char sn_[300];                                                      \
+            (dst).q = (const int8_t *)(const void *)((const unsigned char *)blob + sl_->offset); \
+            (dst).f = NULL;                                                     \
+            snprintf(sn_, sizeof sn_, "%s.scale", name);                        \
+            int rc2_ = 0;                                                       \
+            const kok_slot *ss_ = kok_find_blob(m, sn_, 1, -1, &rc2_);          \
+            if (!ss_) { fprintf(stderr, "dec bind: %s missing\n", sn_); return -11; } \
+            (dst).scale = kok_f32(ss_, blob);                                    \
+            (dst).per_row = ss_->count > 1;                                     \
+            if (!(dst).scale) return -10;                                       \
+        } else {                                                                \
+            (dst).f = kok_f32(sl_, blob);                                       \
+            (dst).q = NULL;                                                     \
+            (dst).scale = NULL;                                                 \
+            (dst).per_row = 0;                                                  \
+            if (!(dst).f) return -10;                                           \
+        }                                                                       \
+    } while (0)
+
 #define DBIND(dst, name, count)                                                 \
     do {                                                                        \
         int rc_ = 0;                                                            \
@@ -56,11 +87,11 @@ static int bind_res1(kok_res1 *b, const kok_meta *m, const void *blob, const cha
         rc = bind_adainw(&b->a2[i], m, blob, name, channels, 16);
         if (rc) return rc;
         snprintf(name, sizeof name, "%s.convs1.%d.weight", prefix, i);
-        DBIND(b->c1w[i], name, (long)channels * channels * kernel);
+        DBINDW(b->c1w[i], name, (long)channels * channels * kernel);
         snprintf(name, sizeof name, "%s.convs1.%d.bias", prefix, i);
         DBIND(b->c1b[i], name, channels);
         snprintf(name, sizeof name, "%s.convs2.%d.weight", prefix, i);
-        DBIND(b->c2w[i], name, (long)channels * channels * kernel);
+        DBINDW(b->c2w[i], name, (long)channels * channels * kernel);
         snprintf(name, sizeof name, "%s.convs2.%d.bias", prefix, i);
         DBIND(b->c2b[i], name, channels);
         snprintf(name, sizeof name, "%s.alpha1.%d", prefix, i);
@@ -104,14 +135,14 @@ int kok_dec_w_bind(kok_dec_w *dw, const kok_meta *m, const void *blob) {
         rc = kok_bind_arb(&dw->decode[i], m, blob, 1, name, din, dout, i == 3, sd);
         if (rc) return rc;
     }
-    DBIND(dw->f0_conv_w, "F0_conv.weight", 3);
+    DBINDW(dw->f0_conv_w, "F0_conv.weight", 3);
     DBIND(dw->f0_conv_b, "F0_conv.bias", 1);
-    DBIND(dw->n_conv_w, "N_conv.weight", 3);
+    DBINDW(dw->n_conv_w, "N_conv.weight", 3);
     DBIND(dw->n_conv_b, "N_conv.bias", 1);
-    DBIND(dw->asr_res_w, "asr_res.0.weight", 64L * asr);
+    DBINDW(dw->asr_res_w, "asr_res.0.weight", 64L * asr);
     DBIND(dw->asr_res_b, "asr_res.0.bias", 64);
     DBIND(dw->style, "style", sd);
-    DBIND(dw->src_w, "generator.m_source.l_linear.weight", c->v[KOK_D_GEN_HARMONICS]);
+    DBINDW(dw->src_w, "generator.m_source.l_linear.weight", c->v[KOK_D_GEN_HARMONICS]);
     DBIND(dw->src_b, "generator.m_source.l_linear.bias", 1);
 
     for (int i = 0; i < 2; i++) {
@@ -119,16 +150,16 @@ int kok_dec_w_bind(kok_dec_w *dw, const kok_meta *m, const void *blob) {
         rc = bind_res1(&dw->noise_res[i], m, blob, name, uic >> (i + 1), i == 0 ? 7 : 11);
         if (rc) return rc;
         snprintf(name, sizeof name, "generator.ups.%d.weight", i);
-        DBIND(dw->ups_w[i], name, (long)(uic >> i) * (uic >> (i + 1)) * dw->upkern[i]);
+        DBINDW(dw->ups_w[i], name, (long)(uic >> i) * (uic >> (i + 1)) * dw->upkern[i]);
         snprintf(name, sizeof name, "generator.ups.%d.bias", i);
         DBIND(dw->ups_b[i], name, uic >> (i + 1));
         if (i == 0) {
             int stride = dw->uprate[1];
-            DBIND(dw->noise_w[i], "generator.noise_convs.0.weight",
+            DBINDW(dw->noise_w[i], "generator.noise_convs.0.weight",
                   (long)(uic >> 1) * (c->v[KOK_D_DEC_ISTFT_NFFT] + 2) * (stride * 2));
             DBIND(dw->noise_b[i], "generator.noise_convs.0.bias", uic >> 1);
         } else {
-            DBIND(dw->noise_w[i], "generator.noise_convs.1.weight",
+            DBINDW(dw->noise_w[i], "generator.noise_convs.1.weight",
                   (long)(uic >> 2) * (c->v[KOK_D_DEC_ISTFT_NFFT] + 2));
             DBIND(dw->noise_b[i], "generator.noise_convs.1.bias", uic >> 2);
         }
@@ -141,7 +172,7 @@ int kok_dec_w_bind(kok_dec_w *dw, const kok_meta *m, const void *blob) {
             if (rc) return rc;
         }
     }
-    DBIND(dw->conv_post_w, "generator.conv_post.weight",
+    DBINDW(dw->conv_post_w, "generator.conv_post.weight",
           (long)(c->v[KOK_D_DEC_ISTFT_NFFT] + 2) * (uic >> 2) * 7);
     DBIND(dw->conv_post_b, "generator.conv_post.bias", c->v[KOK_D_DEC_ISTFT_NFFT] + 2);
     return 0;
@@ -325,12 +356,12 @@ int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f
     float *asr_res = kok_arena_alloc(a, 64L * F);
     if (!F0 || !Nn || !x || !asr_res) return -1;
     /* stride 2, kernel 3, pad 1: the F0/N conditioning rate halves */
-    kok_conv1d(F0, f0, dw->f0_conv_w, dw->f0_conv_b, 1, 1, 2 * F, 3, 2, 1, 1);
-    kok_conv1d(Nn, nz, dw->n_conv_w, dw->n_conv_b, 1, 1, 2 * F, 3, 2, 1, 1);
+    kok_conv1d(F0, f0, &dw->f0_conv_w, dw->f0_conv_b, 1, 1, 2 * F, 3, 2, 1, 1);
+    kok_conv1d(Nn, nz, &dw->n_conv_w, dw->n_conv_b, 1, 1, 2 * F, 3, 2, 1, 1);
     memcpy(x, asr, (size_t)asr_dim * F * sizeof(float));
     memcpy(x + (size_t)asr_dim * F, F0, (size_t)F * sizeof(float));
     memcpy(x + (size_t)(asr_dim + 1) * F, Nn, (size_t)F * sizeof(float));
-    kok_conv1d(asr_res, asr, dw->asr_res_w, dw->asr_res_b, asr_dim, 64, F, 1, 1, 0, 1);
+    kok_conv1d(asr_res, asr, &dw->asr_res_w, dw->asr_res_b, asr_dim, 64, F, 1, 1, 0, 1);
 
     /* the width of the cat buffer down here grows to width+2+64, then halves */
     float *big = kok_arena_alloc(a, (size_t)(asr_dim + 2 + width + 64) * 2 * F);
@@ -476,11 +507,11 @@ int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f
             kok_leaky_relu(cur, (long)cur_ch * cur_len, 0.1f);
             if (i == 0) {
                 int stride = dw->uprate[1];
-                kok_conv1d(nsrc, har, dw->noise_w[i], dw->noise_b[i], nfft + 2, out_ch,
+                kok_conv1d(nsrc, har, &dw->noise_w[i], dw->noise_b[i], nfft + 2, out_ch,
                            hframes, stride * 2, stride, (stride + 1) / 2, 1);
                 hb = (hframes + 2 * ((stride + 1) / 2) - stride * 2) / stride + 1;
             } else {
-                kok_conv1d(nsrc, har, dw->noise_w[i], dw->noise_b[i], nfft + 2, out_ch,
+                kok_conv1d(nsrc, har, &dw->noise_w[i], dw->noise_b[i], nfft + 2, out_ch,
                            hframes, 1, 1, 0, 1);
                 hb = hframes;
             }
@@ -506,7 +537,7 @@ int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f
 #endif
             upd = (cur_len - 1) * dw->uprate[i] - 2 * ((dw->upkern[i] - dw->uprate[i]) / 2)
                   + dw->upkern[i];
-            kok_convtr1d(ups, cur, dw->ups_w[i], dw->ups_b[i], cur_ch, out_ch, cur_len,
+            kok_convtr1d(ups, cur, &dw->ups_w[i], dw->ups_b[i], cur_ch, out_ch, cur_len,
                          dw->upkern[i], dw->uprate[i], (dw->upkern[i] - dw->uprate[i]) / 2, 0, 1);
 #ifdef KOK_DUMP_STAGES
             {
@@ -575,7 +606,7 @@ int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f
     float *post = kok_arena_alloc(a, (size_t)(nfft + 2) * cur_len);
     if (!post) return -1;
     kok_leaky_relu(cur, (long)cur_ch * cur_len, 0.01f);
-    kok_conv1d(post, cur, dw->conv_post_w, dw->conv_post_b, cur_ch, nfft + 2, cur_len, 7, 1, 3, 1);
+    kok_conv1d(post, cur, &dw->conv_post_w, dw->conv_post_b, cur_ch, nfft + 2, cur_len, 7, 1, 3, 1);
 #ifdef KOK_DEBUG_STAGES
     {
         double mm = 0.0, mp = 0.0;

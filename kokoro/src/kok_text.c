@@ -29,6 +29,63 @@
         if (!(dst)) return -10;                                                 \
     } while (0)
 
+/* BINDW: a weight tensor that may be int8, filling a kok_w. The companion
+ * <name>.scale slot is resolved alongside it; per_row is set when that slot
+ * holds one scale per output channel. */
+#define BINDW(dst, name, want)                                                 \
+    do {                                                                        \
+        int rc_ = 0;                                                            \
+        const kok_slot *sl_ = kok_find_blob(m, name, 0, (want), &rc_);         \
+        if (!sl_) {                                                             \
+            fprintf(stderr, "bind: %s (want %ld) rc %d\n", name, (long)(want), rc_); \
+            return rc_;                                                         \
+        }                                                                       \
+        if (sl_->dtype == KOK_DT_I8) {                                          \
+            char sn_[300];                                                      \
+            (dst).q = (const int8_t *)(const void *)((const unsigned char *)blob + sl_->offset); \
+            (dst).f = NULL;                                                     \
+            snprintf(sn_, sizeof sn_, "%s.scale", name);                        \
+            int rc2_ = 0;                                                       \
+            const kok_slot *ss_ = kok_find_blob(m, sn_, 0, -1, &rc2_);          \
+            if (!ss_) { fprintf(stderr, "bind: %s missing\n", sn_); return -11; } \
+            (dst).scale = kok_f32(ss_, blob);                                    \
+            (dst).per_row = ss_->count > 1;                                     \
+            if (!(dst).scale) return -10;                                       \
+        } else {                                                                \
+            (dst).f = kok_f32(sl_, blob);                                       \
+            (dst).q = NULL;                                                     \
+            (dst).scale = NULL;                                                 \
+            (dst).per_row = 0;                                                  \
+            if (!(dst).f) return -10;                                           \
+        }                                                                       \
+    } while (0)
+
+/* the same for the shared AdainResBlk1d binder, which serves both blobs */
+#define ARBBINDW(dst, name, want)                                              \
+    do {                                                                        \
+        int rc_ = 0;                                                            \
+        const kok_slot *sl_ = kok_find_blob(m, name, blob_id, (want), &rc_);   \
+        if (!sl_) { fprintf(stderr, "bind: %s rc %d\n", name, rc_); return rc_; } \
+        if (sl_->dtype == KOK_DT_I8) {                                          \
+            char sn_[300];                                                      \
+            (dst).q = (const int8_t *)(const void *)((const unsigned char *)blob + sl_->offset); \
+            (dst).f = NULL;                                                     \
+            snprintf(sn_, sizeof sn_, "%s.scale", name);                        \
+            int rc2_ = 0;                                                       \
+            const kok_slot *ss_ = kok_find_blob(m, sn_, blob_id, -1, &rc2_);    \
+            if (!ss_) return -11;                                               \
+            (dst).scale = kok_f32(ss_, blob);                                    \
+            (dst).per_row = ss_->count > 1;                                     \
+            if (!(dst).scale) return -10;                                       \
+        } else {                                                                \
+            (dst).f = kok_f32(sl_, blob);                                       \
+            (dst).q = NULL;                                                     \
+            (dst).scale = NULL;                                                 \
+            (dst).per_row = 0;                                                  \
+            if (!(dst).f) return -10;                                           \
+        }                                                                       \
+    } while (0)
+
 #define BIND_OPT(dst, name, count)                                              \
     do {                                                                        \
         int rc_ = 0;                                                            \
@@ -85,20 +142,20 @@ int kok_bind_arb(kok_arb *b, const kok_meta *m, const void *blob, int blob_id,
     snprintf(name, sizeof name, "%s.norm2.norm.bias", prefix);
     ARBBIND(b->n2_norm_b, name, dim_out);
     snprintf(name, sizeof name, "%s.conv1.weight", prefix);
-    ARBBIND(b->c1_w, name, 3L * dim_out * dim_in);
+    ARBBINDW(b->c1_w, name, 3L * dim_out * dim_in);
     snprintf(name, sizeof name, "%s.conv1.bias", prefix);
     ARBBIND(b->c1_b, name, dim_out);
     snprintf(name, sizeof name, "%s.conv2.weight", prefix);
-    ARBBIND(b->c2_w, name, 3L * dim_out * dim_out);
+    ARBBINDW(b->c2_w, name, 3L * dim_out * dim_out);
     snprintf(name, sizeof name, "%s.conv2.bias", prefix);
     ARBBIND(b->c2_b, name, dim_out);
     if (dim_in != dim_out) {
         snprintf(name, sizeof name, "%s.conv1x1.weight", prefix);
-        ARBBIND(b->sc_w, name, (long)dim_out * dim_in);
+        ARBBINDW(b->sc_w, name, (long)dim_out * dim_in);
     }
     if (upsample) {
         snprintf(name, sizeof name, "%s.pool.weight", prefix);
-        ARBBIND(b->pool_w, name, 3L * dim_in);
+        ARBBINDW(b->pool_w, name, 3L * dim_in);
         snprintf(name, sizeof name, "%s.pool.bias", prefix);
         ARBBIND(b->pool_b, name, dim_in);
     }
@@ -131,28 +188,28 @@ int kok_text_w_bind(kok_text_w *tw, const kok_meta *m, const void *blob) {
     BIND(tw->tok_emb, "bert.embeddings.token_type_embeddings.weight", 2L * emb);
     BIND(tw->emb_ln_w, "bert.embeddings.LayerNorm.weight", emb);
     BIND(tw->emb_ln_b, "bert.embeddings.LayerNorm.bias", emb);
-    BIND(tw->map_w, "bert.encoder.embedding_hidden_mapping_in.weight", (long)C * emb);
+    BINDW(tw->map_w, "bert.encoder.embedding_hidden_mapping_in.weight", (long)C * emb);
     BIND(tw->map_b, "bert.encoder.embedding_hidden_mapping_in.bias", C);
 
     const char *lp = "bert.encoder.albert_layer_groups.0.albert_layers.0";
-    snprintf(name, sizeof name, "%s.attention.query.weight", lp); BIND(tw->q_w, name, (long)C * C);
+    snprintf(name, sizeof name, "%s.attention.query.weight", lp); BINDW(tw->q_w, name, (long)C * C);
     snprintf(name, sizeof name, "%s.attention.query.bias", lp); BIND(tw->q_b, name, C);
-    snprintf(name, sizeof name, "%s.attention.key.weight", lp); BIND(tw->k_w, name, (long)C * C);
+    snprintf(name, sizeof name, "%s.attention.key.weight", lp); BINDW(tw->k_w, name, (long)C * C);
     snprintf(name, sizeof name, "%s.attention.key.bias", lp); BIND(tw->k_b, name, C);
-    snprintf(name, sizeof name, "%s.attention.value.weight", lp); BIND(tw->v_w, name, (long)C * C);
+    snprintf(name, sizeof name, "%s.attention.value.weight", lp); BINDW(tw->v_w, name, (long)C * C);
     snprintf(name, sizeof name, "%s.attention.value.bias", lp); BIND(tw->v_b, name, C);
-    snprintf(name, sizeof name, "%s.attention.dense.weight", lp); BIND(tw->dense_w, name, (long)C * C);
+    snprintf(name, sizeof name, "%s.attention.dense.weight", lp); BINDW(tw->dense_w, name, (long)C * C);
     snprintf(name, sizeof name, "%s.attention.dense.bias", lp); BIND(tw->dense_b, name, C);
     snprintf(name, sizeof name, "%s.attention.LayerNorm.weight", lp); BIND(tw->att_ln_w, name, C);
     snprintf(name, sizeof name, "%s.attention.LayerNorm.bias", lp); BIND(tw->att_ln_b, name, C);
-    snprintf(name, sizeof name, "%s.ffn.weight", lp); BIND(tw->ffn_w, name, (long)inter * C);
+    snprintf(name, sizeof name, "%s.ffn.weight", lp); BINDW(tw->ffn_w, name, (long)inter * C);
     snprintf(name, sizeof name, "%s.ffn.bias", lp); BIND(tw->ffn_b, name, inter);
-    snprintf(name, sizeof name, "%s.ffn_output.weight", lp); BIND(tw->ffn_out_w, name, (long)C * inter);
+    snprintf(name, sizeof name, "%s.ffn_output.weight", lp); BINDW(tw->ffn_out_w, name, (long)C * inter);
     snprintf(name, sizeof name, "%s.ffn_output.bias", lp); BIND(tw->ffn_out_b, name, C);
     snprintf(name, sizeof name, "%s.full_layer_layer_norm.weight", lp); BIND(tw->full_ln_w, name, C);
     snprintf(name, sizeof name, "%s.full_layer_layer_norm.bias", lp); BIND(tw->full_ln_b, name, C);
 
-    BIND(tw->be_w, "bert_encoder.weight", (long)dhid * C);
+    BINDW(tw->be_w, "bert_encoder.weight", (long)dhid * C);
     BIND(tw->be_b, "bert_encoder.bias", dhid);
 
     tw->de_layers = nlay;
@@ -170,7 +227,7 @@ int kok_text_w_bind(kok_text_w *tw, const kok_meta *m, const void *blob) {
     if (i) return i;
     i = bind_bilstm(&tw->pros_shared, m, blob, "predictor.shared", dhid + sd, dhid / 2);
     if (i) return i;
-    BIND(tw->dur_w, "predictor.duration_proj.linear_layer.weight", (long)maxdur * dhid);
+    BINDW(tw->dur_w, "predictor.duration_proj.linear_layer.weight", (long)maxdur * dhid);
     BIND(tw->dur_b, "predictor.duration_proj.linear_layer.bias", maxdur);
 
     for (i = 0; i < 3; i++) {
@@ -185,9 +242,9 @@ int kok_text_w_bind(kok_text_w *tw, const kok_meta *m, const void *blob) {
         rc = kok_bind_arb(&tw->n_blk[i], m, blob, 0, name, din, dout, i == 1, sd);
         if (rc) return rc;
     }
-    BIND(tw->f0_proj_w, "predictor.F0_proj.weight", dhid / 2);
+    BINDW(tw->f0_proj_w, "predictor.F0_proj.weight", dhid / 2);
     BIND(tw->f0_proj_b, "predictor.F0_proj.bias", 1);
-    BIND(tw->n_proj_w, "predictor.N_proj.weight", dhid / 2);
+    BINDW(tw->n_proj_w, "predictor.N_proj.weight", dhid / 2);
     BIND(tw->n_proj_b, "predictor.N_proj.bias", 1);
     BIND(tw->style_text, "style", sd);
 
@@ -195,7 +252,7 @@ int kok_text_w_bind(kok_text_w *tw, const kok_meta *m, const void *blob) {
     tw->te_depth = ted;
     for (i = 0; i < ted; i++) {
         snprintf(name, sizeof name, "text_encoder.cnn.%d.0.weight", i);
-        BIND(tw->te_cnn[i].w, name, (long)tech * tech * tek);
+        BINDW(tw->te_cnn[i].w, name, (long)tech * tech * tek);
         snprintf(name, sizeof name, "text_encoder.cnn.%d.0.bias", i);
         BIND(tw->te_cnn[i].b, name, tech);
         snprintf(name, sizeof name, "text_encoder.cnn.%d.1.gamma", i);
@@ -206,9 +263,9 @@ int kok_text_w_bind(kok_text_w *tw, const kok_meta *m, const void *blob) {
     i = bind_bilstm(&tw->te_lstm, m, blob, "text_encoder.lstm", tech, tech / 2);
     if (i) return i;
 
-    BIND(tw->ap0_w, "asr_proj.0.weight", (long)asr * tech);
+    BINDW(tw->ap0_w, "asr_proj.0.weight", (long)asr * tech);
     BIND(tw->ap0_b, "asr_proj.0.bias", asr);
-    BIND(tw->ap2_w, "asr_proj.2.weight", (long)asr * asr);
+    BINDW(tw->ap2_w, "asr_proj.2.weight", (long)asr * asr);
     BIND(tw->ap2_b, "asr_proj.2.bias", asr);
     return 0;
 }
@@ -230,9 +287,9 @@ static int albert_layer(const kok_text_w *tw, const kok_config *c, float *x, int
     float *ff = kok_arena_alloc(a, (size_t)inter * T);
     if (!q || !k || !v || !ctx || !sc || !ff) return -1;
 
-    kok_linear(q, x, tw->q_w, tw->q_b, C, C, T);
-    kok_linear(k, x, tw->k_w, tw->k_b, C, C, T);
-    kok_linear(v, x, tw->v_w, tw->v_b, C, C, T);
+    kok_linear(q, x, &tw->q_w, tw->q_b, C, C, T);
+    kok_linear(k, x, &tw->k_w, tw->k_b, C, C, T);
+    kok_linear(v, x, &tw->v_w, tw->v_b, C, C, T);
     const float scale = 1.0f / sqrtf((float)hs);
     for (int h = 0; h < heads; h++) {
         const float *qh = q + (size_t)h * hs * T;
@@ -259,14 +316,14 @@ static int albert_layer(const kok_text_w *tw, const kok_config *c, float *x, int
         }
     }
     /* dense + residual LayerNorm */
-    kok_linear(ff, ctx, tw->dense_w, tw->dense_b, C, C, T);
+    kok_linear(ff, ctx, &tw->dense_w, tw->dense_b, C, C, T);
     for (long i = 0; i < (long)C * T; i++) x[i] += ff[i];
     kok_layer_norm(x, tw->att_ln_w, tw->att_ln_b, C, T, 1e-12f);
 
     /* feed-forward with gelu_new, then the full-layer LayerNorm */
-    kok_linear(ff, x, tw->ffn_w, tw->ffn_b, C, inter, T);
+    kok_linear(ff, x, &tw->ffn_w, tw->ffn_b, C, inter, T);
     kok_gelu_new(ff, (long)inter * T);
-    kok_linear(ctx, ff, tw->ffn_out_w, tw->ffn_out_b, inter, C, T);
+    kok_linear(ctx, ff, &tw->ffn_out_w, tw->ffn_out_b, inter, C, T);
     for (long i = 0; i < (long)C * T; i++) x[i] += ctx[i];
     kok_layer_norm(x, tw->full_ln_w, tw->full_ln_b, C, T, 1e-12f);
     return 0;
@@ -284,7 +341,7 @@ static int albert_forward(const kok_text_w *tw, const kok_config *c, const int *
         for (int d = 0; d < emb; d++) h[d * T + t] = we[d] + pe[d] + tw->tok_emb[d];
     }
     kok_layer_norm(h, tw->emb_ln_w, tw->emb_ln_b, emb, T, 1e-12f);
-    kok_linear(out, h, tw->map_w, tw->map_b, emb, C, T);
+    kok_linear(out, h, &tw->map_w, tw->map_b, emb, C, T);
     /* each application of the shared block needs the same scratch, so release
      * it between layers while keeping the caller's outer allocations */
     size_t mark = a->top;
@@ -309,7 +366,7 @@ static int textenc_forward(const kok_text_w *tw, const kok_config *c, const int 
         for (int d = 0; d < ch; d++) out[d * T + t] = e[d];
     }
     for (int i = 0; i < depth; i++) {
-        kok_conv1d(buf, out, tw->te_cnn[i].w, tw->te_cnn[i].b, ch, ch, T, K, 1, pad, 1);
+        kok_conv1d(buf, out, &tw->te_cnn[i].w, tw->te_cnn[i].b, ch, ch, T, K, 1, pad, 1);
         kok_layer_norm(buf, tw->te_cnn[i].ln_w, tw->te_cnn[i].ln_b, ch, T, 1e-5f);
         kok_leaky_relu(buf, (long)ch * T, 0.2f);
         memcpy(out, buf, (size_t)ch * T * sizeof(float));
@@ -372,7 +429,7 @@ static int durations_forward(const kok_text_w *tw, const kok_config *c, const fl
     kok_lstm_w b = {tw->pros_lstm.w_ih_r, tw->pros_lstm.w_hh_r, tw->pros_lstm.b_ih_r, tw->pros_lstm.b_hh_r};
     int rc = kok_bilstm(h, d, dhid + sd, T, dhid / 2, &f, &b, a);
     if (rc) return rc;
-    kok_linear(logits, h, tw->dur_w, tw->dur_b, dhid, maxdur, T);
+    kok_linear(logits, h, &tw->dur_w, tw->dur_b, dhid, maxdur, T);
     kok_sigmoid(logits, (long)maxdur * T);
     for (int t = 0; t < T; t++) {
         double acc = 0.0;
@@ -414,8 +471,12 @@ static int f0n_forward(const kok_text_w *tw, const kok_config *c, const float *e
             len = blks[i].upsample ? 2 * len : len;
             alt = !alt;
         }
-        const float *w = head ? tw->n_proj_w : tw->f0_proj_w;
+        /* the F0/N projections stay fp32 (the exporter's keep-list), so this
+         * hand-written dot reads .f directly and refuses an int8 blob */
+        const kok_w *wp = head ? &tw->n_proj_w : &tw->f0_proj_w;
+        const float *w = wp->f;
         const float *bias = head ? tw->n_proj_b : tw->f0_proj_b;
+        if (!w || wp->q) return -12;
         float *dst = head ? nz : f0;
         for (int t = 0; t < len; t++) {
             double acc = bias[0];
@@ -432,9 +493,9 @@ static int asr_proj_forward(const kok_text_w *tw, const kok_config *c, const flo
     const int asr = c->v[KOK_D_ASR_DIM];
     float *mid = kok_arena_alloc(a, (size_t)asr * T);
     if (!mid) return -1;
-    kok_linear(mid, t_en, tw->ap0_w, tw->ap0_b, tech, asr, T);
+    kok_linear(mid, t_en, &tw->ap0_w, tw->ap0_b, tech, asr, T);
     kok_gelu_erf(mid, (long)asr * T);
-    kok_linear(out, mid, tw->ap2_w, tw->ap2_b, asr, asr, T);
+    kok_linear(out, mid, &tw->ap2_w, tw->ap2_b, asr, asr, T);
     return 0;
 }
 
@@ -472,7 +533,7 @@ int kok_text_forward(const kok_model *mo, const int *ids, long n_tokens, int mod
     if (!bert_out || !d_en || !t_en || !d) return -1;
     rc = albert_forward(tw, c, ids, T, bert_out, a);
     if (rc) return rc;
-    kok_linear(d_en, bert_out, tw->be_w, tw->be_b, C, dhid, T);
+    kok_linear(d_en, bert_out, &tw->be_w, tw->be_b, C, dhid, T);
     rc = duration_encoder_forward(tw, c, d_en, T, d, a);
     if (rc) return rc;
     rc = durations_forward(tw, c, d, T, out->dur_raw, out->durs, 1.0f, a);

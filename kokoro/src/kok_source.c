@@ -117,9 +117,12 @@ int kok_source_forward(const kok_config *c, const kok_dec_w *dw, const float *f0
     }
 #endif
     /* tanh(l_linear(.)), the l_linear weights being [1, dim] */
+    /* l_linear is on the exporter's fp32 keep-list, so this reads .f directly */
+    const float *lw = dw->src_w.f;
+    if (!lw || dw->src_w.q) return -12;
     for (long l = 0; l < L; l++) {
         double acc = dw->src_b ? dw->src_b[0] : 0.0;
-        for (int h = 0; h < dim; h++) acc += (double)dw->src_w[h] * sines[l * dim + h];
+        for (int h = 0; h < dim; h++) acc += (double)lw[h] * sines[l * dim + h];
         src[l] = tanhf((float)acc);
     }
     return 0;
