@@ -59,8 +59,7 @@ sanotts/mcu/
 sanotts/snt_server
 
 # Kokoro-family port: working data and toolchain venvs (never ship or track)
-.venv-kokoro/
-.venv-misaki/
+.venv*/
 kokoro/model/
 kokoro/goldens/
 dev/paradee/model/
