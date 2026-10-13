@@ -324,27 +324,36 @@ function PiperQueue:buildBaseCommand()
             loader_flag = string.format(' --loader "%s" --loader-libdir "%s"',
                 loader, espeak_lib)
         end
-        -- Per-voice engine selection: amy is the fully-int8 piperlite stack
-        -- with the punctuation pauses scaled up (device-ear preference);
-        -- kristin is the R7 int8 voice.  The rate slider maps to the
-        -- piperlite length scale for amy, same convention as the Piper
-        -- branch below (rate 1.0 emits no flag).
+        -- Per-voice engine selection from the ttsengine voice defs: amy is the
+        -- fully-int8 piperlite stack with the punctuation pauses scaled up
+        -- (device-ear preference); kristin is the R7 int8 voice; fr (and
+        -- later fp32 siblings) run the fp32 piperlite pair with their own
+        -- espeak voice and phoneme id map.  The rate slider maps to the
+        -- piperlite length scale for the piperlite-family engines (pq8/f32),
+        -- same convention as the Piper branch below (rate 1.0 emits no flag).
         local voice_name = engine.sanotts_voice_name or "amy"
+        local vcfg = engine.sanotts_voice_cfg or {}
+        local vengine = vcfg.engine or (voice_name == "kristin" and "int8" or "pq8")
         local engine_args
-        if voice_name == "kristin" then
+        if vengine == "int8" then
             engine_args = " --engine int8"
         else
-            engine_args = " --engine pq8 --pause-scale 2.5"
+            engine_args = vengine == "f32" and " --engine f32" or " --engine pq8"
+            engine_args = engine_args .. " --pause-scale 2.5"
             local rate = engine.rate or 1.0
             local ls = 1.0 / math.max(0.25, rate)
             if math.abs(ls - 1.0) > 0.01 then
                 engine_args = string.format("%s --length-scale %.2f", engine_args, ls)
             end
         end
+        local espeak_voice_flag = string.format(' --voice "%s"', vcfg.espeak_voice or "en-us")
+        local phoneme_flag = vcfg.phonemes and vcfg.phonemes ~= "en"
+            and string.format(" --phonemes %s", vcfg.phonemes) or ""
         return string.format(
-            'nice -n 19 %s%s --model "%s" --espeak-bin "%s" --espeak-data "%s"%s%s',
+            'nice -n 19 %s%s --model "%s" --espeak-bin "%s" --espeak-data "%s"%s%s%s%s',
             exec_prefix, engine.sanotts_server, engine.sanotts_voice_dir,
-            espeak_bin, espeak_data, loader_flag, engine_args)
+            espeak_bin, espeak_data, loader_flag, engine_args,
+            espeak_voice_flag, phoneme_flag)
     end
     local piper_bin = engine.piper_cmd or engine.backend_cmd or "piper"
     local model_flag = ""

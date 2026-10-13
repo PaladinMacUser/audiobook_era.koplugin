@@ -6,7 +6,7 @@
 #
 # Options:
 #   --with-piper         Also bundle Piper TTS neural engine (~24 MB)
-#   --with-sanotts       Also bundle sanoTTS int8 neural engine (~700 KB, on by default; --no-sanotts to skip)
+#   --with-sanotts       Also bundle sanoTTS neural engine (0.7-6.3 MB voices, on by default; --no-sanotts to skip)
 #   --piper-voice VOICE  Download a specific Piper voice (default: en_US-danny-low)
 #                        Use "low" quality for smaller size (~15 MB), "medium" for better quality (~60 MB)
 set -euo pipefail
@@ -263,7 +263,7 @@ if [ "$WITH_SANOTTS" = true ]; then
     echo "Cross-compiling snt_server (static musl, armv7hf)..."
     SANO_OUT=$(nix-build "$SCRIPT_DIR/cross-build-snt-server.nix" --no-out-link)
     if [ -f "$SANO_OUT/bin/snt_server" ]; then
-        mkdir -p "$SANO_DEST/voice" "$SANO_DEST/voice-amy"
+        mkdir -p "$SANO_DEST/voice" "$SANO_DEST/voice-amy" "$SANO_DEST/voice-fr"
         cp "$SANO_OUT/bin/snt_server" "$SANO_DEST/snt_server"
         cp "$SCRIPT_DIR/sanotts/voice/front_q8.bin" "$SANO_DEST/voice/front_q8.bin"
         cp "$SCRIPT_DIR/sanotts/voice/model_q8.bin" "$SANO_DEST/voice/model_q8.bin"
@@ -271,7 +271,13 @@ if [ "$WITH_SANOTTS" = true ]; then
         cp "$SCRIPT_DIR/sanotts/voice-amy/front_weights_q8.bin" "$SANO_DEST/voice-amy/front_weights_q8.bin"
         cp "$SCRIPT_DIR/sanotts/voice-amy/meta_q8.bin" "$SANO_DEST/voice-amy/meta_q8.bin"
         cp "$SCRIPT_DIR/sanotts/voice-amy/weights_q8.bin" "$SANO_DEST/voice-amy/weights_q8.bin"
-        echo "Bundled sanoTTS engine + voices (kristin 700 KB + amy 1.5 MB)"
+        # fr-siwis: fp32 pair converted from upstream's fp16 package by
+        # tools/convert-sanotts-voice.py
+        cp "$SCRIPT_DIR/sanotts/voice-fr/front_meta.bin" "$SANO_DEST/voice-fr/front_meta.bin"
+        cp "$SCRIPT_DIR/sanotts/voice-fr/front_weights_f32.bin" "$SANO_DEST/voice-fr/front_weights_f32.bin"
+        cp "$SCRIPT_DIR/sanotts/voice-fr/dec_meta.bin" "$SANO_DEST/voice-fr/dec_meta.bin"
+        cp "$SCRIPT_DIR/sanotts/voice-fr/dec_weights_f32.bin" "$SANO_DEST/voice-fr/dec_weights_f32.bin"
+        echo "Bundled sanoTTS engine + voices (kristin 700 KB + amy 1.5 MB + fr 6.3 MB)"
     else
         echo "ERROR: sanoTTS server build produced no binary" >&2
         exit 1

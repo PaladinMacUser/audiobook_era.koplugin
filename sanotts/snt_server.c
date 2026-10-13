@@ -19,13 +19,24 @@
  *                   emits dense BOS/EOS-framed ids for the 62-symbol vocab;
  *                   no espeak spawn at all. Noise is seeded from the clause
  *                   text, or --seed forces one value.
+ *   f32             fp32 piperlite voice (snt_front_f32 + snt_piperlite),
+ *                   22050 Hz. Same family as pq8 but at fp32 precision and
+ *                   with the fp32 kernel pair; the model dir holds
+ *                   front_meta.bin, front_weights_f32.bin, dec_meta.bin and
+ *                   dec_weights_f32.bin, converted from upstream's fp16
+ *                   voice packages by tools/convert-sanotts-voice.py. This
+ *                   is the engine for the non-English voices (fr-siwis and
+ *                   later siblings). Phonemization as for int8, with the
+ *                   espeak voice and phoneme id map chosen per language
+ *                   (--voice, --phonemes).
  *
- * Usage: snt_server --model <dir> --engine int8|pq8|nano
+ * Usage: snt_server --model <dir> --engine int8|pq8|nano|f32
  *                   [--espeak-bin <bin> --espeak-data <dir> --voice en-us]
+ *                   [--phonemes en|fr]
  *                   [--rate 22050|24000] [--loader <ld-linux>]
  *                   [--loader-libdir <dir>] [--comma-ms N] [--period-ms N]
  *                   [--seed N] [--length-scale F]
- * The espeak/loader args apply to the int8/pq8 engines only (the loader execs
+ * The espeak/loader args apply to the int8/pq8/f32 engines only (the loader execs
  * the bundled armhf espeak-ng through the bundled glibc loader on stock Kobo
  * rootfs); the gap args size the silence inserted after comma/period clauses
  * (defaults 150/350 ms; colon 220, semicolon 250).
@@ -41,7 +52,10 @@
 #include "snt_nano.h"
 #include "snt_front_q8.h"
 #include "snt_piperlite_q8.h"
+#include "snt_front_f32.h"
+#include "snt_piperlite.h"
 #include "phoneme_id_map.h"
+#include "phoneme_id_map_fr.h"
 #include "nano_lex_g2p.h"
 
 #include <unistd.h>
@@ -103,9 +117,15 @@ static void write_header(FILE *fh, uint32_t data_bytes, uint32_t rate) {
     fwrite("data", 1, 4, fh); put_u32(fh, data_bytes);
 }
 
+/* phoneme id map: piper's first ~20 ids are ASCII punctuation in every
+ * language, so the punctuation-aware splitting and the pause ids
+ * (4, 8, 10..13) are shared across maps. */
+static const PIPER_PMAP_ENT *g_map = PHONEME_MAP;
+static int g_map_n = PHONEME_MAP_N;
+
 static int map_id(const char *sym) {
-    for (int i = 0; i < PHONEME_MAP_N; i++)
-        if (!strcmp(PHONEME_MAP[i].sym, sym)) return PHONEME_MAP[i].id;
+    for (int i = 0; i < g_map_n; i++)
+        if (!strcmp(g_map[i].sym, sym)) return g_map[i].id;
     return -1;
 }
 
@@ -122,6 +142,7 @@ static const char *g_loader, *g_libdir;
 static int g_comma_ms = 150, g_period_ms = 350, g_colon_ms = 220, g_semi_ms = 250;
 static int g_engine_nano = 0;
 static int g_engine_pq8 = 0;
+static int g_engine_f32 = 0;
 static int g_native_punct = 0;
 static float g_length_scale = 1.0f;
 static float g_pause_scale = 1.0f;
@@ -383,6 +404,75 @@ static int synth_clause_pq8(snt_front_q8_model *fq, snt_piperlite_q8_model *dq,
     return 0;
 }
 
+/* Synthesize one clause on the f32 engine (fp32 piperlite voice pair): same
+ * dataflow as pq8 -- durations -> latent -> decoder -> PCM -- at fp32
+ * precision, with float-unit arenas. Phoneme ids come from the shared espeak
+ * path. Returns 0 on success, the failing rc otherwise. */
+static int synth_clause_f32(snt_front_model *fm, snt_piperlite_model *dm,
+                            float *arena, size_t arena_floats,
+                            const int32_t *ids, int n_ids,
+                            WavSink *sink, long *emitted) {
+    static int32_t durs[MAX_IDS];
+    long before = sink->n;
+    long frames = snt_front_durations(fm, ids, n_ids, g_length_scale,
+                                      durs, arena, arena_floats);
+    if (frames < 0) {
+        fprintf(stderr, "{\"error\": \"f32 durations rc %ld\"}\n", frames);
+        fflush(stderr);
+        return (int)frames;
+    }
+    /* Same pause treatment as pq8: stretch only the punctuation tokens. */
+    if (g_pause_scale != 1.0f) {
+        long total = 0;
+        for (int i = 0; i < n_ids; i++) {
+            if (ids[i] == 4 || ids[i] == 8 || ids[i] == 10 ||
+                ids[i] == 11 || ids[i] == 12 || ids[i] == 13) {
+                long scaled = (long)(durs[i] * g_pause_scale + 0.5f);
+                durs[i] = (int32_t)(scaled < 1 ? 1 : scaled);
+            }
+            total += durs[i];
+        }
+        frames = total;
+    }
+    size_t la = snt_front_latent_arena_floats(fm, n_ids, frames);
+    size_t da = snt_piperlite_arena_floats(dm, (int)frames);
+    size_t need = la > da ? la : da;
+    float *ar = arena;
+    int heap_arena = 0;
+    if (need > arena_floats) {
+        ar = malloc(sizeof(float) * need);
+        if (!ar) { fprintf(stderr, "{\"error\": \"f32 arena malloc %zu\"}\n", need); fflush(stderr); return -1; }
+        heap_arena = 1;
+    }
+    float *latent = malloc(sizeof(float) * (size_t)fm->a_out * (size_t)frames);
+    float *audio = malloc(sizeof(float) * (size_t)frames * SNT_PIPERLITE_HOP);
+    if (!latent || !audio) { free(latent); free(audio); if (heap_arena) free(ar); return -1; }
+    int rc = snt_front_latent(fm, ids, durs, n_ids, frames, latent, ar, la);
+    if (rc == 0)
+        rc = snt_piperlite_synthesize(dm, latent, (int)frames, audio, ar, da);
+    if (heap_arena) free(ar);
+    if (rc == 0) {
+        long n = (long)frames * SNT_PIPERLITE_HOP;
+        for (long i = 0; i < n; i++) {
+            float s = audio[i];
+            if (s > 1.0f) s = 1.0f;
+            else if (s < -1.0f) s = -1.0f;
+            int16_t v = (int16_t)(s * 32767.0f);
+            if (fwrite(&v, sizeof v, 1, sink->fh) != 1) { rc = -1; break; }
+            sink->n++;
+        }
+    }
+    free(latent);
+    free(audio);
+    if (rc != 0) {
+        fprintf(stderr, "{\"error\": \"f32 synth rc %d\"}\n", rc);
+        fflush(stderr);
+        return rc;
+    }
+    *emitted += sink->n - before;
+    return 0;
+}
+
 /* extract "input" and "output" string values from a flat JSON object line;
  * unescapes the common escapes in place. */
 static int json_fields(char *line, char **input, char **output) {
@@ -438,21 +528,47 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--rate")) rate = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "--seed")) { g_seed = strtoull(argv[i + 1], NULL, 0); g_seed_set = 1; }
         else if (!strcmp(argv[i], "--length-scale")) g_length_scale = (float)atof(argv[i + 1]);
+        else if (!strcmp(argv[i], "--phonemes")) {
+            if (!strcmp(argv[i + 1], "fr")) { g_map = PHONEME_MAP_FR; g_map_n = PHONEME_MAP_FR_N; }
+            else if (strcmp(argv[i + 1], "en")) {
+                fprintf(stderr, "{\"error\": \"unknown phoneme map %s\"}\n", argv[i + 1]);
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--pause-scale")) g_pause_scale = (float)atof(argv[i + 1]);
         else if (!strcmp(argv[i], "--native-punct")) g_native_punct = 1;
     }
     if (!strcmp(engine, "nano")) g_engine_nano = 1;
     if (!strcmp(engine, "pq8")) g_engine_pq8 = 1;
+    if (!strcmp(engine, "f32")) g_engine_f32 = 1;
     if (!rate) rate = g_engine_nano ? 24000 : 22050;
     if (!model || (!g_engine_nano && (!g_espeak_bin || !g_espeak_data))) {
-        fprintf(stderr, "usage: %s --model <dir> --engine int8|pq8|nano [--espeak-bin <bin> --espeak-data <dir>] [--rate 22050|24000] [--seed N] [--length-scale F]\n", argv[0]);
+        fprintf(stderr, "usage: %s --model <dir> --engine int8|pq8|nano|f32 [--espeak-bin <bin> --espeak-data <dir>] [--phonemes en|fr] [--rate 22050|24000] [--seed N] [--length-scale F]\n", argv[0]);
         return 2;
     }
 
     void *front = NULL, *dec = NULL;
     snt_front_q8_model fq;
     snt_piperlite_q8_model dq;
-    if (g_engine_pq8) {
+    snt_front_model fmf;
+    snt_piperlite_model dfm;
+    if (g_engine_f32) {
+        /* The metas must outlive the models (weight pointers point into
+         * them), so these allocations are simply never freed. */
+        size_t fm_meta_nb, fm_w_nb, dm_meta_nb, dm_w_nb;
+        void *fm_meta = xload2s(model, "front_meta.bin", &fm_meta_nb);
+        void *fm_w = xload2s(model, "front_weights_f32.bin", &fm_w_nb);
+        void *dm_meta = xload2s(model, "dec_meta.bin", &dm_meta_nb);
+        void *dm_w = xload2s(model, "dec_weights_f32.bin", &dm_w_nb);
+        if ((fm_w_nb | dm_w_nb) % 4) {
+            fprintf(stderr, "{\"error\": \"f32 weight blob not multiple of 4\"}\n");
+            return 1;
+        }
+        int rc = snt_front_init(&fmf, fm_meta, fm_meta_nb, (const float *)fm_w, fm_w_nb / 4);
+        if (rc == 0)
+            rc = snt_piperlite_init(&dfm, dm_meta, dm_meta_nb, (const float *)dm_w, dm_w_nb / 4);
+        if (rc != 0) { fprintf(stderr, "{\"error\": \"f32 init rc %d\"}\n", rc); return 1; }
+    } else if (g_engine_pq8) {
         /* The metas must outlive the models (the fp32 pool is read in
          * place), so these allocations are simply never freed. */
         size_t fq_meta_nb, fq_w_nb, dq_meta_nb, dq_w_nb;
@@ -561,6 +677,11 @@ int main(int argc, char **argv) {
                 if (n_ids > 3) {
                     if (g_engine_pq8) {
                         rc = synth_clause_pq8(&fq, &dq, arena, sizeof arena, ids, n_ids, &sink, &emitted);
+                        spoke = emitted > 0;
+                    } else if (g_engine_f32) {
+                        rc = synth_clause_f32(&fmf, &dfm, (float *)arena,
+                                              sizeof arena / sizeof(float),
+                                              ids, n_ids, &sink, &emitted);
                         spoke = emitted > 0;
                     } else {
                         snt_config cfg = {front, dec, arena, sizeof arena, NULL};

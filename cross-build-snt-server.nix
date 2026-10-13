@@ -20,7 +20,7 @@ crossPkgs.stdenv.mkDerivation {
 
   buildPhase = ''
     export NIX_CFLAGS_COMPILE="$NIX_CFLAGS_COMPILE -O2 -std=c99 -I${sanoDir}/mcu/include -I${sanoDir}/mcu/src -I${sanoDir}/voice-nano -DFSD_FAST_MATH"
-    $CC -static -o snt_server ${sanoDir}/snt_server.c ${sanoDir}/mcu/src/snt_tts.c ${sanoDir}/mcu/src/snt_kernels_ref.c ${sanoDir}/mcu/src/snt_nano.c ${sanoDir}/mcu/src/snt_front_q8.c ${sanoDir}/mcu/src/snt_piperlite_q8.c ${sanoDir}/mcu/ports/host/snt_port_host.c ${sanoDir}/nano_lex_g2p.c ${sanoDir}/nano_lex_tables.c -lm
+    $CC -static -o snt_server ${sanoDir}/snt_server.c ${sanoDir}/mcu/src/snt_tts.c ${sanoDir}/mcu/src/snt_kernels_ref.c ${sanoDir}/mcu/src/snt_nano.c ${sanoDir}/mcu/src/snt_front_q8.c ${sanoDir}/mcu/src/snt_piperlite_q8.c ${sanoDir}/mcu/src/snt_front_f32.c ${sanoDir}/mcu/src/snt_piperlite.c ${sanoDir}/mcu/ports/host/snt_port_host.c ${sanoDir}/nano_lex_g2p.c ${sanoDir}/nano_lex_tables.c -lm
   '';
 
   installPhase = ''

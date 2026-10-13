@@ -1,6 +1,7 @@
 /* generated from piper-phoneme-config.json (en_US, espeak en-us) */
+typedef struct { const char *sym; int id; } PIPER_PMAP_ENT;
 #define PHONEME_MAP_N 154
-static const struct { const char *sym; int id; } PHONEME_MAP[] = {
+static const PIPER_PMAP_ENT PHONEME_MAP[] = {
     {" ", 3},
     {"!", 4},
     {"\"", 150},
