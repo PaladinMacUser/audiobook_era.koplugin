@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 /* kok_dec.c -- the decoder half: StudentDecoder (AdaIN encode/decode stack,
  * stride-2 F0/N convs, asr skip), the istftnet generator, and the 2-8 kHz
  * phase-lock post-filter. Semantics are the ones pinned in kokoro/README.md.
@@ -10,6 +11,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <time.h>
+
+#include "kok_fft.h"
 #include "kok_runtime.h"
 
 #define DBIND(dst, name, count)                                                 \
@@ -150,133 +154,151 @@ long kok_dec_source_floats(const kok_model *mo, int F) {
     return (long)(2 * F) * per_frame;
 }
 
-/* the phase-lock filter: 1024-point analysis, hop 256, bins 2-8 kHz */
+/* The phase-lock filter: 1024-point analysis at hop 256 over bins 2-8 kHz,
+ * voiced frames only. Implemented with a radix-2 FFT rather than the DFT-as-
+ * convolution bases the reference uses: it is the same DFT, but the convolution
+ * costs 512 basis rows times 1024 taps per frame where the FFT is O(n log n),
+ * and this was the lock's dominant cost in the first device benchmark.
+ *
+ * The arithmetic between the two transforms is the reference's, unchanged:
+ *   Em = max(|E|, 1e-6);  rel = S * conj(E) / Em
+ *   rel_smoothed = hann(L) * rel        (zero-padded)
+ *   Rm = max(|rel_smoothed|, 1e-12);  Sm = |S|;  u = unit(E) * unit(rel_smoothed)
+ *   D = (Sm * u - S) * voiced
+ * then the change is brought back with an inverse FFT and overlap-added. */
 int kok_lock_apply(const kok_config *c, const float *s, long n, const float *src,
                       const float *f0, long n_f0, float *out, kok_arena *a) {
     const int nfft = c->v[KOK_D_LOCK_NFFT], hop = c->v[KOK_D_LOCK_HOP];
     const int L = c->v[KOK_D_LOCK_L];
     const float lo = (float)c->v[KOK_D_LOCK_BAND_LO_HZ], hi = (float)c->v[KOK_D_LOCK_BAND_HI_HZ];
     const float voiced = (float)c->v[KOK_D_LOCK_VOICED_HZ];
+    const int sr = c->v[KOK_D_SR];
     const int gen_hop = c->v[KOK_D_DEC_UPRATE0] * c->v[KOK_D_DEC_UPRATE1] * c->v[KOK_D_DEC_ISTFT_HOP];
-    /* bins whose centre frequency FR = k * sr / nfft lies in [lo, hi) */
-    int bin_lo = (int)ceilf(lo * (float)nfft / (float)c->v[KOK_D_SR]);
-    int bin_hi = (int)ceilf(hi * (float)nfft / (float)c->v[KOK_D_SR]) - 1;
-    kok_stft st;
-    float *mem = kok_arena_alloc(a, (size_t)kok_stft_mem_floats(nfft, bin_lo, bin_hi));
+    const int pad = nfft / 2;
+    int bin_lo = (int)ceilf(lo * (float)nfft / (float)sr);
+    int bin_hi = (int)ceilf(hi * (float)nfft / (float)sr) - 1;
+    const int K = bin_hi - bin_lo + 1;
+    int frames = (int)(n / hop) + 1;
+    if (K <= 0 || frames <= 0) return -1;
+
+    kok_fft fft;
+    float *tw = kok_arena_alloc(a, (size_t)kok_fft_mem_floats(nfft));
+    float *win = kok_arena_alloc(a, (size_t)nfft);
     float *sk = kok_arena_alloc(a, (size_t)L);
-    if (!mem || !sk || kok_stft_init(&st, nfft, hop, bin_lo, bin_hi, mem)) return -1;
-    /* smoothing kernel: torch.hann_window(L + 2)[1:-1], normalised */
+    float *re = kok_arena_alloc(a, (size_t)nfft);
+    float *im = kok_arena_alloc(a, (size_t)nfft);
+    if (!tw || !win || !sk || !re || !im || kok_fft_init(&fft, nfft, tw)) return -1;
     {
+        const double pi2 = 2.0 * 3.14159265358979323846;
         double sum = 0.0;
+        for (int i = 0; i < nfft; i++)
+            win[i] = (float)(0.5 - 0.5 * cos(pi2 * (double)i / (double)nfft));
         for (int j = 0; j < L; j++) {
-            double t = (double)(j + 1) / (double)(L + 2);
-            sk[j] = (float)(0.5 - 0.5 * cos(2.0 * 3.14159265358979323846 * t));
+            sk[j] = (float)(0.5 - 0.5 * cos(pi2 * (double)(j + 1) / (double)(L + 2)));
             sum += sk[j];
         }
         for (int j = 0; j < L; j++) sk[j] = (float)(sk[j] / sum);
     }
-    const int K = st.K;
-    int frames = (int)((n + 2 * (nfft / 2) - nfft) / hop + 1);
-    float *Sr = kok_arena_alloc(a, (size_t)K * frames);
-    float *Si = kok_arena_alloc(a, (size_t)K * frames);
-    float *Er = kok_arena_alloc(a, (size_t)K * frames);
-    float *Ei = kok_arena_alloc(a, (size_t)K * frames);
-    float *Rr = kok_arena_alloc(a, (size_t)K * frames);
-    float *Ri = kok_arena_alloc(a, (size_t)K * frames);
-    float *Dr = kok_arena_alloc(a, (size_t)K * frames);
-    float *Di = kok_arena_alloc(a, (size_t)K * frames);
-    if (!Sr || !Si || !Er || !Ei || !Rr || !Ri || !Dr || !Di) return -1;
-
-    /* raw real/imaginary rows, not magnitude/phase: the reference's Lock works
-     * on the complex spectra directly */
-    int fr = kok_stft_transform_raw(&st, s, (int)n, Sr, Si, a);
-    if (fr < 0) return -1;
-    if (kok_stft_transform_raw(&st, src, (int)n, Er, Ei, a) < 0) return -1;
-
-#ifdef KOK_DEBUG_STAGES
-    fprintf(stderr, "[dbg] lock: K %d fr %d nfft %d hop %d bin_lo %d frames %d | Sr[0,74] %.6f Si[0,74] %.6f\n",
-            K, fr, nfft, hop, st.bin_lo, frames, Sr[74], Si[74]);
-#endif
-    for (int j = 0; j < K; j++) {
-        for (int t = 0; t < fr; t++) {
-            float sr = Sr[(size_t)j * fr + t], si = Si[(size_t)j * fr + t];
-            float er = Er[(size_t)j * fr + t], ei = Ei[(size_t)j * fr + t];
-            float em = sqrtf(er * er + ei * ei);
-            if (em < 1e-6f) em = 1e-6f;
-            Rr[(size_t)j * fr + t] = (sr * er + si * ei) / em;
-            Ri[(size_t)j * fr + t] = (si * er - sr * ei) / em;
-        }
-    }
-    /* time smoothing per bin (zero-padded convolution, L//2 both sides) */
-    const int pad = L / 2;
-    for (int j = 0; j < K; j++) {
-        for (int t = 0; t < fr; t++) {
-            double ar = 0.0, ai = 0.0;
-            for (int u = 0; u < L; u++) {
-                int idx = t + u - pad;
-                if (idx < 0 || idx >= fr) continue;
-                ar += (double)sk[u] * Rr[(size_t)j * fr + idx];
-                ai += (double)sk[u] * Ri[(size_t)j * fr + idx];
-            }
-            Dr[(size_t)j * fr + t] = (float)ar;
-            Di[(size_t)j * fr + t] = (float)ai;
-        }
-    }
-    /* Dr/Di now hold the smoothed rel; combine and mask by voiced frames */
-    for (int j = 0; j < K; j++) {
-        for (int t = 0; t < fr; t++) {
-            float rr = Dr[(size_t)j * fr + t], ri = Di[(size_t)j * fr + t];
-            float rm = sqrtf(rr * rr + ri * ri);
-            if (rm < 1e-12f) rm = 1e-12f;
-            float sr = Sr[(size_t)j * fr + t], si = Si[(size_t)j * fr + t];
-            float er = Er[(size_t)j * fr + t], ei = Ei[(size_t)j * fr + t];
-            float em = sqrtf(er * er + ei * ei);
-            if (em < 1e-6f) em = 1e-6f;
-            float sm = sqrtf(sr * sr + si * si);
-            float ur = (er * rr - ei * ri) / (em * rm);
-            float ui = (er * ri + ei * rr) / (em * rm);
-            long fidx = (long)t * hop / gen_hop;
-            if (fidx >= n_f0) fidx = n_f0 - 1;
-            float v = (f0[fidx] > voiced) ? 1.0f : 0.0f;
-#ifdef KOK_DEBUG_STAGES
-            if ((t == 74 || t == 849) && j < 3)
-                fprintf(stderr, "[dbg] fr %d bin %d: v %.0f smoothed R (%.5f,%.5f) Rm %.5f Sm %.5f Dr %.6f\n",
-                        t, j, v, rr, ri, rm, sm, (sm * ur - sr) * v);
-#endif
-            Dr[(size_t)j * fr + t] = (sm * ur - sr) * v;
-            Di[(size_t)j * fr + t] = (sm * ui - si) * v;
-        }
-    }
-    float *z = kok_arena_alloc(a, (size_t)2 * K * fr);
-    if (!z) return -1;
-    for (int j = 0; j < K; j++)
-        for (int t = 0; t < fr; t++) {
-            z[(size_t)j * fr + t] = Dr[(size_t)j * fr + t];
-            z[(size_t)(K + j) * fr + t] = Di[(size_t)j * fr + t];
-        }
-    int total = (fr - 1) * hop + nfft;
+    const size_t plane = (size_t)K * (size_t)frames;
+    float *Sre = kok_arena_alloc(a, plane), *Sim = kok_arena_alloc(a, plane);
+    float *Ere = kok_arena_alloc(a, plane), *Eim = kok_arena_alloc(a, plane);
+    float *Rre = kok_arena_alloc(a, plane), *Rim = kok_arena_alloc(a, plane);
+    float *Dre = kok_arena_alloc(a, plane), *Dim = kok_arena_alloc(a, plane);
+    long total = n + nfft;
     float *ola = kok_arena_alloc(a, (size_t)total);
     float *env = kok_arena_alloc(a, (size_t)total);
-    if (!ola || !env) return -1;
-    for (int i = 0; i < total; i++) { ola[i] = 0.0f; env[i] = 0.0f; }
-    for (int j = 0; j < 2 * K; j++) {
-        const float *w = st.inv + (size_t)j * nfft;
-        const float *row = z + (size_t)j * fr;
-        for (int t = 0; t < fr; t++) {
-            float v = row[t];
-            if (v == 0.0f) continue;
-            int base = t * hop;
-            for (int i = 0; i < nfft; i++) ola[base + i] += v * w[i];
+    if (!Sre || !Sim || !Ere || !Eim || !Rre || !Rim || !Dre || !Dim || !ola || !env)
+        return -1;
+    for (long i = 0; i < total; i++) { ola[i] = 0.0f; env[i] = 0.0f; }
+
+    /* analysis: one FFT per frame per signal, keeping the band bins */
+    for (int t = 0; t < frames; t++) {
+        long base = (long)t * hop;
+        for (int which = 0; which < 2; which++) {
+            const float *sig = which ? src : s;
+            for (int i = 0; i < nfft; i++) {
+                long idx = base + i - pad;
+                if (idx < 0) idx = -idx;                      /* reflect */
+                if (idx >= n) idx = 2 * n - 2 - idx;
+                re[i] = sig[idx] * win[i];
+                im[i] = 0.0f;
+            }
+            kok_fft_forward(&fft, re, im);
+            float *pr = which ? Ere : Sre;
+            float *pi = which ? Eim : Sim;
+            for (int j = 0; j < K; j++) {
+                pr[(size_t)j * frames + t] = re[bin_lo + j];
+                pi[(size_t)j * frames + t] = im[bin_lo + j];
+            }
         }
     }
-    for (int t = 0; t < fr; t++) {
-        int base = t * hop;
-        for (int i = 0; i < nfft; i++) env[base + i] += st.w2[i];
+    /* rel = S * conj(E) / |E|, then smoothed over L frames */
+    for (size_t i = 0; i < plane; i++) {
+        float er = Ere[i], ei = Eim[i], sr = Sre[i], si = Sim[i];
+        float em = sqrtf(er * er + ei * ei);
+        if (em < 1e-6f) em = 1e-6f;
+        Rre[i] = (sr * er + si * ei) / em;
+        Rim[i] = (si * er - sr * ei) / em;
+    }
+    {
+        const int sp = L / 2;
+        for (int j = 0; j < K; j++) {
+            for (int t = 0; t < frames; t++) {
+                double ar = 0.0, ai = 0.0;
+                for (int u = 0; u < L; u++) {
+                    int idx = t + u - sp;
+                    if (idx < 0 || idx >= frames) continue;
+                    ar += (double)sk[u] * Rre[(size_t)j * frames + idx];
+                    ai += (double)sk[u] * Rim[(size_t)j * frames + idx];
+                }
+                Dre[(size_t)j * frames + t] = (float)ar;
+                Dim[(size_t)j * frames + t] = (float)ai;
+            }
+        }
+    }
+    /* D = (|S| * unit(E) * unit(rel_smoothed) - S) * voiced, per bin and frame */
+    for (size_t i = 0; i < plane; i++) {
+        float er = Ere[i], ei = Eim[i], sr = Sre[i], si = Sim[i];
+        float rr = Dre[i], ri = Dim[i];
+        float em = sqrtf(er * er + ei * ei);
+        if (em < 1e-6f) em = 1e-6f;
+        float rm = sqrtf(rr * rr + ri * ri);
+        if (rm < 1e-12f) rm = 1e-12f;
+        float sm = sqrtf(sr * sr + si * si);
+        float ur = (er * rr - ei * ri) / (em * rm);
+        float ui = (er * ri + ei * rr) / (em * rm);
+        Dre[i] = sm * ur - sr;
+        Dim[i] = sm * ui - si;
+    }
+    /* synthesis: build the change spectrum per frame (Hermitian), inverse FFT,
+     * window and overlap-add; the envelope is accumulated the same way */
+    for (int t = 0; t < frames; t++) {
+        long fidx = (long)t * hop / gen_hop;
+        if (fidx >= n_f0) fidx = n_f0 - 1;
+        float v = (f0[fidx] > voiced) ? 1.0f : 0.0f;
+        for (int i = 0; i < nfft; i++) { re[i] = 0.0f; im[i] = 0.0f; }
+        if (v > 0.0f) {
+            for (int j = 0; j < K; j++) {
+                size_t idx = (size_t)j * frames + t;
+                int k = bin_lo + j;
+                re[k] = Dre[idx];
+                im[k] = Dim[idx];
+                re[nfft - k] = Dre[idx];            /* conjugate mirror */
+                im[nfft - k] = -Dim[idx];
+            }
+        }
+        kok_fft_inverse(&fft, re, im);
+        long base = (long)t * hop;
+        for (int i = 0; i < nfft; i++) {
+            float w = win[i];
+            ola[base + i] += re[i] * w;
+            env[base + i] += w * w;
+        }
     }
     for (long i = 0; i < n; i++) {
-        long src_i = i + nfft / 2;
-        float e = (src_i < total) ? env[src_i] : 0.0f;
-        float d = (src_i < total) ? ola[src_i] / (e > 1e-8f ? e : 1e-8f) : 0.0f;
+        long si = i + pad;
+        float e = (si < total) ? env[si] : 0.0f;
+        float d = (si < total && e > 1e-8f) ? ola[si] / e : 0.0f;
         out[i] = s[i] + d;
     }
     return 0;
@@ -597,7 +619,16 @@ int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f
             ph[(size_t)j * cur_len + t] = sinf(post[(size_t)(nb + j) * cur_len + t]);
         }
     long wlen = 0;
+#ifdef KOK_DEBUG_STAGES
+    struct timespec tg0, tg1, tl0, tl1;
+    clock_gettime(CLOCK_MONOTONIC, &tl0);
+#endif
     if (kok_stft_inverse(&st, spec, ph, cur_len, wave, &wlen, a) < 0) return -1;
+#ifdef KOK_DEBUG_STAGES
+    clock_gettime(CLOCK_MONOTONIC, &tg0);
+    fprintf(stderr, "[dbg] generator (to wave_pre_lock) %.3fs\n",
+            (double)(tg0.tv_sec - tl0.tv_sec) + 1e-9 * (tg0.tv_nsec - tl0.tv_nsec));
+#endif
     *wave_len = wlen;
     if (pre_lock_out) memcpy(pre_lock_out, wave, (size_t)wlen * sizeof(float));
 
@@ -606,6 +637,11 @@ int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f
     float *locked = kok_arena_alloc(a, (size_t)wlen);
     if (!locked) return -1;
     if (kok_lock_apply(c, wave, k, src, f0, 2 * F, locked, a)) return -1;
+#ifdef KOK_DEBUG_STAGES
+    clock_gettime(CLOCK_MONOTONIC, &tl1);
+    fprintf(stderr, "[dbg] lock %.3fs\n",
+            (double)(tl1.tv_sec - tl0.tv_sec) + 1e-9 * (tl1.tv_nsec - tl0.tv_nsec));
+#endif
     memcpy(wave, locked, (size_t)wlen * sizeof(float));
     return 0;
 }

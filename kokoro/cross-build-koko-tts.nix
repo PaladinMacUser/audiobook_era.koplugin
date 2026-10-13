@@ -16,9 +16,9 @@ crossPkgs.stdenv.mkDerivation {
   dontConfigure = true;
 
   buildPhase = ''
-    export NIX_CFLAGS_COMPILE="$NIX_CFLAGS_COMPILE -O2 -std=c99 -I${kok}/include"
+    export NIX_CFLAGS_COMPILE="$NIX_CFLAGS_COMPILE -O3 -std=c99 -mfpu=neon -ftree-vectorize -funroll-loops -I${kok}/include"
     $CC -static -o kok_tts ${kok}/src/kok_tts.c ${kok}/src/kok_meta.c \
-      ${kok}/src/kok_kernels.c ${kok}/src/kok_istft.c ${kok}/src/kok_rng.c \
+      ${kok}/src/kok_kernels.c ${kok}/src/kok_istft.c ${kok}/src/kok_fft.c ${kok}/src/kok_rng.c \
       ${kok}/src/kok_source.c ${kok}/src/kok_text.c ${kok}/src/kok_dec.c -lm
   '';
 

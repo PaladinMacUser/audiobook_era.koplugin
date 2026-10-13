@@ -210,6 +210,51 @@ texture only, which is the same class of difference as changing the seed.
 `KOK_DUMP_STAGES` in the build (and `KOK_DEBUG_STAGES` for prints) writes the
 generator's intermediate stages to /tmp for the bisect harness.
 
+## Device benchmark (M7, in progress)
+
+`kokoro/tools/device-bench.sh` pushes the static binary and the 31 MB of fp32
+blobs to the test Kobo and runs one sentence. Same sentence throughout (93
+tokens, 241 frames, 6.03 s of audio), audio checked against the golden waveform
+every time:
+
+| build | total | text | decoder | RTF | audio |
+|---|---|---|---|---|---|
+| first working port | 105.4 s | 14.1 s | 91.2 s | 17.49 | correct |
+| + FFT lock + loop order + hand NEON | 43.7 s | 8.7 s | 34.9 s | 7.25 | **broken** (corr -0.004) |
+| intrinsics removed, `-O3` | 81.4 s | 12.1 s | 69.2 s | 13.51 | correct |
+| + portable 4-way unroll | 79.9 s | 11.9 s | 68.0 s | 13.27 | correct |
+| + `restrict` on the kernels | 50.3 s | 8.7 s | 41.6 s | 8.35 | correct (corr 0.992686) |
+
+The onnxruntime baseline to beat is 2.59, so the optimised port is 3.2x short.
+
+What was learned, in order of usefulness:
+
+- **The loop order was the first big win.** Walking the taps outside the time
+  loop, with the valid output range hoisted so the inner loop is branch-free,
+  took the decoder from 91 s to 34 s.
+- **`restrict` was the second.** Without it gcc must assume the store to `out`
+  may alias the load from `x`, so it keeps the scalar order and no
+  vectorisation happens; with it the same loops halve again (host 1.185 -> 0.654).
+  The host golden gate is what makes this safe to apply: it passes, so no caller
+  aliases.
+- **Hand-written NEON was faster and wrong.** An intrinsics version of the
+  stride-1 tap loop ran the device at RTF 7.25, but its index arithmetic was
+  wrong (a stray `- t0` in the load, bounds computed with inverted signs) and
+  the host gate could not see it because the path only compiles on ARM; the
+  device audio came back decorrelated. It was replaced by plain unrolled
+  arithmetic the host exercises. If intrinsics come back, the index maths must
+  be shared with a path the gate runs.
+- **The FFT lock** replaced the reference's DFT-as-convolution transforms
+  (512 basis rows times 1024 taps per frame) and also shrank the arena from
+  121 MB to 66 MB. On the host it was worth little because the lock was already
+  cheap there; it matters more on the device.
+
+The next lever is int8 (the plan's M6): per-output-channel weights with the
+fp32 keep-list the shipped ONNX itself uses, which is what the onnxruntime
+baseline runs and what the 3.2x gap calls for. After that, a careful NEON pass
+over the same stride-1 loops, with the index arithmetic shared with the scalar
+path so the host gate still covers it.
+
 ## Layout
 
 `include/` and `src/` hold the runtime (`kok_` prefix, own port header,

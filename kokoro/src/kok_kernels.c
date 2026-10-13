@@ -24,53 +24,102 @@ void kok_arena_reset(kok_arena *a) { a->top = 0; }
 size_t kok_arena_peak(const kok_arena *a) { return a->top; }
 
 /* ---- linear algebra ---- */
-void kok_conv1d(float *out, const float *x, const float *w, const float *b,
+void kok_conv1d(float *restrict out, const float *restrict x, const float *restrict w,
+                const float *restrict b,
                 int Cin, int Cout, int T, int K, int stride, int pad, int dil) {
     int Tp = (T + 2 * pad - dil * (K - 1) - 1) / stride + 1;
     for (int o = 0; o < Cout; o++) {
         float *orow = out + (size_t)o * Tp;
+        float bias = b ? b[o] : 0.0f;
+        for (int t = 0; t < Tp; t++) orow[t] = bias;
         const float *wrow = w + (size_t)o * Cin * K;
-        for (int t = 0; t < Tp; t++) {
-            float acc = b ? b[o] : 0.0f;
+        /* For each tap the inputs that land on valid outputs form one
+         * contiguous run of output indices, so the inner loop is branch-free:
+         * the guard is hoisted out of it. The input index walks with stride,
+         * which is also what lets the compiler vectorise. */
+        for (int c = 0; c < Cin; c++) {
+            const float *xrow = x + (size_t)c * T;
+            const float *wc = wrow + (size_t)c * K;
             for (int k = 0; k < K; k++) {
-                int ti = t * stride + k * dil - pad;
-                if (ti < 0 || ti >= T) continue;
-                for (int c = 0; c < Cin; c++)
-                    acc += x[(size_t)c * T + ti] * wrow[(size_t)c * K + k];
-            }
-            orow[t] = acc;
-        }
-    }
-}
-
-void kok_convtr1d(float *out, const float *x, const float *w, const float *b,
-                  int Cin, int Cout, int T, int K, int stride, int pad,
-                  int out_pad, int groups) {
-    int Tp = (T - 1) * stride - 2 * pad + K + out_pad;
-    int cig = Cin / groups, cog = Cout / groups;
-    for (int o = 0; o < Cout; o++) {
-        float v = b ? b[o] : 0.0f;
-        for (int t = 0; t < Tp; t++) out[(size_t)o * Tp + t] = v;
-    }
-    for (int g = 0; g < groups; g++) {
-        for (int ci = 0; ci < cig; ci++) {
-            const float *xrow = x + (size_t)(g * cig + ci) * T;
-            const float *wrow = w + (size_t)(g * cig + ci) * cog * K;
-            for (int t = 0; t < T; t++) {
-                float v = xrow[t];
-                if (v == 0.0f) continue;
-                for (int k = 0; k < K; k++) {
-                    int to = t * stride - pad + k;
-                    if (to < 0 || to >= Tp) continue;
-                    for (int co = 0; co < cog; co++)
-                        out[(size_t)(g * cog + co) * Tp + to] += v * wrow[(size_t)co * K + k];
+                float wv = wc[k];
+                if (wv == 0.0f) continue;
+                int off = k * dil - pad;                  /* ti = t*stride + off */
+                int t_lo = off >= 0 ? 0 : ((-off + stride - 1) / stride);
+                int t_hi = Tp;
+                if (off + (long)(Tp - 1) * stride >= T) {
+                    /* last t whose ti is still < T */
+                    int max_ti = T - 1 - off;
+                    t_hi = max_ti / stride + 1;
+                    if (t_hi > Tp) t_hi = Tp;
+                }
+                {
+                    int ti = off + t_lo * stride;
+                    int t = t_lo;
+                    /* Unroll by four where the taps are contiguous (stride 1:
+                     * every resblock and AdainResBlk1d convolution). Plain
+                     * arithmetic rather than intrinsics so the host gate tests
+                     * the same code the device runs, and so gcc can vectorise
+                     * it. A hand-written NEON version of this loop was 1.9x
+                     * faster on the device but carried index arithmetic the
+                     * host never exercised, and it silently broke the audio. */
+                    if (stride == 1) {
+                        for (; t + 4 <= t_hi; t += 4, ti += 4) {
+                            orow[t] += wv * xrow[ti];
+                            orow[t + 1] += wv * xrow[ti + 1];
+                            orow[t + 2] += wv * xrow[ti + 2];
+                            orow[t + 3] += wv * xrow[ti + 3];
+                        }
+                    }
+                    for (; t < t_hi; t++, ti += stride)
+                        orow[t] += wv * xrow[ti];
                 }
             }
         }
     }
 }
 
-void kok_linear(float *out, const float *x, const float *w, const float *b,
+void kok_convtr1d(float *restrict out, const float *restrict x,
+                  const float *restrict w, const float *restrict b,
+                  int Cin, int Cout, int T, int K, int stride, int pad,
+                  int out_pad, int groups) {
+    int Tp = (T - 1) * stride - 2 * pad + K + out_pad;
+    int cig = Cin / groups, cog = Cout / groups;
+    for (int o = 0; o < Cout; o++) {
+        float bias = b ? b[o] : 0.0f;
+        float *orow = out + (size_t)o * Tp;
+        for (int t = 0; t < Tp; t++) orow[t] = bias;
+    }
+    /* Scatter form, but with the tap loop outside the time loop and the valid
+     * output range hoisted: to = t*stride + off, so for a fixed tap the
+     * contributing inputs are one contiguous run of t with no branch inside. */
+    for (int g = 0; g < groups; g++) {
+        for (int ci = 0; ci < cig; ci++) {
+            const float *xrow = x + (size_t)(g * cig + ci) * T;
+            for (int k = 0; k < K; k++) {
+                int off = k - pad;
+                int t_lo = off >= 0 ? 0 : ((-off + stride - 1) / stride);
+                int t_hi = T;
+                if (off + (long)(T - 1) * stride >= Tp) {
+                    int max_t = Tp - 1 - off;
+                    t_hi = max_t / stride + 1;
+                    if (t_hi > T) t_hi = T;
+                }
+                if (t_lo >= t_hi) continue;
+                for (int co = 0; co < cog; co++) {
+                    float wv = w[((size_t)(g * cig + ci) * cog + co) * K + k];
+                    if (wv == 0.0f) continue;
+                    float *orow = out + (size_t)(g * cog + co) * Tp + off + t_lo * stride;
+                    const float *xin = xrow + t_lo;
+                    for (int t = 0; t < t_hi - t_lo; t++)
+                        orow[(size_t)t * stride] += wv * xin[t];
+                }
+            }
+        }
+    }
+}
+
+void kok_linear(float *restrict out, const float *restrict x, const float *restrict w,
+                const float *restrict b,
                 int Cin, int Cout, int T) {
     for (int o = 0; o < Cout; o++) {
         const float *wrow = w + (size_t)o * Cin;
@@ -81,7 +130,14 @@ void kok_linear(float *out, const float *x, const float *w, const float *b,
             float wv = wrow[c];
             if (wv == 0.0f) continue;
             const float *xrow = x + (size_t)c * T;
-            for (int t = 0; t < T; t++) orow[t] += wv * xrow[t];
+            int t = 0;
+            for (; t + 4 <= T; t += 4) {
+                orow[t] += wv * xrow[t];
+                orow[t + 1] += wv * xrow[t + 1];
+                orow[t + 2] += wv * xrow[t + 2];
+                orow[t + 3] += wv * xrow[t + 3];
+            }
+            for (; t < T; t++) orow[t] += wv * xrow[t];
         }
     }
 }
