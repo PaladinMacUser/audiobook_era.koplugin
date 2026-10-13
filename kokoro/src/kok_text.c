@@ -447,8 +447,10 @@ int kok_model_init(kok_model *mo, const void *meta_blob, size_t meta_bytes,
     if (rc) return rc;
     mo->text_blob = text_blob;
     mo->dec_blob = dec_blob;
-    rc = kok_text_w_bind(&mo->tw, &mo->meta, text_blob);
-    if (rc) return rc;
+    if (text_blob) {
+        rc = kok_text_w_bind(&mo->tw, &mo->meta, text_blob);
+        if (rc) return rc;
+    }
     return kok_dec_w_bind(&mo->dw, &mo->meta, dec_blob);
 }
 

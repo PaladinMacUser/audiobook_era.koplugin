@@ -25,6 +25,9 @@ STAGES = {
     "asr": ("<f4", "aligned asr, [asr_dim, F]"),
     "F0": ("<f4", "[2F]"),
     "N": ("<f4", "[2F]"),
+    "src": ("<f4", "harmonic source, 6 * F * F0S samples"),
+    "wave_pre_lock": ("<f4", "generator output before the phase lock"),
+    "waveform": ("<f4", "final waveform"),
 }
 
 

@@ -10,6 +10,7 @@
 
 #include "kok_kernels.h"
 #include "kok_meta.h"
+#include "kok_rng.h"
 
 #define KOK_MAX_BLOCKS 8
 
@@ -108,8 +109,13 @@ int kok_lock_apply(const kok_config *c, const float *s, long n, const float *src
 /* Run the decoder half: asr [asr_dim, F], f0 and nz [2F], the harmonic source
  * src [6 * F * F0S] (see kok_dec_forward for the exact length) -> wave. */
 int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f0,
-                    const float *nz, const float *src, float *wave, long *wave_len,
-                    float *pre_lock_out, kok_arena *a);
+                    const float *nz, const float *src, uint64_t seed, float *wave,
+                    long *wave_len, float *pre_lock_out, kok_arena *a);
+
+/* The generator's harmonic source from f0 alone (torch-parity RNG, see
+ * kok_source.c). Exposed so the source path can be gated against torch. */
+int kok_source_forward(const kok_config *c, const kok_dec_w *dw, const float *f0,
+                       int F, kok_rng *g, float *src, kok_arena *a);
 
 /* The harmonic-source length the decoder expects for F frames. */
 long kok_dec_source_floats(const kok_model *mo, int F);

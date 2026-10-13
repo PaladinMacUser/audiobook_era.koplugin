@@ -179,6 +179,26 @@ The gate builds and runs with:
 nix shell nixpkgs#gcc nixpkgs#gnumake -c make -C kokoro test
 ```
 
+### Source module and RNG (open)
+
+`src/kok_rng.c` implements the torch-CPU RNG the source needs: SHA-256 sentence
+seeding, ATen's mt19937 (init, tempering), `(raw & 0xffffff) * 2^-24` uniforms
+and 16-sample float32 Box-Muller normals. Verified against torch in isolation:
+the uniform stream is bit-exact, and a 2.25M-element normal draw matches
+`torch.rand(9)` followed by `torch.randn(250200, 9)` with zero differing
+elements.
+
+`src/kok_source.c` assembles the source (harmonics, radians, random initial
+phase, cumulative phase, the two linear interpolations, sin, the voiced mask,
+additive noise, tanh merge). It is NOT yet correct: its output correlates about
+0.94 with torch's `m_source` on the same seed, and the noise inside the model
+path does not match an identically-shaped standalone draw, which contradicts the
+isolation results above. The next step is a minimal reproduction in a clean
+process (seed, rand(1, 9), randn(1, 250200, 9)) compared against what
+`SineGen.forward` actually draws, rather than more instrumentation inside the
+model. Until that is resolved the runtime cannot synthesize without an injected
+source, and no gate depends on it: the goldens supply the source.
+
 `KOK_DUMP_STAGES` in the build (and `KOK_DEBUG_STAGES` for prints) writes the
 generator's intermediate stages to /tmp for the bisect harness.
 

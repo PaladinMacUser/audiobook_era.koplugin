@@ -175,16 +175,24 @@ class StudentDecoder:
                    stride=2, pad=1)
         x = np.concatenate([asr, F0, N], axis=0)
         x = adain_res_blk1d(x, s, sd, kq(p, "encode"))
+        if tap is not None:
+            tap["dec_encode"] = x
         asr_res = conv1d(asr, sd[kq(p, "asr_res.0.weight")], sd[kq(p, "asr_res.0.bias")])
         keep_res = True
         for i in range(4):
             if keep_res:
                 x = np.concatenate([x, asr_res, F0, N], axis=0)
             upsample = (i == 3)
+            if tap is not None:
+                tap[f"dec_pre{i}"] = x
             x = adain_res_blk1d(x, s, sd, kq(p, f"decode.{i}"), upsample=upsample)
+            if tap is not None:
+                tap[f"dec_post{i}"] = x
             if upsample:
                 keep_res = False
         gen = Generator(sd, kq(p, "generator"), self.kernels, self.uic)
+        if tap is not None:
+            tap["gen_input"] = x
         return gen(x, s, f0_curve, src_override, tap)
 
 
@@ -215,6 +223,8 @@ class Generator:
             else:
                 xs_ = conv1d(har, sd[kq(p, f"noise_convs.{i}.weight")], sd[kq(p, f"noise_convs.{i}.bias")])
             xs_ = adain_res_block1(xs_, s, sd, kq(p, f"noise_res.{i}"), 7 if i == 0 else 11)
+            if tap is not None:
+                tap[f"gen_nres{i}"] = xs_
             if i == 0:
                 x = convtr1d(x, sd[kq(p, f"ups.{i}.weight")], sd[kq(p, f"ups.{i}.bias")], stride=10, pad=5)
             else:

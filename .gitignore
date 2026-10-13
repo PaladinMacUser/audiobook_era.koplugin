@@ -62,6 +62,7 @@ sanotts/snt_server
 .venv*/
 kokoro/model/
 kokoro/goldens/
+kokoro/build/
 dev/paradee/model/
 dev/paradee/ortlib/
 dev/paradee/device-wav/

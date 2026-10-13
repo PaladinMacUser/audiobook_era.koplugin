@@ -283,8 +283,8 @@ int kok_lock_apply(const kok_config *c, const float *s, long n, const float *src
 }
 
 int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f0,
-                    const float *nz, const float *src, float *wave, long *wave_len,
-                    float *pre_lock_out, kok_arena *a) {
+                    const float *nz, const float *src, uint64_t seed, float *wave,
+                    long *wave_len, float *pre_lock_out, kok_arena *a) {
     const kok_config *c = &mo->meta.cfg;
     const kok_dec_w *dw = &mo->dw;
     const int width = dw->width, asr_dim = dw->asr_dim, sd = dw->style_dim;
@@ -401,6 +401,16 @@ int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f
     kok_stft st;
     float *stmem = kok_arena_alloc(a, (size_t)kok_stft_mem_floats(nfft, 0, nfft / 2));
     if (!stmem || kok_stft_init(&st, nfft, hop, 0, nfft / 2, stmem)) return -1;
+    /* the harmonic source: injected for the goldens, generated otherwise */
+    float *src_buf = NULL;
+    if (!src) {
+        src_buf = kok_arena_alloc(a, (size_t)src_len);
+        kok_rng rng;
+        if (!src_buf) return -1;
+        kok_rng_seed(&rng, seed);
+        if (kok_source_forward(c, dw, f0, F, &rng, src_buf, a)) return -1;
+        src = src_buf;
+    }
     int hframes = (int)((src_len + 2 * (nfft / 2) - nfft) / hop + 1);
     float *mag = kok_arena_alloc(a, (size_t)st.K * hframes);
     float *pha = kok_arena_alloc(a, (size_t)st.K * hframes);

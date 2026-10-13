@@ -167,8 +167,8 @@ int main(int argc, char **argv) {
                 float *pre = malloc((size_t)cap * sizeof(float));
                 long wlen = 0;
                 kok_arena_reset(&arena);
-                rc = kok_dec_forward(&mo, out.asr, (int)F, out.f0, out.nz, src, wav,
-                                     &wlen, pre, &arena);
+                rc = kok_dec_forward(&mo, out.asr, (int)F, out.f0, out.nz, src, 0,
+                                     wav, &wlen, pre, &arena);
                 if (rc) { fprintf(stderr, "s%d: dec rc %d\n", s, rc); return 2; }
                 printf("    decoder: %ld samples (arena peak %.1f MB)\n", wlen,
                        (double)kok_arena_peak(&arena) * sizeof(float) / 1048576.0);
