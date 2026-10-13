@@ -40,6 +40,11 @@
  * the bundled armhf espeak-ng through the bundled glibc loader on stock Kobo
  * rootfs); the gap args size the silence inserted after comma/period clauses
  * (defaults 150/350 ms; colon 220, semicolon 250).
+ * The pq8 and f32 voices embed fewer phoneme ids than the maps carry, so ids
+ * at or above the voice's d_vocab are dropped before synthesis (see
+ * drop_oov_ids); espeak's syllabic-consonant mark is the common case and
+ * otherwise costs words like "little" and "certain".
+ *
  * Sources: sanoTTS mcu core and nano lexicon G2P (MIT/Apache-2.0), server
  * written for the audiobook.koplugin spike. */
 #define _POSIX_C_SOURCE 200809L
@@ -222,6 +227,35 @@ static int text_to_ids(const char *text, int32_t *ids, int punct_id) {
     }
     if (n > MAX_IDS - 1) n = MAX_IDS - 1;
     ids[n++] = EOS_ID;
+    return n;
+}
+
+/* Drop tokens the voice cannot embed, in place. Returns the new token count.
+ *
+ * The phoneme maps are wider than the voices: the en map and the fr map both
+ * carry 154 entries reaching id 153, while the pq8/f32 duration embedding was
+ * trained on far fewer rows (the amy voice has d_vocab 129). An id at or above
+ * d_vocab makes fq_embed_row reject the token, which fails the whole clause
+ * with rc -3 and leaves the request with truncated or header-only audio.
+ *
+ * The common trigger is espeak's syllabic-consonant mark (id 144), which it
+ * emits for ordinary words like "little", "button", "certain" and "garden",
+ * so the default voice silently loses those sentences without this.
+ *
+ * A dropped token's trailing PAD goes with it, keeping the (id, PAD) shape the
+ * model expects. The model never saw these ids, so removing them moves the
+ * stream toward what it was trained on rather than away from it. The int8 and
+ * nano engines do not go through here: their runtimes either expose no vocab
+ * to check against or handle these ids already. */
+static int drop_oov_ids(int32_t *ids, int n_ids, int vocab) {
+    int n = 0;
+    for (int i = 0; i < n_ids; i++) {
+        if (ids[i] != PAD_ID && (ids[i] < 0 || ids[i] >= vocab)) {
+            if (i + 1 < n_ids && ids[i + 1] == PAD_ID) i++;
+            continue;
+        }
+        ids[n++] = ids[i];
+    }
     return n;
 }
 
@@ -674,6 +708,11 @@ int main(int argc, char **argv) {
                     }
                     n_ids = text_to_ids(clauses[ci], ids, pid);
                 }
+                /* The piperlite voices embed fewer ids than the phoneme map
+                 * carries, and an id they cannot embed fails the whole
+                 * clause. Drop those before synthesizing. */
+                if (g_engine_pq8) n_ids = drop_oov_ids(ids, n_ids, fq.d_vocab);
+                else if (g_engine_f32) n_ids = drop_oov_ids(ids, n_ids, fmf.d_vocab);
                 if (n_ids > 3) {
                     if (g_engine_pq8) {
                         rc = synth_clause_pq8(&fq, &dq, arena, sizeof arena, ids, n_ids, &sink, &emitted);
