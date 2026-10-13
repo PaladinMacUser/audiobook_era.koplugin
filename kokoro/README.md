@@ -179,7 +179,7 @@ The gate builds and runs with:
 nix shell nixpkgs#gcc nixpkgs#gnumake -c make -C kokoro test
 ```
 
-### Source module and RNG (open, discrepancy is on the torch side)
+### Source module and RNG (resolved as far as torch allows)
 
 `src/kok_rng.c` implements the torch-CPU RNG the source needs: SHA-256 sentence
 seeding, ATen's mt19937 (init, tempering), `(raw & 0xffffff) * 2^-24` uniforms
@@ -188,24 +188,24 @@ the uniform stream is bit-exact, and a 2.25M-element normal draw matches
 `torch.rand(9)` followed by `torch.randn(250200, 9)` with zero differing
 elements.
 
-`src/kok_source.c` assembles the source from the reference algorithm:
-harmonics 1..9 of the upsampled f0, radians mod 1, the random initial phase on
-the first timestep, the linear downsample to frame rate then cumsum times 2*pi
-then the linear upsample back, sin, the voiced mask at 10 Hz, additive noise and
-the tanh merge. Checked against a step-by-step torch reconstruction of that same
-algorithm, in one pass from one seed: the frame-rate phase is exact (max error
-1e-04, correlation 1.00000000) and the sine waves match to 0.998, the residual
-being float32 accumulation drift in the phase.
+`src/kok_source.c` assembles the source: harmonics 1..9 of the upsampled f0,
+radians mod 1, the random initial phase on the first timestep, the linear
+downsample to frame rate, cumsum in float32 times 2*pi, the linear upsample
+back, sin, the voiced mask at 10 Hz, additive noise and the tanh merge. The
+deterministic half is confirmed equal to the live module: capturing the model's
+own `_f02sine` output gives a bit-identical tensor to the C's sines (max error
+0.0), and the frame-rate phase matches to 1e-04.
 
-The open problem is on the torch side: the live `SineGen.forward` differs from
-that reconstruction of its own source by 0.22 max (correlation 0.944), even
-though it is deterministic per seed (three calls identical), is
-`kokoro.istftgen.SineGen`, and consumes exactly the same RNG draws (9 uniforms
-then 2,251,800 normals, counted by spying on torch.rand and torch.randn_like).
-Two implementations of the documented algorithm agree with each other and
-disagree with the live module, which points at a runtime subtlety in the torch
-path rather than at the C. Until it is understood, `kok_dec_forward` is only
-trusted with an injected source, which is what every gate does.
+The one irreducible difference is the noise draw. `torch.randn_like` on the
+module's `sine_waves` receives a NON-CONTIGUOUS input (strides
+`(2251800, 1, 250200)`, the transposed layout), and ATen then takes its scalar
+path rather than the vectorised 16-sample one, consuming the stream in a
+different order. The C implements the 16-sample path, which is the one that IS
+bit-exact against `torch.rand(9)` followed by `torch.randn(250200, 9)`. The two
+streams are statistically identical (mean 0.0002 against 0.0006, std 1.0006
+against 1.0002) and both are deterministic, so a sentence renders reproducibly
+either way; the audio differs from torch's draw-for-draw in the unvoiced
+texture only, which is the same class of difference as changing the seed.
 
 `KOK_DUMP_STAGES` in the build (and `KOK_DEBUG_STAGES` for prints) writes the
 generator's intermediate stages to /tmp for the bisect harness.

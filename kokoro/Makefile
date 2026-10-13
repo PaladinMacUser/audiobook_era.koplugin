@@ -13,7 +13,11 @@ LDLIBS ?= -lm
 SRC = src/kok_meta.c src/kok_kernels.c src/kok_istft.c src/kok_rng.c src/kok_source.c src/kok_text.c src/kok_dec.c
 BUILD = build
 
-all: $(BUILD)/text_golden_test
+all: $(BUILD)/text_golden_test $(BUILD)/kok_tts
+
+$(BUILD)/kok_tts: src/kok_tts.c $(SRC) include/*.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) -o $@ src/kok_tts.c $(SRC) $(LDLIBS)
 
 $(BUILD)/text_golden_test: test/text_golden_test.c $(SRC) include/*.h
 	@mkdir -p $(BUILD)
