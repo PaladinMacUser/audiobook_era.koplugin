@@ -115,6 +115,36 @@ Semantics this pinned, each of which is easy to get wrong:
   33-tap Hann smoothing kernel built as `hann_window(35)[1:-1]`, and the voiced
   mask from f0 above 60 Hz sampled at the 300-sample generator hop.
 
+## C runtime: text half (M2, done)
+
+`include/kok_meta.h` + `src/kok_meta.c` parse the model config and the by-name
+weight slot table; `include/kok_kernels.h` + `src/kok_kernels.c` are the
+primitives (conv1d/ConvTranspose1d with groups and dilation, linear, layer and
+instance norm, AdaIN, AdaLayerNorm, Snake, leaky ReLU, the two GELU forms,
+softmax, embeddings, LSTM and bidirectional LSTM, and Kokoro's AdainResBlk1d);
+`src/kok_text.c` is the text half: ALBERT, text encoder, duration encoder,
+prosody with the F0/N heads, and the asr projection. Channel-major [C, T]
+throughout, no dynamic allocation (callers pass an arena), no VLAs.
+
+Weights are resolved by name once at bind time so a mismatch fails at startup,
+including the element-count check against the config-implied shape.
+
+```sh
+nix shell nixpkgs#gcc nixpkgs#gnumake -c make -C kokoro test
+```
+
+Gate result (2026-10-13): durations integer-exact on all five sentences, and
+every other stage at or under 1.5e-06 relative error against the torch goldens
+(d, en, asr at 6e-07 to 1.4e-06; F0 at 7e-07 relative, its absolute error being
+larger only because F0 runs to ~300). Arena peak 6 to 12 MB for 93 to 192
+token sentences. Two sentences of fixtures are committed as the contract
+(`test/fixtures/paradee-8m`, 2.7 MB); the full set regenerates with
+`tools/dump_stage_bin.py`.
+
+Blobs are not committed: `tools/export_kokoro_blobs.py` rebuilds them from the
+checkpoints into the gitignored `kokoro/model/blobs` (fp32, 32 MB for this
+model; the int8 path in M6 will bring that to the 9 MB class).
+
 ## Layout
 
 `include/` and `src/` hold the runtime (`kok_` prefix, own port header,
