@@ -54,3 +54,13 @@ kindle_crash.log
 sanotts/out/
 sanotts/mcu/
 sanotts/snt_server
+
+# Kokoro-family port: working data and toolchain venvs (never ship or track)
+.venv-kokoro/
+.venv-misaki/
+kokoro/model/
+kokoro/goldens/
+dev/paradee/model/
+dev/paradee/ortlib/
+dev/paradee/device-wav/
+dev/paradee/*.ids
