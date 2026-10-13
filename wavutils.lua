@@ -589,6 +589,107 @@ function WavUtils.splitFile(source_path, segment_durations, output_paths)
 end
 
 --[[--
+Split a WAV file at exact sample boundaries.
+
+Unlike splitFile, which places cuts proportionally from millisecond
+estimates, this takes the cut points directly, so a caller that knows the
+real boundaries (the sanoTTS timing sidecar) gets sample-accurate segments.
+The copy loop mirrors splitFile's; the two are kept separate so the
+proportional path used by every other backend is left untouched.
+
+@param source_path string        Path to the source WAV
+@param boundaries_samples table  #output_paths + 1 absolute sample offsets,
+                                 starting at 0 and ending at the WAV's total
+                                 sample count; segment i spans
+                                 [boundaries[i], boundaries[i+1])
+@param output_paths table        Array of output file paths
+@return boolean  true if all segments written successfully
+--]]
+function WavUtils.splitFileAtSamples(source_path, boundaries_samples, output_paths)
+    if #boundaries_samples ~= #output_paths + 1 then
+        logger.err("WavUtils: splitFileAtSamples: need #output_paths + 1 boundaries")
+        return false
+    end
+    for i = 2, #boundaries_samples do
+        if boundaries_samples[i] < boundaries_samples[i - 1] then
+            logger.err("WavUtils: splitFileAtSamples: boundaries not monotonic")
+            return false
+        end
+    end
+
+    local f = io.open(source_path, "rb")
+    if not f then
+        logger.err("WavUtils: splitFileAtSamples: cannot open", source_path)
+        return false
+    end
+
+    local header = f:read(WavUtils.HEADER_SIZE)
+    if not header or #header < WavUtils.HEADER_SIZE then
+        f:close()
+        return false
+    end
+
+    local block_align = WavUtils.readLE16(header:sub(
+        WavUtils.BLOCK_ALIGN_OFFSET + 1, WavUtils.BLOCK_ALIGN_OFFSET + 2))
+    local total_data_size = WavUtils.readLE32(header:sub(
+        WavUtils.DATA_SIZE_OFFSET + 1, WavUtils.DATA_SIZE_OFFSET + 4))
+    if block_align == 0 or total_data_size == 0 then
+        f:close()
+        logger.err("WavUtils: splitFileAtSamples: invalid WAV header")
+        return false
+    end
+
+    -- Sample offsets to byte offsets. block_align divides every boundary by
+    -- construction, so no rounding to a block boundary is needed.
+    local offsets = {}
+    for i = 1, #output_paths do
+        local b = boundaries_samples[i] * block_align
+        if b < 0 then b = 0 end
+        if b > total_data_size then b = total_data_size end
+        offsets[i] = b
+    end
+
+    local all_ok = true
+    for i = 1, #output_paths do
+        local seg_start = offsets[i]
+        local seg_end = (i < #offsets) and offsets[i + 1] or total_data_size
+        local seg_size = seg_end - seg_start
+
+        if seg_size <= 0 then
+            WavUtils.generateSilence(output_paths[i], 100)
+        else
+            local of = io.open(output_paths[i], "wb")
+            if not of then
+                logger.err("WavUtils: splitFileAtSamples: cannot create", output_paths[i])
+                all_ok = false
+            else
+                local seg_header = header:sub(1, WavUtils.RIFF_SIZE_OFFSET)
+                    .. WavUtils.le32(seg_size + 36)
+                    .. header:sub(WavUtils.RIFF_SIZE_OFFSET + 5, WavUtils.DATA_SIZE_OFFSET)
+                    .. WavUtils.le32(seg_size)
+                of:write(seg_header)
+
+                f:seek("set", WavUtils.HEADER_SIZE + seg_start)
+                local chunk_sz = 8192
+                local remaining = seg_size
+                while remaining > 0 do
+                    local to_read = math.min(chunk_sz, remaining)
+                    local data = f:read(to_read)
+                    if not data or #data == 0 then break end
+                    of:write(data)
+                    remaining = remaining - #data
+                end
+                of:close()
+            end
+        end
+    end
+
+    f:close()
+    logger.warn("WavUtils: Split", source_path, "at samples into", #output_paths, "segments")
+    return all_ok
+end
+
+--[[--
 Append a low-frequency sine-wave tone to the end of an existing WAV file.
 Used in "gap test mode" to make gap locations audible.
 Updates RIFF/data chunk sizes after appending.

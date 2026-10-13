@@ -96,3 +96,63 @@ layered default exists.
 - `--loader <ld-linux>`, `--loader-libdir <dir>` exec the bundled armhf
   espeak-ng through the bundled glibc loader on stock Kobo rootfs (set
   automatically by piperqueue).
+
+## Phoneme ids above the voice's vocabulary
+
+The phoneme maps are wider than the pq8 and f32 voices. Both the English and
+the French map carry 154 entries reaching id 153, while the duration embedding
+was trained on fewer rows: the amy voice has `d_vocab` 129. An id at or above
+`d_vocab` is rejected by the runtime, which in `snt_server.c`'s terms means the
+clause fails with `pq8 durations rc -3` and the request comes back with
+header-only audio or a sentence truncated at that clause.
+
+The frequent trigger is espeak's syllabic-consonant mark, id 144, which it
+emits for ordinary words: "little", "button", "certain", "garden", "simple".
+`drop_oov_ids()` in `snt_server.c` removes such tokens and their trailing pad
+before synthesis, so the sentence is spoken instead of dropped. The affected
+phones are those the model never saw, so the result is closer to the training
+distribution than the failure was. `dev/test_snt_server_oov.sh` covers it.
+
+The int8 and nano engines are unaffected: their runtimes either expose no
+vocabulary to check against or already handle these ids.
+
+## Word timing sidecar
+
+On the pq8 and f32 engines the server writes `<wav>.timing` beside every WAV
+it produces, and the plugin uses it to place the read-aloud highlight on the
+right word instead of estimating from character counts. The values are the
+duration student's own per-phoneme frame counts, computed during synthesis and
+previously discarded; reading them back changes no audio, and the WAV is
+bit-identical with or without the file. The int8 and nano engines have no
+duration read-out and write nothing, which is how the plugin tells the two
+cases apart.
+
+```
+sntt 1 <rate> <hop> <total_samples> <n_clauses> <n_words>
+c <j> <char_start> <char_end> <punct> <sample_start> <sample_end> <word0> <nwords>
+w <i> <start_sample> <end_sample>
+```
+
+Word boundaries are the phoneme id that `" "` maps to, which is 3 in every
+piper map and is the only symbol that maps there. Framing is found by
+position, not by id value, because both maps alias `^` and `$` to BOS and EOS
+and a live IPA stream may carry either. Each `c` record gives a clause's
+absolute sample span in the WAV (trailing silence included) and its character
+territory in the request string; the `w` records are that clause's word spans,
+in stream order. The territories refer to the text after the caller's own
+cleaning, not the raw input, so a reader must clean its input the same way
+before matching them.
+
+The `w` records are really **phoneme groups**, which coincide with words only
+when espeak keeps them apart. It often does not: unstressed function words are
+joined to their neighbour, so `in the` and `from the` each come back as one
+group. A reader that maps words to groups one-for-one must therefore check the
+counts and fall back when they disagree, rather than assume. On the benchmark
+prose in `dev/benchmark/`, about a quarter of sentences disagree this way, and
+a smaller number disagree because espeak spells numbers out (`1984` becomes
+three groups). Per-word phonemization does not recover the missing boundaries:
+espeak de-stresses and reduces those words in context, so phonemizing a word
+alone yields a different phone sequence than the one it contributes to the
+clause. Exact word boundaries are only available from a phonemizer that
+preserves them, which would mean a different phone sequence and therefore
+different audio.

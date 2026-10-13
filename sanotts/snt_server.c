@@ -1,6 +1,6 @@
 /* snt_server.c -- sanoTTS engine server for audiobook.koplugin.
  * Piper-shaped line protocol on stdin: {"input": "text", "output": "path.wav"}
- * per line; synthesizes and prints {"wav": "path", "samples": N}.
+ * per line; synthesizes and prints the WAV path alone on stdout.
  *
  * Three engines, selected with --engine:
  *   int8 (default)  kristin-class R7 voice, 22050 Hz. Phonemization: the
@@ -40,6 +40,22 @@
  * the bundled armhf espeak-ng through the bundled glibc loader on stock Kobo
  * rootfs); the gap args size the silence inserted after comma/period clauses
  * (defaults 150/350 ms; colon 220, semicolon 250).
+ * Timing sidecar (pq8 and f32 only). Alongside each WAV, "<wav>.timing" is
+ * written with the word boundaries the duration student already produced,
+ * then immediately discarded by the old code. Line-oriented ASCII integers:
+ *
+ *   sntt 1 <rate> <hop> <total_samples> <n_clauses> <n_words>
+ *   c <j> <char_start> <char_end> <punct> <sample_start> <sample_end> <word0> <nwords>
+ *   w <i> <start_sample> <end_sample>
+ *
+ * The magic and version are the capability flag. Each "c" record gives a
+ * clause's absolute sample span in the WAV and its character territory in the
+ * input string; "w" records are the clause's word spans, in stream order.
+ * Word boundaries come from phoneme id 3 (the piper maps' ' ' separator) and
+ * framing is found by position, not by id value, since both maps alias '^' to
+ * BOS and '$' to EOS. The audio is bit-identical with or without this file:
+ * every value is read out of arrays synthesis already computed.
+ *
  * The pq8 and f32 voices embed fewer phoneme ids than the maps carry, so ids
  * at or above the voice's d_vocab are dropped before synthesis (see
  * drop_oov_ids); espeak's syllabic-consonant mark is the common case and
@@ -72,6 +88,15 @@
 #define EOS_ID 2
 #define PAD_ID 0
 #define MAX_IDS 1024
+/* The piper maps alias ' ' to 3 in every language, and it is the only
+ * symbol that maps there, so id 3 marks a word boundary in the token
+ * stream. */
+#define WORD_SEP_ID 3
+/* A clause can hold at most MAX_IDS/2 phones, so at most that many words. */
+#define MAX_WORDS 512
+/* Per-word span, in frames while the ids are being walked and converted to
+ * absolute WAV samples before it is published. */
+typedef struct { long start, end; } SntWordSpan;
 
 static void *xload2s(const char *dir, const char *name, size_t *out_bytes);
 
@@ -363,6 +388,51 @@ static int synth_clause_nano(void *front, void *dec, void *arena, size_t arena_s
     return 0;
 }
 
+/* Derive per-word frame spans from the synthesized token stream.
+ *
+ * Word boundaries come from WORD_SEP_ID, which is where espeak's inter-word
+ * space lands after map_id(). Framing is found by POSITION, never by id
+ * value: both maps alias '^' to BOS_ID and '$' to EOS_ID, so a real IPA
+ * stream may legitimately carry id 1 or 2. Index 0 is BOS and the last index
+ * is EOS by construction (text_to_ids always appends EOS last).
+ *
+ * The BOS/PAD prefix is folded into the first word so word 1 starts at the
+ * clause start, and everything after the final separator (trailing PAD, the
+ * punctuation id, EOS) is folded into the last word so the last span ends
+ * exactly on the clause's content end. The separator's own frames are left
+ * as an inter-word gap: they belong to neither neighbouring word.
+ *
+ * Returns the number of spans written, capped at max_out. */
+static int word_spans_from_ids(const int32_t *ids, const int32_t *durs, int n_ids,
+                               SntWordSpan *out, int max_out) {
+    int n = 0, open = 0;
+    long cur = 0;
+    for (int i = 0; i < n_ids; i++) {
+        if (i == 0 || i == n_ids - 1) { cur += durs[i]; continue; }
+        if (ids[i] == WORD_SEP_ID) {
+            if (open) { out[n - 1].end = cur; open = 0; }
+            cur += durs[i];
+            continue;
+        }
+        if (!open) {
+            if (n >= max_out) return n;
+            out[n].start = cur;
+            out[n].end = cur;
+            n++;
+            open = 1;
+        }
+        cur += durs[i];
+        out[n - 1].end = cur;
+    }
+    if (n > 0) {
+        /* Fold the framing prefix into word 1 and the trailing framing and
+         * punctuation into the last word, so the span covers the clause. */
+        out[0].start = 0;
+        out[n - 1].end = cur;
+    }
+    return n;
+}
+
 /* Synthesize one clause on the pq8 engine (blob-parameterized piperlite,
  * fully int8): durations -> latent -> decoder -> PCM. Phoneme ids come from
  * the shared espeak path, so this takes the framed id array directly.
@@ -370,9 +440,12 @@ static int synth_clause_nano(void *front, void *dec, void *arena, size_t arena_s
 static int synth_clause_pq8(snt_front_q8_model *fq, snt_piperlite_q8_model *dq,
                             void *arena, size_t arena_size,
                             const int32_t *ids, int n_ids,
-                            WavSink *sink, long *emitted) {
+                            WavSink *sink, long *emitted,
+                            SntWordSpan *spans, int *n_spans, int max_spans,
+                            long base_samples) {
     static int32_t durs[MAX_IDS];
     long before = sink->n;
+    *n_spans = 0;
     long frames = snt_front_q8_durations(fq, ids, n_ids, g_length_scale,
                                          durs, arena, arena_size);
     if (frames < 0) {
@@ -395,6 +468,18 @@ static int synth_clause_pq8(snt_front_q8_model *fq, snt_piperlite_q8_model *dq,
             total += durs[i];
         }
         frames = total;
+    }
+    /* Read the per-word spans out of the frame counts the duration student
+     * just produced. This runs after the pause adjustment so the spans match
+     * the audio; it reads ids[]/durs[] only and never feeds back into
+     * synthesis. */
+    {
+        int ns = word_spans_from_ids(ids, durs, n_ids, spans, max_spans);
+        for (int g = 0; g < ns; g++) {
+            spans[g].start = base_samples + spans[g].start * SNT_PIPERLITE_Q8_HOP;
+            spans[g].end   = base_samples + spans[g].end   * SNT_PIPERLITE_Q8_HOP;
+        }
+        *n_spans = ns;
     }
     size_t la = snt_front_q8_latent_arena_bytes(fq, n_ids, frames);
     size_t da = snt_piperlite_q8_arena_bytes(dq, (int)frames);
@@ -445,9 +530,12 @@ static int synth_clause_pq8(snt_front_q8_model *fq, snt_piperlite_q8_model *dq,
 static int synth_clause_f32(snt_front_model *fm, snt_piperlite_model *dm,
                             float *arena, size_t arena_floats,
                             const int32_t *ids, int n_ids,
-                            WavSink *sink, long *emitted) {
+                            WavSink *sink, long *emitted,
+                            SntWordSpan *spans, int *n_spans, int max_spans,
+                            long base_samples) {
     static int32_t durs[MAX_IDS];
     long before = sink->n;
+    *n_spans = 0;
     long frames = snt_front_durations(fm, ids, n_ids, g_length_scale,
                                       durs, arena, arena_floats);
     if (frames < 0) {
@@ -467,6 +555,15 @@ static int synth_clause_f32(snt_front_model *fm, snt_piperlite_model *dm,
             total += durs[i];
         }
         frames = total;
+    }
+    /* Same read-out as pq8: spans come from the post-scaling frame counts. */
+    {
+        int ns = word_spans_from_ids(ids, durs, n_ids, spans, max_spans);
+        for (int g = 0; g < ns; g++) {
+            spans[g].start = base_samples + spans[g].start * SNT_PIPERLITE_HOP;
+            spans[g].end   = base_samples + spans[g].end   * SNT_PIPERLITE_HOP;
+        }
+        *n_spans = ns;
     }
     size_t la = snt_front_latent_arena_floats(fm, n_ids, frames);
     size_t da = snt_piperlite_arena_floats(dm, (int)frames);
@@ -640,15 +737,27 @@ int main(int argc, char **argv) {
         int clause_ms[64];
         char clause_punct[64];
         int n_clauses = 0;
+        /* Timeline read-out. One entry per clause holds its absolute sample
+         * span in the request WAV and its character territory in `input`;
+         * `words` accumulates the per-word spans the clause loop appends.
+         * Only the pq8 and f32 engines fill these. */
+        long cl_sstart[64] = {0}, cl_send[64] = {0};
+        int cl_char_start[64] = {0}, cl_char_end[64] = {0};
+        int cl_word0[64] = {0}, cl_nwords[64] = {0};
+        static SntWordSpan words[MAX_WORDS];
+        int n_words = 0;
         if (g_native_punct && !g_engine_nano) {
             snprintf(clauses[0], sizeof clauses[0], "%s", input);
             clauses[0][sizeof clauses[0] - 1] = 0;
             clause_ms[0] = 0;
             clause_punct[0] = 0; /* punctuation ids are already in the stream */
+            cl_char_start[0] = 0;
+            cl_char_end[0] = (int)strlen(input);
             n_clauses = 1;
         } else {
             char cur[4096]; int cur_n = 0;
             const char *p = input;
+            int cur_start = 0;
             while (*p && n_clauses < 64) {
                 unsigned char c = (unsigned char)*p;
                 if (c == '.' || c == ',' || c == '?' || c == '!' || c == ':' || c == ';') {
@@ -660,13 +769,17 @@ int main(int argc, char **argv) {
                             c == ':' ? g_colon_ms :
                             c == ';' ? g_semi_ms : g_period_ms;
                         clause_punct[n_clauses] = (char)c;
+                        cl_char_start[n_clauses] = cur_start;
                         n_clauses++;
                         cur_n = 0;
                     }
                     p++;
                     continue;
                 }
-                if (cur_n < 4090) cur[cur_n++] = (char)c;
+                if (cur_n < 4090) {
+                    if (cur_n == 0) cur_start = (int)(p - input);
+                    cur[cur_n++] = (char)c;
+                }
                 p++;
             }
             if (cur_n > 0 && n_clauses < 64) {
@@ -674,8 +787,15 @@ int main(int argc, char **argv) {
                 memcpy(clauses[n_clauses], cur, (size_t)cur_n + 1);
                 clause_ms[n_clauses] = 0; /* final clause: plugin adds its own gap */
                 clause_punct[n_clauses] = 0;
+                cl_char_start[n_clauses] = cur_start;
                 n_clauses++;
             }
+            /* A clause's territory runs to the next clause's first character,
+             * not to its own terminator, so a run of swallowed punctuation
+             * stays inside the clause it ended and the territories partition
+             * [0, strlen(input)) exactly. */
+            for (int j = 0; j + 1 < n_clauses; j++) cl_char_end[j] = cl_char_start[j + 1];
+            if (n_clauses > 0) cl_char_end[n_clauses - 1] = (int)strlen(input);
         }
         if (n_clauses == 0) {
             fprintf(stderr, "{\"error\": \"empty input\"}\n");
@@ -693,6 +813,8 @@ int main(int argc, char **argv) {
         for (int ci = 0; ci < n_clauses; ci++) {
             int rc = 0, spoke = 0;
             long emitted = 0;
+            int nspans = 0;
+            cl_sstart[ci] = sink.n;
             if (g_engine_nano) {
                 rc = synth_clause_nano(front, dec, arena, sizeof arena, clauses[ci], &sink, &emitted);
                 spoke = emitted > 0;
@@ -715,12 +837,14 @@ int main(int argc, char **argv) {
                 else if (g_engine_f32) n_ids = drop_oov_ids(ids, n_ids, fmf.d_vocab);
                 if (n_ids > 3) {
                     if (g_engine_pq8) {
-                        rc = synth_clause_pq8(&fq, &dq, arena, sizeof arena, ids, n_ids, &sink, &emitted);
+                        rc = synth_clause_pq8(&fq, &dq, arena, sizeof arena, ids, n_ids, &sink, &emitted,
+                                              words + n_words, &nspans, MAX_WORDS - n_words, cl_sstart[ci]);
                         spoke = emitted > 0;
                     } else if (g_engine_f32) {
                         rc = synth_clause_f32(&fmf, &dfm, (float *)arena,
                                               sizeof arena / sizeof(float),
-                                              ids, n_ids, &sink, &emitted);
+                                              ids, n_ids, &sink, &emitted,
+                                              words + n_words, &nspans, MAX_WORDS - n_words, cl_sstart[ci]);
                         spoke = emitted > 0;
                     } else {
                         snt_config cfg = {front, dec, arena, sizeof arena, NULL};
@@ -731,18 +855,49 @@ int main(int argc, char **argv) {
                 }
             }
             if (rc != 0) { rc_all = rc; break; }
+            if (spoke && nspans > 0) {
+                cl_word0[ci] = n_words;
+                cl_nwords[ci] = nspans;
+                n_words += nspans;
+            }
             if (spoke && ci < n_clauses - 1 && clause_ms[ci] > 0) {
                 int gap = rate * clause_ms[ci] / 1000;
                 static const int16_t zero;
                 for (int s = 0; s < gap; s++) fwrite(&zero, 2, 1, fh);
                 sink.n += gap;
             }
+            /* The clause's sample span includes the gap it emitted, so
+             * consecutive clauses tile the WAV without a seam. */
+            cl_send[ci] = sink.n;
         }
 
         long data_bytes = sink.n * 2;
         fseek(fh, 0, SEEK_SET);
         write_header(fh, (uint32_t)data_bytes, (uint32_t)rate);
         fclose(fh);
+
+        /* Timing sidecar, "<wav>.timing", derived from the output path so the
+         * stdout protocol stays one path per line. Written and closed BEFORE
+         * the path is printed, so the wrapper's "<wav>.done" marker (made from
+         * that line) gates both files. Absence is the plugin's "no real
+         * timing" signal, so the int8 and nano engines and every failed run
+         * write nothing. See the format note at the top of this file. */
+        if (rc_all == 0 && n_words > 0 && (g_engine_pq8 || g_engine_f32)) {
+            char tpath[1100];
+            int hop = g_engine_pq8 ? SNT_PIPERLITE_Q8_HOP : SNT_PIPERLITE_HOP;
+            snprintf(tpath, sizeof tpath, "%s.timing", output);
+            FILE *tf = fopen(tpath, "w");
+            if (tf) {
+                fprintf(tf, "sntt 1 %d %d %ld %d %d\n", rate, hop, sink.n, n_clauses, n_words);
+                for (int ci = 0; ci < n_clauses; ci++)
+                    fprintf(tf, "c %d %d %d %d %ld %ld %d %d\n", ci,
+                            cl_char_start[ci], cl_char_end[ci], (int)clause_punct[ci],
+                            cl_sstart[ci], cl_send[ci], cl_word0[ci], cl_nwords[ci]);
+                for (int i = 0; i < n_words; i++)
+                    fprintf(tf, "w %d %ld %ld\n", i, words[i].start, words[i].end);
+                fclose(tf);
+            }
+        }
 
         printf("%s\n", output);
         fflush(stdout);

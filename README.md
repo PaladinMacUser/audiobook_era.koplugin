@@ -650,7 +650,10 @@ If you don't want to use the packaging script, you can assemble the Piper runtim
 
 ## To Do
 
-- Implement real word-level timing from TTS engines (SSML / phoneme callbacks)
+- Real word-level timing ships for the sanoTTS pq8 and f32 engines, which read
+  the duration student's own per-phoneme counts back out of the synthesizer
+  (see [sanotts/README.md](sanotts/README.md)). The espeak, Piper, Android,
+  int8 and nano paths still estimate timing from character counts
 - Add PDF/DjVu highlight support (currently EPUB only)
 - Integrate more TTS backends
 - Improve accessibility

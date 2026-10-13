@@ -765,6 +765,195 @@ function PiperQueue:stopServers()
     logger.warn("PiperQueue: Servers stopped, rescued", rescued, "pending entries")
 end
 
+-- ── Real word timing (snt_server timing sidecar) ─────────────────────
+--
+-- The pq8 and f32 sanoTTS engines already compute a duration per phoneme;
+-- they write it beside the WAV as "<wav>.timing".  Reading it back replaces
+-- the character-count estimate with the engine's own arithmetic.  Every
+-- other backend writes no such file and keeps the estimate.
+
+--[[--
+Parse a timing sidecar.
+@param path string  Path to the sidecar
+@return table|nil  {rate, hop, total, clauses, words}, or nil when the file
+                   is missing, unreadable, truncated or an unknown version.
+                   nil is the signal to fall back to the estimator.
+--]]
+function PiperQueue:_parseTimingSidecar(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+
+    local side
+    for line in f:lines() do
+        local tag = line:sub(1, 2)
+        if tag == "sn" then
+            local magic, ver, rate, hop, total, ncl, nw = line:match(
+                "^(%a+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)$")
+            if magic ~= "sntt" or tonumber(ver) ~= 1 then
+                f:close()
+                return nil
+            end
+            side = {
+                rate = tonumber(rate), hop = tonumber(hop), total = tonumber(total),
+                n_clauses = tonumber(ncl), n_words = tonumber(nw),
+                clauses = {}, words = {},
+            }
+        elseif side and tag == "c " then
+            local j, cs, ce, punct, ss, se, w0, nwd = line:match(
+                "^c%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)$")
+            if cs then
+                side.clauses[#side.clauses + 1] = {
+                    char_start = tonumber(cs), char_end = tonumber(ce),
+                    punct = tonumber(punct),
+                    sample_start = tonumber(ss), sample_end = tonumber(se),
+                    word0 = tonumber(w0), nwords = tonumber(nwd),
+                }
+            end
+        elseif side and tag == "w " then
+            local idx, ss, se = line:match("^w%s+(%d+)%s+(%d+)%s+(%d+)$")
+            if idx then
+                side.words[#side.words + 1] = {
+                    start_sample = tonumber(ss), end_sample = tonumber(se),
+                }
+            end
+        end
+    end
+    f:close()
+
+    if not side or side.rate <= 0 or side.hop <= 0 or side.total <= 0 then
+        return nil
+    end
+    -- A short file (the server died mid-write) must not be trusted.
+    if #side.clauses ~= side.n_clauses or #side.words ~= side.n_words then
+        return nil
+    end
+    return side
+end
+
+--[[--
+Count the words a timing array for this text holds: whitespace tokens
+carrying at least one non-punctuation character, matching the tokenization
+in TTSEngine:generateTimingEstimates.
+@param text string
+@return number
+--]]
+local function countTimingWords(text)
+    local n = 0
+    for word in text:gmatch("%S+") do
+        if (word:gsub("[%p]", "")) ~= "" then n = n + 1 end
+    end
+    return n
+end
+
+--[[--
+Build a flat per-word timing array for one sentence from the sidecar.
+@param side table        Parsed sidecar
+@param first_clause number  First clause index (1-based) of this sentence
+@param last_clause number   Last clause index of this sentence
+@param seg_start number  Sentence segment start, in WAV samples
+@param seg_end number    Sentence segment end, in WAV samples
+@param text string       Sentence text
+@return table|nil  Array of {word, start_time, end_time} in ms relative to
+                   the segment, or nil when the sentence's word count does
+                   not match the engine's spoken word groups, in which case
+                   the caller falls back to the estimator for this sentence.
+
+                   The counts differ for two reasons, both in espeak and
+                   neither fixable here without changing the audio. Merging
+                   dominates: espeak joins unstressed function words to their
+                   neighbour, so "in the" and "from the" come back as single
+                   groups and a sentence can lose several groups this way
+                   (measured on the benchmark prose, about a quarter of
+                   sentences). Expansion is the other: espeak spells numbers
+                   out, so "1984" becomes three groups for one word. Per-word
+                   phonemization does not recover the boundary either, since
+                   espeak de-stresses and reduces those words in context, so
+                   the isolated form is a different phone sequence.
+--]]
+function PiperQueue:_buildSentenceTiming(side, first_clause, last_clause, seg_start, seg_end, text)
+    if not side or last_clause < first_clause or seg_end <= seg_start then
+        return nil
+    end
+
+    local spans = {}
+    for j = first_clause, last_clause do
+        local c = side.clauses[j]
+        if not c then return nil end
+        for k = c.word0, c.word0 + c.nwords - 1 do
+            local w = side.words[k + 1]   -- sidecar word indices are 0-based
+            if not w then return nil end
+            spans[#spans + 1] = w
+        end
+    end
+    if #spans ~= countTimingWords(text) then return nil end
+
+    local recs, i = {}, 0
+    for word in text:gmatch("%S+") do
+        if (word:gsub("[%p]", "")) ~= "" then
+            i = i + 1
+            local w = spans[i]
+            local s = math.floor((w.start_sample - seg_start) * 1000 / side.rate)
+            local e = math.floor((w.end_sample - seg_start) * 1000 / side.rate)
+            if s < 0 then s = 0 end
+            if e <= s then e = s + 1 end
+            recs[#recs + 1] = { word = word, start_time = s, end_time = e }
+        end
+    end
+    if #recs == 0 then return nil end
+
+    -- Anchor the last word to the segment end.  play() and SyncController
+    -- rescale a timing array by real_duration / last_end, so landing the
+    -- last word exactly on the segment length makes those divisions 1 and
+    -- leaves the real times untouched.
+    local last = recs[#recs]
+    local seg_ms = math.floor((seg_end - seg_start) * 1000 / side.rate)
+    if seg_ms > last.start_time then last.end_time = seg_ms end
+    return recs
+end
+
+--[[--
+Map the plugin's sentences onto the server's clauses using the character
+territories the sidecar records.  The territories partition the cleaned
+request string, so a clause belongs to the sentence whose range it starts in.
+@param side table           Parsed sidecar
+@param cleaned_parts table  Per-sentence cleaned text
+@param ref string           The cleaned joined text the server received
+@return table|nil, table|nil  Per-sentence {first,last,seg_start,seg_end} and
+                              the sample boundary array, or nil when the
+                              territories do not form a clean partition (the
+                              caller then keeps the estimated split).
+--]]
+function PiperQueue:_mapSentencesToClauses(side, cleaned_parts, ref)
+    if table.concat(cleaned_parts, " ") ~= ref then return nil end
+
+    local sent_first, sent_last = {}, {}
+    local j, pos = 1, 0
+    for i, part in ipairs(cleaned_parts) do
+        local stop = pos + #part
+        local first = j
+        while j <= #side.clauses and side.clauses[j].char_start < stop do
+            j = j + 1
+        end
+        if j - 1 < first then return nil end
+        sent_first[i], sent_last[i] = first, j - 1
+        pos = stop + 1   -- the join space
+    end
+    if j <= #side.clauses then return nil end
+
+    local out, bounds = {}, {}
+    for i = 1, #sent_first do
+        bounds[i] = side.clauses[sent_first[i]].sample_start
+        out[i] = { first = sent_first[i], last = sent_last[i] }
+    end
+    bounds[#out + 1] = side.total
+    if bounds[1] ~= 0 then return nil end
+    for i = 1, #out do
+        out[i].seg_start, out[i].seg_end = bounds[i], bounds[i + 1]
+        if out[i].seg_end <= out[i].seg_start then return nil end
+    end
+    return out, bounds
+end
+
 -- ── Queue management ─────────────────────────────────────────────────
 
 --[[--
@@ -794,6 +983,7 @@ function PiperQueue:enqueue(text)
         file        = audio_file,
         text_file   = nil,
         done_marker = audio_file .. ".done",
+        timing_file = audio_file .. ".timing",
         timing      = nil,
         status      = "queued",
     }
@@ -896,6 +1086,7 @@ function PiperQueue:launchNext()
                 if not pq._queue[primary_text] then
                     os.remove(combined_audio_file)
                     os.remove(combined_done_marker)
+                    os.remove(combined_audio_file .. ".timing")
                     pq._slots_busy = math.max(0, (pq._slots_busy or 0) - 1)
                     pq:launchNext()
                     return
@@ -925,31 +1116,37 @@ function PiperQueue:launchNext()
                     local audio_ms = WavUtils.getDurationMs(combined_audio_file)
                     self:_recordRtfSample(synth_ms, audio_ms, #batch_texts)
 
+                    local sidecar_path = combined_audio_file .. ".timing"
+                    local side = pq:_parseTimingSidecar(sidecar_path)
+
                     if #batch_texts == 1 then
                         WavUtils.applyFade(combined_audio_file, 15)
-                        engine:generateTimingEstimates(primary_text)
-                        primary_entry.timing = engine.timing_data
+                        local real = side and pq:_buildSentenceTiming(
+                            side, 1, #side.clauses, 0, side.total, primary_text)
+                        if real then
+                            primary_entry.timing = real
+                            logger.warn("PiperQueue: real word timing for",
+                                #real, "words (sidecar)")
+                        else
+                            engine:generateTimingEstimates(primary_text)
+                            primary_entry.timing = engine.timing_data
+                        end
                         primary_entry.status = "ready"
                     else
-                        -- Estimate per-sentence duration from syllable counts
-                        local durations = {}
-                        local total_syllables = 0
-                        for _, t in ipairs(batch_texts) do
-                            local count = 0
-                            for word in t:gmatch("%S+") do
-                                count = count + engine:countSyllables(
-                                    word:gsub("[%p]", ""))
-                            end
-                            count = math.max(count, 1)
-                            table.insert(durations, count)
-                            total_syllables = total_syllables + count
+                        -- The server cleans the joined text before it sees it,
+                        -- so the sidecar's character territories are offsets
+                        -- into the cleaned string.  Rebuild that same string
+                        -- here; if a cleaning pattern spans a sentence join the
+                        -- parts will not reassemble and the sidecar is ignored
+                        -- for this batch.
+                        local cleaned = {}
+                        for i, t in ipairs(batch_texts) do
+                            cleaned[i] = pq:_cleanText(t)
                         end
-
-                        local total_dur_ms = audio_ms
-                        local est_durations_ms = {}
-                        for _, syl in ipairs(durations) do
-                            table.insert(est_durations_ms,
-                                math.floor(total_dur_ms * syl / total_syllables))
+                        local plan, bounds
+                        if side then
+                            plan, bounds = pq:_mapSentencesToClauses(side, cleaned,
+                                pq:_cleanText(table.concat(batch_texts, " ")))
                         end
 
                         local output_paths = {}
@@ -962,8 +1159,36 @@ function PiperQueue:launchNext()
                             end
                         end
 
-                        local split_ok = WavUtils.splitFile(
-                            combined_audio_file, est_durations_ms, output_paths)
+                        local split_ok
+                        if plan then
+                            -- Exact cut points from the engine: no syllable
+                            -- estimate, no proportional rounding.
+                            split_ok = WavUtils.splitFileAtSamples(
+                                combined_audio_file, bounds, output_paths)
+                        else
+                            -- Estimate per-sentence duration from syllable counts
+                            local durations = {}
+                            local total_syllables = 0
+                            for _, t in ipairs(batch_texts) do
+                                local count = 0
+                                for word in t:gmatch("%S+") do
+                                    count = count + engine:countSyllables(
+                                        word:gsub("[%p]", ""))
+                                end
+                                count = math.max(count, 1)
+                                table.insert(durations, count)
+                                total_syllables = total_syllables + count
+                            end
+
+                            local total_dur_ms = audio_ms
+                            local est_durations_ms = {}
+                            for _, syl in ipairs(durations) do
+                                table.insert(est_durations_ms,
+                                    math.floor(total_dur_ms * syl / total_syllables))
+                            end
+                            split_ok = WavUtils.splitFile(
+                                combined_audio_file, est_durations_ms, output_paths)
+                        end
 
                         if split_ok then
                             os.remove(combined_audio_file)
@@ -973,18 +1198,27 @@ function PiperQueue:launchNext()
                         end
 
                         if split_ok then
+                            local real_count = 0
                             for i, t in ipairs(batch_texts) do
                                 local e = pq._queue[t]
                                 if e then
                                     WavUtils.applyFade(e.file, 15)
-                                    engine:generateTimingEstimates(t)
-                                    e.timing = engine.timing_data
+                                    local real = plan and pq:_buildSentenceTiming(
+                                        side, plan[i].first, plan[i].last,
+                                        plan[i].seg_start, plan[i].seg_end, t)
+                                    if real then
+                                        e.timing = real
+                                        real_count = real_count + 1
+                                    else
+                                        engine:generateTimingEstimates(t)
+                                        e.timing = engine.timing_data
+                                    end
                                     e.status = "ready"
                                 end
                             end
                             logger.warn("PiperQueue: Batch split OK,",
-                                #batch_texts, "sentences ready, durations=",
-                                table.concat(est_durations_ms, "+"))
+                                #batch_texts, "sentences ready, exact split=",
+                                plan ~= nil, "real timing=", real_count)
                         else
                             engine:generateTimingEstimates(primary_text)
                             primary_entry.timing = engine.timing_data
@@ -996,6 +1230,7 @@ function PiperQueue:launchNext()
                             logger.err("PiperQueue: Batch split failed, only first ready")
                         end
                     end
+                    os.remove(sidecar_path)
 
                     pq._slots_busy = math.max(0, (pq._slots_busy or 0) - 1)
                     pq:launchNext()
@@ -1010,6 +1245,7 @@ function PiperQueue:launchNext()
                     end
                     logger.err("PiperQueue: Batch timed out")
                     os.remove(combined_done_marker)
+                    os.remove(combined_audio_file .. ".timing")
                     pq._slots_busy = math.max(0, (pq._slots_busy or 0) - 1)
                     pq:launchNext()
                 end
@@ -1046,6 +1282,7 @@ function PiperQueue:launchNext()
         if not e then
             os.remove(audio_file)
             os.remove(done_marker)
+            os.remove(audio_file .. ".timing")
             if text_file then os.remove(text_file) end
             pq._slots_busy = math.max(0, (pq._slots_busy or 0) - 1)
             pq:launchNext()
@@ -1063,9 +1300,20 @@ function PiperQueue:launchNext()
                 af:close()
                 local size = engine:getFileSize(audio_file)
                 if size and size > 0 then
-                    engine:generateTimingEstimates(text_to_launch)
-                    e.timing = engine.timing_data
+                    -- The per-process fallback runs the same server, so the
+                    -- sidecar can be there too.
+                    local sc = audio_file .. ".timing"
+                    local sside = pq:_parseTimingSidecar(sc)
+                    local real = sside and pq:_buildSentenceTiming(
+                        sside, 1, #sside.clauses, 0, sside.total, text_to_launch)
+                    if real then
+                        e.timing = real
+                    else
+                        engine:generateTimingEstimates(text_to_launch)
+                        e.timing = engine.timing_data
+                    end
                     e.status = "ready"
+                    os.remove(sc)
                     pq:_recordRtfSample(poll_count * 200,
                         WavUtils.getDurationMs(audio_file), 1)
                     logger.dbg("PiperQueue: Prefetch ready:",
@@ -1089,6 +1337,7 @@ function PiperQueue:launchNext()
             logger.err("PiperQueue: Prefetch timed out:", text_to_launch:sub(1, 40))
             if text_file then os.remove(text_file) end
             os.remove(done_marker)
+            os.remove(audio_file .. ".timing")
             pq._slots_busy = math.max(0, (pq._slots_busy or 0) - 1)
             pq:launchNext()
         end
@@ -1120,9 +1369,18 @@ function PiperQueue:tryFinalize(text)
         af:close()
         local size = engine:getFileSize(entry.file)
         if size and size > 0 then
-            engine:generateTimingEstimates(text)
-            entry.timing = engine.timing_data
+            local sc = entry.file .. ".timing"
+            local sside = self:_parseTimingSidecar(sc)
+            local real = sside and self:_buildSentenceTiming(
+                sside, 1, #sside.clauses, 0, sside.total, text)
+            if real then
+                entry.timing = real
+            else
+                engine:generateTimingEstimates(text)
+                entry.timing = engine.timing_data
+            end
             entry.status = "ready"
+            os.remove(sc)
             logger.dbg("PiperQueue: Sync-finalized:", text:sub(1, 40), "size:", size)
             self._slots_busy = math.max(0, (self._slots_busy or 0) - 1)
             self:launchNext()
@@ -1363,6 +1621,7 @@ function PiperQueue:cleanQueue()
         if entry.file then os.remove(entry.file) end
         if entry.done_marker then os.remove(entry.done_marker) end
         if entry.text_file then os.remove(entry.text_file) end
+        if entry.timing_file then os.remove(entry.timing_file) end
     end
     self._queue = {}
     self._queue_order = {}
