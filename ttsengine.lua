@@ -171,7 +171,7 @@ function TTSEngine:new(o)
     -- Startup garbage collection: remove stale temp files left behind by
     -- previous crashed or force-quit sessions (issue #22).
     if Device:isKindle() then
-        os.execute("rm -f /var/tmp/audiobook_*.wav /var/tmp/audiobook_*.xml /var/tmp/audiobook_*.txt /var/tmp/audiobook_*.done /var/tmp/audiobook_*.timing /var/tmp/piper_server_* /var/tmp/.gst_play_last.log /var/tmp/.ttssrc_* /var/tmp/audiomgrd.err /var/tmp/*.tmp 2>/dev/null")
+        os.execute("rm -f /var/tmp/audiobook_*.wav /var/tmp/audiobook_*.xml /var/tmp/audiobook_*.txt /var/tmp/audiobook_*.done /var/tmp/piper_server_* /var/tmp/.gst_play_last.log /var/tmp/.ttssrc_* /var/tmp/audiomgrd.err /var/tmp/*.tmp 2>/dev/null")
         -- Truncate audiomgrd's deleted stderr log via /proc fd.
         -- audiomgrd holds the file open after deletion, so rm -f cannot
         -- reclaim the space. Truncating via /proc frees it (issue #22).
@@ -1142,7 +1142,7 @@ function TTSEngine:synthesizeCommand(text, callback)
                 logger.warn("TTSEngine: /var is", use_pct, "% full (", avail_kb, "KB free) -- running cleanup")
                 -- Aggressive cleanup of known temp file patterns from previous
                 -- sessions (crashes, force-quits) that leak into /var/tmp.
-                os.execute("rm -f /var/tmp/audiobook_*.wav /var/tmp/audiobook_*.xml /var/tmp/audiobook_*.txt /var/tmp/audiobook_*.done /var/tmp/audiobook_*.timing /var/tmp/piper_server_* /var/tmp/.gst_play_last.log /var/tmp/.ttssrc_* /var/tmp/audiomgrd.err /var/tmp/*.tmp 2>/dev/null")
+                os.execute("rm -f /var/tmp/audiobook_*.wav /var/tmp/audiobook_*.xml /var/tmp/audiobook_*.txt /var/tmp/audiobook_*.done /var/tmp/piper_server_* /var/tmp/.gst_play_last.log /var/tmp/.ttssrc_* /var/tmp/audiomgrd.err /var/tmp/*.tmp 2>/dev/null")
                 -- Re-check after cleanup; abort only if still critically full.
                 local df_h2 = io.popen("df /var 2>/dev/null | tail -1")
                 if df_h2 then
@@ -2962,7 +2962,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                 if use_pct and (use_pct >= 90 or (avail_kb and avail_kb < 5120)) then
                     logger.warn("TTSEngine: /var is", use_pct, "% full (", avail_kb, "KB free) -- running cleanup")
                     -- Aggressive cleanup of known temp file patterns.
-                    os.execute("rm -f /var/tmp/audiobook_*.wav /var/tmp/audiobook_*.xml /var/tmp/audiobook_*.txt /var/tmp/audiobook_*.done /var/tmp/audiobook_*.timing /var/tmp/piper_server_* /var/tmp/.gst_play_last.log /var/tmp/.ttssrc_* /var/tmp/audiomgrd.err /var/tmp/*.tmp 2>/dev/null")
+                    os.execute("rm -f /var/tmp/audiobook_*.wav /var/tmp/audiobook_*.xml /var/tmp/audiobook_*.txt /var/tmp/audiobook_*.done /var/tmp/piper_server_* /var/tmp/.gst_play_last.log /var/tmp/.ttssrc_* /var/tmp/audiomgrd.err /var/tmp/*.tmp 2>/dev/null")
                     -- Truncate audiomgrd's deleted stderr log via /proc fd.
                     -- audiomgrd holds the file open after deletion, so rm -f
                     -- cannot reclaim the space. Truncating via /proc frees it.
