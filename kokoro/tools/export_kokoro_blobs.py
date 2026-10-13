@@ -94,20 +94,66 @@ def require(tensors, name, shape):
     return got
 
 
-def build_slots(tensors, blob_id):
+# Budgets kept in fp32 even when quantising: everything 1-D (norms, biases,
+# Snake alpha, style vectors) plus the small heads the plan calls out. They are
+# negligible in size and the most sensitive numerically.
+FP32_KEEP = ("duration_proj", "F0_proj", "N_proj", "m_source", "style")
+
+
+def quantize_int8(arr, per_row):
+    """Symmetric int8, per output channel (dim 0) or per tensor, exactly the
+    author's fq() in training/scripts/common.py: scale = max|row| / 127, round
+    and clamp. Returns (int8 array, fp32 scales)."""
+    if arr.ndim < 2:
+        return None, None
+    qmax = 127.0
+    flat = arr.reshape(arr.shape[0], -1)
+    if per_row:
+        s = np.maximum(np.abs(flat).max(axis=1), 1e-8) / qmax
+        q = np.clip(np.round(flat / s[:, None]), -qmax, qmax).astype(np.int8)
+        return q.reshape(arr.shape), s.astype(np.float32)
+    s = np.float32(max(float(np.abs(flat).max()), 1e-8) / qmax)
+    q = np.clip(np.round(flat / s), -qmax, qmax).astype(np.int8)
+    return q.reshape(arr.shape), np.array([s], dtype=np.float32)
+
+
+def build_slots(tensors, blob_id, int8=False):
     names = sorted(tensors)
     blob = bytearray()
     slots = []
+    extra_names = []
     for i, name in enumerate(names):
         arr = np.ascontiguousarray(tensors[name], dtype=np.float32)
+        keep = (not int8 or name.startswith(FP32_KEEP) or arr.ndim < 2)
+        # ConvTranspose1d weights are [in, out, k], so "dim 0" is not the output
+        # channel; those get one scale for the whole tensor instead.
+        convtr = (name.endswith(".weight") and arr.ndim == 3 and "ups." in name)
+        q = s = None
+        if not keep:
+            q, s = quantize_int8(arr, per_row=not convtr)
+        if q is None:
+            payload, dtype, qkind, count = arr.tobytes(), DT_F32, QK_NONE, int(arr.size)
+        else:
+            payload, dtype, qkind, count = q.tobytes(), DT_I8, QK_PER_ROW_I8, int(q.size)
         pad = (-len(blob)) % 16
         blob.extend(b"\0" * pad)
-        slots.append({"name_index": i, "blob_id": blob_id, "dtype": DT_F32,
-                      "qkind": QK_NONE, "count": int(arr.size), "offset": len(blob),
+        slots.append({"name_index": i, "blob_id": blob_id, "dtype": dtype,
+                      "qkind": qkind, "count": count, "offset": len(blob),
                       "rows": int(arr.shape[0]) if arr.ndim >= 2 else -1,
                       "row_len": int(np.prod(arr.shape[1:])) if arr.ndim >= 2 else int(arr.size),
                       "scale": 0.0})
-        blob.extend(arr.tobytes())
+        blob.extend(payload)
+        if s is not None:
+            pad = (-len(blob)) % 16
+            blob.extend(b"\0" * pad)
+            extra_names.append((f"{name}.scale", len(s), len(blob)))
+            blob.extend(s.astype(np.float32).tobytes())
+    names = names + [e[0] for e in extra_names]
+    for (nm, n, off) in extra_names:
+        idx = names.index(nm)
+        slots.append({"name_index": idx, "blob_id": blob_id, "dtype": DT_F32,
+                      "qkind": QK_NONE, "count": n, "offset": off, "rows": -1,
+                      "row_len": n, "scale": 0.0})
     return names, bytes(blob), slots
 
 
@@ -139,6 +185,9 @@ def main():
     ap.add_argument("--text", required=True)
     ap.add_argument("--dec", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--int8", action="store_true",
+                    help="per-output-channel symmetric int8 weights with an fp32 "
+                         "keep-list (the shipped ONNX's own scheme)")
     ap.add_argument("--albert-layers", type=int, default=6,
                     help="num_hidden_layers: a config value, not in the checkpoint")
     ap.add_argument("--albert-heads", type=int, default=4,
@@ -200,8 +249,8 @@ def main():
     require(ds, "generator.noise_convs.1.weight", (dec_uic // 4, args.istft[0] + 2, 1))
     require(ds, "generator.m_source.l_linear.weight", (1, 9))
 
-    names_t, blob_t, slots_t = build_slots(ts, 0)
-    names_d, blob_d, slots_d = build_slots(ds, 1)
+    names_t, blob_t, slots_t = build_slots(ts, 0, int8=args.int8)
+    names_d, blob_d, slots_d = build_slots(ds, 1, int8=args.int8)
     # one name table shared by both halves: re-index the decoder slots
     names = names_t + [n for n in names_d]
     for s in slots_d:
