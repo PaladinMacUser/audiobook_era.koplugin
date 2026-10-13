@@ -179,7 +179,7 @@ The gate builds and runs with:
 nix shell nixpkgs#gcc nixpkgs#gnumake -c make -C kokoro test
 ```
 
-### Source module and RNG (open)
+### Source module and RNG (open, discrepancy is on the torch side)
 
 `src/kok_rng.c` implements the torch-CPU RNG the source needs: SHA-256 sentence
 seeding, ATen's mt19937 (init, tempering), `(raw & 0xffffff) * 2^-24` uniforms
@@ -188,16 +188,24 @@ the uniform stream is bit-exact, and a 2.25M-element normal draw matches
 `torch.rand(9)` followed by `torch.randn(250200, 9)` with zero differing
 elements.
 
-`src/kok_source.c` assembles the source (harmonics, radians, random initial
-phase, cumulative phase, the two linear interpolations, sin, the voiced mask,
-additive noise, tanh merge). It is NOT yet correct: its output correlates about
-0.94 with torch's `m_source` on the same seed, and the noise inside the model
-path does not match an identically-shaped standalone draw, which contradicts the
-isolation results above. The next step is a minimal reproduction in a clean
-process (seed, rand(1, 9), randn(1, 250200, 9)) compared against what
-`SineGen.forward` actually draws, rather than more instrumentation inside the
-model. Until that is resolved the runtime cannot synthesize without an injected
-source, and no gate depends on it: the goldens supply the source.
+`src/kok_source.c` assembles the source from the reference algorithm:
+harmonics 1..9 of the upsampled f0, radians mod 1, the random initial phase on
+the first timestep, the linear downsample to frame rate then cumsum times 2*pi
+then the linear upsample back, sin, the voiced mask at 10 Hz, additive noise and
+the tanh merge. Checked against a step-by-step torch reconstruction of that same
+algorithm, in one pass from one seed: the frame-rate phase is exact (max error
+1e-04, correlation 1.00000000) and the sine waves match to 0.998, the residual
+being float32 accumulation drift in the phase.
+
+The open problem is on the torch side: the live `SineGen.forward` differs from
+that reconstruction of its own source by 0.22 max (correlation 0.944), even
+though it is deterministic per seed (three calls identical), is
+`kokoro.istftgen.SineGen`, and consumes exactly the same RNG draws (9 uniforms
+then 2,251,800 normals, counted by spying on torch.rand and torch.randn_like).
+Two implementations of the documented algorithm agree with each other and
+disagree with the live module, which points at a runtime subtlety in the torch
+path rather than at the C. Until it is understood, `kok_dec_forward` is only
+trusted with an injected source, which is what every gate does.
 
 `KOK_DUMP_STAGES` in the build (and `KOK_DEBUG_STAGES` for prints) writes the
 generator's intermediate stages to /tmp for the bisect harness.

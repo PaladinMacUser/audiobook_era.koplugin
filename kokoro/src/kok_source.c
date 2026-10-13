@@ -66,10 +66,11 @@ int kok_source_forward(const kok_config *c, const kok_dec_w *dw, const float *f0
             for (long l = 0; l < L; l++) rowL[l] = rad[l * dim + h];
             kok_interp_linear(rowF, Lf, rowL, L, 1.0 / (double)gen_hop);
             {
-                double a = 0.0;
+                /* torch.cumsum on a float32 tensor accumulates in float32 */
+                float a = 0.0f;
                 for (long l = 0; l < Lf; l++) {
-                    a += (double)rowF[l];
-                    phase[l * dim + h] = (float)(a * (2.0 * 3.14159265358979323846));
+                    a += rowF[l];
+                    phase[l * dim + h] = a * (float)(2.0 * 3.14159265358979323846);
                 }
             }
         }
