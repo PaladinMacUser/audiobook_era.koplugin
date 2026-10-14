@@ -246,6 +246,16 @@ the same way over the `--int8` set (`model/blobs_i8`, 16.4 MB). Same sentence
 throughout (93 tokens, 241 frames, 6.03 s of audio), audio checked against the
 golden waveform every time:
 
+The ARM binary cross-compiles on the laptop, about a minute from scratch:
+
+```sh
+nix-build kokoro/cross-build-koko-tts.nix --no-out-link --builders '' --max-jobs 4
+```
+
+`--builders ''` is what keeps it local; the CT 105 builder in the default nix
+config is a convenience, not a requirement, so device runs are not blocked when
+the PC is off.
+
 | build | total | text | decoder | RTF | audio |
 |---|---|---|---|---|---|
 | first working port | 105.4 s | 14.1 s | 91.2 s | 17.49 | correct |
@@ -256,6 +266,7 @@ golden waveform every time:
 | + int8 weights (16.4 MB of blobs) | 49.6 s | 8.6 s | 41.0 s | 8.24 | correct |
 | + NEON, index arithmetic shared | 42.9 s | 7.8 s | 35.0 s | 7.12 | correct (64.7 dB against the golden) |
 | the same, int8 weights | 42.9 s | 7.9 s | 34.9 s | 7.12 | correct (34.0 dB against fp32) |
+| + 4-way output-channel blocking (**reverted**) | 75.5 s | 7.5 s | 67.9 s | 12.53 | bit-identical, 1.8x slower |
 
 The int8 row ran before the fixed-source comparison existed, so its audio check
 is against the golden and carries the source-phase confound (10.6 dB, an
@@ -293,14 +304,38 @@ What was learned, in order of usefulness:
   unchanged (8.35 to 8.24), and the gain is the blobs, 32.3 MB to 16.4 MB, plus
   memory traffic that the test sentence is too small to show.
 
-Both of those levers are now in, which leaves the 2.75x to the baseline. What
-remains is concentrated in the strided paths NEON cannot reach directly: the
-ConvTranspose upsampling stages, whose scatter form can be rewritten as gather
-passes over the output by residue class (each one a contiguous stride-1
-convolution, and so vectorisable), and then the fuller int8 arithmetic with
-quantised activations, which is the sanoTTS scheme and a substantially larger
-job. A separate small win is an int8 LSTM kernel, which would take the blobs
-from 16.4 MB to the plan's 9 MB class.
+Both of those levers are now in, which leaves the 2.75x to the baseline. A gprof
+profile of the host run puts the time here, by function:
+
+| function | share |
+|---|---|
+| `kok_conv1d` | 68% |
+| `kok_lstm_dir` | 9% |
+| `kok_convtr1d` | 7% |
+| `kok_adain1d` | 5% |
+| `kok_linear` | 4% |
+
+The host has no NEON, so it over-states the share of everything the NEON body
+covers and under-states the rest; on the device the dense convolutions are
+somewhat cheaper, and the ConvTranspose and LSTM shares rise proportionally.
+Either way the earlier reading of this file, that what remains is concentrated
+in the strided ConvTranspose stages, is wrong: they are 7%, and the stride-1
+convolutions the NEON body already covers are the bulk. Within `kok_conv1d` the
+cost is spread across the resblocks, and the hottest single shape is 32 channels
+with K=11 at T=28921 (the waveform-rate stack), 0.72 s of the 1.98 s.
+
+Blocking four output channels so that one input load feeds four rows is 1.5x
+faster on the host and bit-identical, and twice as slow on the device (decoder
+RTF 5.77 to 11.27): four accumulators and four broadcast weights spill the NEON
+register file, where the per-row body streams with one accumulator. It is in the
+table above as the reverted row. The lesson is that this loop has to be measured
+on the device, not the host: the two disagree in sign, so a host-only speedup is
+not evidence.
+
+What is left is the deeper change, quantised activations (the sanoTTS scheme,
+and a substantially larger job), plus the other kernels in proportion to their
+share, of which an int8 LSTM kernel is the clearest (it would also take the
+blobs from 16.4 MB to the plan's 9 MB class).
 
 ## Layout
 
