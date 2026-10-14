@@ -267,6 +267,7 @@ the PC is off.
 | + NEON, index arithmetic shared | 42.9 s | 7.8 s | 35.0 s | 7.12 | correct (64.7 dB against the golden) |
 | the same, int8 weights | 42.9 s | 7.9 s | 34.9 s | 7.12 | correct (34.0 dB against fp32) |
 | + 4-way output-channel blocking (**reverted**) | 75.5 s | 7.5 s | 67.9 s | 12.53 | bit-identical, 1.8x slower |
+| + register tile across the tap set (**reverted**) | 54.0 s | 8.0 s | 46.0 s | 8.97 | bit-identical, 1.26x slower |
 
 The int8 row ran before the fixed-source comparison existed, so its audio check
 is against the golden and carries the source-phase confound (10.6 dB, an
@@ -324,18 +325,109 @@ convolutions the NEON body already covers are the bulk. Within `kok_conv1d` the
 cost is spread across the resblocks, and the hottest single shape is 32 channels
 with K=11 at T=28921 (the waveform-rate stack), 0.72 s of the 1.98 s.
 
-Blocking four output channels so that one input load feeds four rows is 1.5x
-faster on the host and bit-identical, and twice as slow on the device (decoder
-RTF 5.77 to 11.27): four accumulators and four broadcast weights spill the NEON
-register file, where the per-row body streams with one accumulator. It is in the
-table above as the reverted row. The lesson is that this loop has to be measured
-on the device, not the host: the two disagree in sign, so a host-only speedup is
-not evidence.
+Two restructurings of this loop were built, measured on the device, and
+reverted; both are in the table above.
 
-What is left is the deeper change, quantised activations (the sanoTTS scheme,
-and a substantially larger job), plus the other kernels in proportion to their
-share, of which an int8 LSTM kernel is the clearest (it would also take the
-blobs from 16.4 MB to the plan's 9 MB class).
+- **Four output channels at once**, so one input load feeds four rows: 1.5x
+  faster on the host, twice as slow on the device (decoder RTF 5.77 to 11.27).
+  Four accumulators and four broadcast weights spill the NEON register file,
+  where the per-row body streams with one.
+- **One register tile accumulated across the whole tap set**, so the output is
+  written once instead of reloaded and restored per tap: 1.3x slower on the host
+  and 1.26x slower on the device (RTF 7.12 to 8.97). Hoisting the taps inside
+  the tile costs the sequential store the per-row form gets for free.
+
+The lesson is that this loop has to be measured on the device, not the host:
+the two agree in sign here but not in magnitude, and a host-only speedup is not
+evidence either way. The per-row streaming body is a local optimum on this
+core, and the 2.75x has to come from somewhere other than restructuring it.
+
+## Quantised activations (in progress)
+
+The remaining structural idea was int8 activations (the sanoTTS scheme). It has
+been measured in three parts: the kernel on the device, the accuracy through the
+whole pipeline, and the cost of the per-channel scales the accuracy needs. It is
+being built toward the operating point at the end of this section.
+
+**The kernel is fast, and how fast depends on the scaling scheme.** On the
+device, the hot convolution (32 channels, K=11, T=28921) at the same tap order
+and loop shape, as a ratio against the fp32 NEON body measured in the same run:
+
+| form | vs fp32 body |
+|---|---|
+| int16 activations + weights | ~1.5x |
+| int8, one activation scale per tensor | 3.5-3.8x |
+| int8, per-channel activation scales | 2.5-2.9x |
+
+ARMv7 NEON has no 8-bit dot product (`vmlal_s16` does 4 MACs per instruction,
+the same as `vmlaq_f32`), so the win is not lane throughput: the fp32 body is
+bound by something other than arithmetic, which is also why NEON alone was worth
+only 1.27x. The per-channel column is the one that matters, because a single
+scale per tensor does not survive the graph (see below); it costs about a third
+of the win, because the channels have to be combined in fp32 so that each keeps
+its own scale.
+
+**A single activation scale per tensor is not enough.** Simulating activation
+quantisation inside the fp32 pipeline, with oracle calibration (each tensor's
+own range) and the harmonic source held fixed, the end-to-end waveform SNR
+against the fp32 path is:
+
+| activation precision | per-tensor | per-channel |
+|---|---|---|
+| 8-bit | -0.79 dB | 21.74 dB |
+| 10-bit | 2.05 dB | 34.71 dB |
+| 12-bit | 18.87 dB | 46.72 dB |
+| 14-bit | 26.32 dB | 58.86 dB |
+| 16-bit | 32.60 dB | |
+
+Without a fixed source every row reads near -1 dB, because any F0 shift moves
+the harmonic source's phase and decorrelates the waveform; that confound has to
+be removed before this measurement means anything.
+
+**Waveform SNR is the wrong gate for this model.** The same renders were judged
+by ear against the fp32 path across five sentences, and they are perceptually
+indistinguishable, including the -0.79 dB row that the waveform metric calls
+destroyed. A phase-sensitive generator decorrelates its waveform for changes
+nobody can hear. The perceptually meaningful measure is the log-spectral
+deviation, in dB per mel band, and on that scale the 8-bit per-channel path
+sits at a mean of 1.29 dB (p95 4.50 dB): audible as faint added background noise
+on the longer sentences, which is what the listening agreed with.
+
+Clamping the scale to a percentile instead of the per-channel maximum makes the
+accuracy worse, not better (21.74 to 15.66 dB waveform SNR at the 99th
+percentile), so outliers are not the cause: the error is inherent quantisation
+noise, amplified by the generator.
+
+**The error is concentrated in the final waveform-rate stack.** Quantising only
+the convolutions with T >= 20000 gives 22.18 dB against 21.74 dB for every
+convolution, so the final, largest stage owns essentially all of the damage.
+That is also the stage worth speeding up, so the fix is not to skip it but to
+give it more precision.
+
+**Chosen operating point.** Final waveform-rate stack at 10-bit (int16
+storage), everything else at 8-bit with per-channel scales. Measured on five
+sentences against fp32, by log-spectral deviation:
+
+| operating point | mean dev | p95 dev | logspec SNR | proj. device RTF |
+|---|---|---|---|---|
+| everything 8-bit | 1.29 dB | 4.50 dB | 25.11 dB | ~4.3 |
+| **final stack 10-bit, rest 8-bit** | **0.75 dB** | **2.54 dB** | **30.60 dB** | **~4.8** |
+| final stack fp32, rest 8-bit | 0.73 dB | 2.49 dB | 30.80 dB | ~5.1 |
+| everything 10-bit | 0.44 dB | 1.68 dB | 34.26 dB | ~5.9 |
+
+The RTF column is a projection from the measured kernel ratios and the host time
+split, not a measurement. The regression gate is a mean band deviation at or
+under 1.5 dB and a log-spectral SNR at or above 24 dB against the fp32 path,
+plus listening; those sit at the measured level with a little margin.
+
+The spike kernels and the simulation live in ~/audiobook-int8-spike/, with the
+listening renders under validate/ and points/.
+
+The remaining kernels are worth at most their shares (LSTM 9%, ConvTranspose
+7%, AdaIN 5%), so on their own no combination of them closes the gap to the
+onnxruntime baseline. Quantised activations are the one lever that reaches the
+whole graph. An int8 LSTM kernel is also worthwhile on its own: it would take
+the blobs from 16.4 MB to the plan's 9 MB class.
 
 ## Layout
 
