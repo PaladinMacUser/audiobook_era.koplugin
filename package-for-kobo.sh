@@ -260,6 +260,16 @@ if [ "$WITH_SANOTTS" = true ]; then
         rm -f "$SANO_TGZ"
     fi
 
+    # The R7 (int8) engine's duration scale is a compile-time constant in the
+    # pinned core.  Patch it to a runtime value so the speed control reaches
+    # that engine too.  Skipped when already applied, so a local tree that was
+    # patched once is not patched twice.
+    SANO_PATCH="$SCRIPT_DIR/sanotts/patches/0001-int8-length-scale.patch"
+    if [ -f "$SANO_PATCH" ] && ! grep -q "snt_length_scale" "$SANO_CORE_DIR/src/snt_tts.c"; then
+        echo "Applying sanoTTS core patch: runtime length scale for the int8 engine..."
+        ( cd "$SANO_CORE_DIR" && patch -p1 < "$SANO_PATCH" )
+    fi
+
     echo "Cross-compiling snt_server (static musl, armv7hf)..."
     SANO_OUT=$(nix-build "$SCRIPT_DIR/cross-build-snt-server.nix" --no-out-link)
     if [ -f "$SANO_OUT/bin/snt_server" ]; then
