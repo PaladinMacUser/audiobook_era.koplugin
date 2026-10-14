@@ -5,7 +5,9 @@ let
   nixpkgsSrc = fetchTarball "https://github.com/NixOS/nixpkgs/archive/255a186666b6130ddddf8ad749887102a0820914.tar.gz";
   pkgs = import nixpkgsSrc {};
   crossPkgs = pkgs.pkgsCross.armv7l-hf-multiplatform.pkgsStatic;
-  kok = ./.;   # the kokoro/ tree (sources and headers)
+  kok = ./.;          # the kokoro/ tree (sources and headers)
+  lex = ../sanotts;   # the plugin's espeak-free misaki lexicon G2P, shared with
+                      # the nano engine rather than duplicated (kok_text_to_ids)
 in
 
 crossPkgs.stdenv.mkDerivation {
@@ -16,10 +18,11 @@ crossPkgs.stdenv.mkDerivation {
   dontConfigure = true;
 
   buildPhase = ''
-    export NIX_CFLAGS_COMPILE="$NIX_CFLAGS_COMPILE -O3 -std=c99 -mfpu=neon -ftree-vectorize -funroll-loops -I${kok}/include"
+    export NIX_CFLAGS_COMPILE="$NIX_CFLAGS_COMPILE -O3 -std=c99 -mfpu=neon -ftree-vectorize -funroll-loops -I${kok}/include -I${lex}"
     $CC -static -o kok_tts ${kok}/src/kok_tts.c ${kok}/src/kok_meta.c \
       ${kok}/src/kok_kernels.c ${kok}/src/kok_istft.c ${kok}/src/kok_fft.c ${kok}/src/kok_rng.c \
-      ${kok}/src/kok_source.c ${kok}/src/kok_text.c ${kok}/src/kok_dec.c -lm
+      ${kok}/src/kok_source.c ${kok}/src/kok_text.c ${kok}/src/kok_dec.c ${kok}/src/kok_g2p.c \
+      ${lex}/nano_lex_g2p.c ${lex}/nano_lex_tables.c -lm
   '';
 
   installPhase = ''
