@@ -3,6 +3,17 @@
 #include <math.h>
 #include <string.h>
 
+/* The four-wide bodies below are the only architecture-specific code in the
+ * runtime. Loop control, indices and the scalar tail are shared with the plain
+ * C path, so the host golden gate exercises the same arithmetic; only the
+ * four-lane body differs. */
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#define KOK_NEON 1
+#else
+#define KOK_NEON 0
+#endif
+
 #include "kok_kernels.h"
 
 /* ---- arena ---- */
@@ -57,10 +68,15 @@ void kok_conv1d(float *restrict out, const float *restrict x, const kok_w *restr
                 int t = t_lo;
                 if (stride == 1) {
                     for (; t + 4 <= t_hi; t += 4, ti += 4) {
+#if KOK_NEON
+                        vst1q_f32(orow + t, vmlaq_n_f32(vld1q_f32(orow + t),
+                                                        vld1q_f32(xrow + ti), wv));
+#else
                         orow[t] += wv * xrow[ti];
                         orow[t + 1] += wv * xrow[ti + 1];
                         orow[t + 2] += wv * xrow[ti + 2];
                         orow[t + 3] += wv * xrow[ti + 3];
+#endif
                     }
                 }
                 for (; t < t_hi; t++, ti += stride) orow[t] += wv * xrow[ti];
@@ -131,10 +147,15 @@ void kok_linear(float *restrict out, const float *restrict x, const kok_w *restr
             const float *xrow = x + (size_t)c * T;
             int t = 0;
             for (; t + 4 <= T; t += 4) {
+#if KOK_NEON
+                vst1q_f32(orow + t, vmlaq_n_f32(vld1q_f32(orow + t),
+                                                vld1q_f32(xrow + t), wv));
+#else
                 orow[t] += wv * xrow[t];
                 orow[t + 1] += wv * xrow[t + 1];
                 orow[t + 2] += wv * xrow[t + 2];
                 orow[t + 3] += wv * xrow[t + 3];
+#endif
             }
             for (; t < T; t++) orow[t] += wv * xrow[t];
         }
