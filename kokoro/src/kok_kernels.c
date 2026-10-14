@@ -233,6 +233,55 @@ void kok_conv1d_aq8(float *restrict out, const float *restrict x,
     }
 }
 
+void kok_linear_aq8(float *restrict out, const float *restrict x,
+                    const kok_w *restrict w, const float *restrict b,
+                    int Cin, int Cout, int T,
+                    int8_t *restrict xq, float *restrict xs, int32_t *restrict tacc) {
+    if (!w->q) return;
+    for (int c = 0; c < Cin; c++) {
+        const float *xrow = x + (size_t)c * T;
+        float m = 0.0f;
+        for (int t = 0; t < T; t++) {
+            float v = fabsf(xrow[t]);
+            if (v > m) m = v;
+        }
+        float s = m > 1e-12f ? m / 127.0f : 1e-12f;
+        xs[c] = s;
+        float inv = 1.0f / s;
+        int8_t *qrow = xq + (size_t)c * T;
+        for (int t = 0; t < T; t++) {
+            int r = (int)lrintf(xrow[t] * inv);
+            if (r > 127) r = 127;
+            else if (r < -127) r = -127;
+            qrow[t] = (int8_t)r;
+        }
+    }
+    for (int o = 0; o < Cout; o++) {
+        float *orow = out + (size_t)o * T;
+        float bias = b ? b[o] : 0.0f;
+        float ws = w->scale ? (w->per_row ? w->scale[o] : w->scale[0]) : 1.0f;
+        for (int t = 0; t < T; t++) orow[t] = bias;
+        const int8_t *worow = w->q + (size_t)o * Cin;
+        for (int c = 0; c < Cin; c++) {
+            int wv = worow[c];
+            if (wv == 0) continue;
+            const int8_t *qrow = xq + (size_t)c * T;
+            for (int t = 0; t < T; t++) tacc[t] = 0;
+            int t = 0;
+#if KOK_NEON
+            int16x4_t wv16 = vdup_n_s16((int16_t)wv);
+            for (; t + 4 <= T; t += 4) {
+                int16x4_t xv = vget_low_s16(vmovl_s8(vld1_s8(qrow + t)));
+                vst1q_s32(tacc + t, vmlal_s16(vld1q_s32(tacc + t), xv, wv16));
+            }
+#endif
+            for (; t < T; t++) tacc[t] += wv * qrow[t];
+            float m = xs[c] * ws;
+            for (int tt = 0; tt < T; tt++) orow[tt] += (float)tacc[tt] * m;
+        }
+    }
+}
+
 /* Quantised transposed convolution. The scatter itself is strided, so there is
  * nothing for the four-wide body to do; the win is the same as the forward
  * kernel, over int8 weights and activations with the channels combined in

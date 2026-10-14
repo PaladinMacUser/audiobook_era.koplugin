@@ -61,6 +61,13 @@ void kok_conv1d_aq8(float *restrict out, const float *restrict x,
  * them. Both call sites are covered: the decoder's upsampling stages
  * (groups=1, stride 10 and 6 with kernels 20 and 12) and the AdainResBlk
  * depthwise pool upsample (groups=Cin, kernel 3, stride 2). */
+/* The same scheme for a projection: x is [Cin, T], the weight [Cout, Cin] with a
+ * scale per output channel. */
+void kok_linear_aq8(float *restrict out, const float *restrict x,
+                    const kok_w *restrict w, const float *restrict b,
+                    int Cin, int Cout, int T,
+                    int8_t *restrict xq, float *restrict xs, int32_t *restrict tacc);
+
 void kok_convtr1d_aq8(float *restrict out, const float *restrict x,
                       const kok_w *restrict w, const float *restrict b,
                       int Cin, int Cout, int T, int K, int stride, int pad,
