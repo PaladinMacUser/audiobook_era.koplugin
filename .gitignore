@@ -67,3 +67,9 @@ dev/paradee/model/
 dev/paradee/ortlib/
 dev/paradee/device-wav/
 dev/paradee/*.ids
+
+# audioout daemon (Tier 2): sysroot, builds, on-device logs
+dev/audioout/.sysroot/
+dev/audioout/.sysroot-debs/
+dev/audioout/out/
+dev/audioout/results/
