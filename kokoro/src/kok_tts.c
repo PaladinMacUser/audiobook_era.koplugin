@@ -18,6 +18,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "kok_g2p.h"
 #include "kok_runtime.h"
 
 static double now_s(void) {
@@ -72,6 +73,8 @@ int main(int argc, char **argv) {
     const char *meta_p = NULL, *text_p = NULL, *dec_p = NULL;
     const char *ids_p = NULL, *out_p = "out.wav";
     const char *src_p = NULL;   /* optional fixed harmonic source, for A/B */
+    const char *sentence_p = NULL;  /* synthesize this text (on-device G2P) */
+    const char *dump_ids_p = NULL;
     unsigned long long seed = 1234;
     double arena_mb = 128.0;
     int quiet = 0;
@@ -82,21 +85,45 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--ids")) ids_p = argv[++i];
         else if (!strcmp(argv[i], "--out")) out_p = argv[++i];
         else if (!strcmp(argv[i], "--src")) src_p = argv[++i];
+        else if (!strcmp(argv[i], "--sentence")) sentence_p = argv[++i];
+        else if (!strcmp(argv[i], "--dump-ids")) dump_ids_p = argv[++i];
         else if (!strcmp(argv[i], "--seed")) seed = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--arena-mb")) arena_mb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
     }
-    if (!meta_p || !text_p || !dec_p || !ids_p) {
-        fprintf(stderr, "usage: %s --meta M --text T --dec D --ids I [--out O] "
-                        "[--seed N] [--arena-mb N]\n", argv[0]);
+    if (!meta_p || !text_p || !dec_p || (!ids_p && !sentence_p)) {
+        fprintf(stderr, "usage: %s --meta M --text TEXTBLOB --dec D "
+                        "(--ids I | --sentence \"text\") [--out O] [--seed N] "
+                        "[--arena-mb N] [--src S] [--dump-ids P]\n", argv[0]);
         return 2;
     }
 
     double t0 = now_s();
-    size_t meta_n, text_n, dec_n, ids_n;
+    size_t meta_n, text_n, dec_n, ids_n = 0;
     void *meta = xload(meta_p, &meta_n), *text = xload(text_p, &text_n);
-    void *dec = xload(dec_p, &dec_n), *idsv = xload(ids_p, &ids_n);
-    if (!meta || !text || !dec || !idsv) return 2;
+    void *dec = xload(dec_p, &dec_n), *idsv = NULL;
+    if (!meta || !text || !dec) return 2;
+    static int32_t g2p_ids[1024];
+    if (ids_p) {
+        idsv = xload(ids_p, &ids_n);
+        if (!idsv) return 2;
+    } else {
+        int dropped = 0, oov = 0;
+        int n = kok_text_to_ids(sentence_p, g2p_ids, 1024, &dropped, &oov);
+        if (n < 3) {
+            fprintf(stderr, "kok_tts: G2P failed rc %d\n", n);
+            return 2;
+        }
+        if (!quiet)
+            fprintf(stderr, "g2p: %d ids (%d phonemes outside the vocabulary, %d OOV words)\n",
+                    n, dropped, oov);
+        idsv = g2p_ids;
+        ids_n = (size_t)n * sizeof(int32_t);
+    }
+    if (dump_ids_p) {
+        FILE *dh = fopen(dump_ids_p, "wb");
+        if (dh) { fwrite(idsv, 1, ids_n, dh); fclose(dh); }
+    }
 
     kok_model mo;
     int rc = kok_model_init(&mo, meta, meta_n, text, dec);

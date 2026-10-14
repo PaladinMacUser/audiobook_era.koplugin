@@ -11,15 +11,20 @@ CFLAGS ?= -O2 -std=c99 -Wall -Wextra -Iinclude
 LDLIBS ?= -lm
 
 SRC = src/kok_meta.c src/kok_fft.c src/kok_kernels.c src/kok_istft.c src/kok_rng.c src/kok_source.c src/kok_text.c src/kok_dec.c
+# the on-device G2P is the plugin's espeak-free misaki lexicon port, reused
+# rather than duplicated (3 MB of const tables live in sanotts/)
+G2P = ../sanotts/nano_lex_g2p.c ../sanotts/nano_lex_tables.c
+# kok_text_to_ids lives in the G2P module; the engine sources come with it
+ENGINE_SRC = $(SRC) src/kok_g2p.c $(G2P)
 BUILD = build
 
 all: $(BUILD)/text_golden_test $(BUILD)/kok_tts
 
-$(BUILD)/kok_tts: src/kok_tts.c $(SRC) include/*.h
+$(BUILD)/kok_tts: src/kok_tts.c $(SRC) include/*.h ../sanotts/nano_lex_g2p.h
 	@mkdir -p $(BUILD)
-	$(CC) $(CFLAGS) -o $@ src/kok_tts.c $(SRC) $(LDLIBS)
+	$(CC) $(CFLAGS) -I../sanotts -o $@ src/kok_tts.c $(ENGINE_SRC) $(LDLIBS)
 
-$(BUILD)/text_golden_test: test/text_golden_test.c $(SRC) include/*.h
+$(BUILD)/text_golden_test: test/text_golden_test.c $(SRC) include/*.h ../sanotts/nano_lex_g2p.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) -o $@ test/text_golden_test.c $(SRC) $(LDLIBS)
 
