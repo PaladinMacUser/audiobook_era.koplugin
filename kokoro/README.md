@@ -143,7 +143,35 @@ token sentences. Two sentences of fixtures are committed as the contract
 
 Blobs are not committed: `tools/export_kokoro_blobs.py` rebuilds them from the
 checkpoints into the gitignored `kokoro/model/blobs` (fp32, 32 MB for this
-model; the int8 path in M6 will bring that to the 9 MB class).
+model; the int8 path (M6, done) brings that to 16.4 MB, short of the plan's 9 MB
+class only because the LSTM weights stay fp32: there is no int8 LSTM kernel).
+
+## On-device G2P (done, one gap)
+
+`kok_text_to_ids` in `src/kok_g2p.c` wraps the plugin's existing espeak-free
+misaki lexicon port (`sanotts/nano_lex_g2p.c`) and maps its phoneme string onto
+Paradee's vocabulary, a table generated from the model's own config.json by
+`tools/gen_vocab.py` (114 of the 178 symbols are reachable). No pronunciation
+logic is re-implemented and no new G2P data ships, so the binary grows to about
+3.4 MB by linking the 3 MB of lexicon tables. `kok_tts` gained `--sentence`
+(text, as against `--ids`) and `--dump-ids`, so both host and device can go from
+raw text to a WAV, and the ids can be diffed against the fixture misaki
+produced.
+
+Measured on the fixture sentence: 86 ids against misaki's 93, 81.4% identical at
+the best alignment, with the whole difference in the one OOV word
+("supernovae"). The id gap is the missing fallback, not a mapping error: the
+lexicon port has no OOV path, so a word outside it loses its pronunciation where
+the Piper path would spell it through espeak. Text to audio end to end is RTF
+0.53 on the host.
+
+The fallback was attempted and reverted. A per-word retry that re-tokenised the
+sentence by hand and sent only the OOV words through espeak dropped the
+punctuation and lost the sentence context the dictionary relies on, taking the
+fixture from 81.4% to 18.6% agreement, so the lexicon-only path is what ships.
+If the fallback comes back, the shape to use is one whole-sentence espeak call
+with misaki's E2M substitution map applied to the result, never a per-word
+retry.
 
 ## C runtime: decoder half (M3, first pass)
 
@@ -212,10 +240,11 @@ generator's intermediate stages to /tmp for the bisect harness.
 
 ## Device benchmark (M7, in progress)
 
-`kokoro/tools/device-bench.sh` pushes the static binary and the 31 MB of fp32
-blobs to the test Kobo and runs one sentence. Same sentence throughout (93
-tokens, 241 frames, 6.03 s of audio), audio checked against the golden waveform
-every time:
+`kokoro/tools/device-bench.sh` pushes the static binary and the fp32 blobs
+(32.3 MB) to the test Kobo and runs one sentence. The int8 rows below were run
+the same way over the `--int8` set (`model/blobs_i8`, 16.4 MB). Same sentence
+throughout (93 tokens, 241 frames, 6.03 s of audio), audio checked against the
+golden waveform every time:
 
 | build | total | text | decoder | RTF | audio |
 |---|---|---|---|---|---|
@@ -224,8 +253,16 @@ every time:
 | intrinsics removed, `-O3` | 81.4 s | 12.1 s | 69.2 s | 13.51 | correct |
 | + portable 4-way unroll | 79.9 s | 11.9 s | 68.0 s | 13.27 | correct |
 | + `restrict` on the kernels | 50.3 s | 8.7 s | 41.6 s | 8.35 | correct (corr 0.992686) |
+| + int8 weights (16.4 MB of blobs) | 49.6 s | 8.6 s | 41.0 s | 8.24 | correct |
+| + NEON, index arithmetic shared | 42.9 s | 7.8 s | 35.0 s | 7.12 | correct (64.7 dB against the golden) |
+| the same, int8 weights | 42.9 s | 7.9 s | 34.9 s | 7.12 | correct (34.0 dB against fp32) |
 
-The onnxruntime baseline to beat is 2.59, so the optimised port is 3.2x short.
+The int8 row ran before the fixed-source comparison existed, so its audio check
+is against the golden and carries the source-phase confound (10.6 dB, an
+artefact of the int8 f0 shift). The last two rows were measured with the
+harmonic source held fixed (`kok_tts --src`), which isolates the weights: the
+int8 agreement with fp32 at 34.0 dB matches the host's 33.7 dB. The onnxruntime
+baseline to beat is 2.59, so the optimised port is 2.75x short.
 
 What was learned, in order of usefulness:
 
@@ -237,23 +274,33 @@ What was learned, in order of usefulness:
   vectorisation happens; with it the same loops halve again (host 1.185 -> 0.654).
   The host golden gate is what makes this safe to apply: it passes, so no caller
   aliases.
-- **Hand-written NEON was faster and wrong.** An intrinsics version of the
-  stride-1 tap loop ran the device at RTF 7.25, but its index arithmetic was
-  wrong (a stray `- t0` in the load, bounds computed with inverted signs) and
-  the host gate could not see it because the path only compiles on ARM; the
-  device audio came back decorrelated. It was replaced by plain unrolled
-  arithmetic the host exercises. If intrinsics come back, the index maths must
-  be shared with a path the gate runs.
+- **Hand-written NEON was faster and wrong, and then right.** An intrinsics
+  version of the stride-1 tap loop ran the device at RTF 7.25, but its index
+  arithmetic was wrong (a stray `- t0` in the load, bounds computed with
+  inverted signs) and the host gate could not see it because the path only
+  compiles on ARM; the device audio came back decorrelated. The second attempt
+  keeps the loop control, the indices and the scalar tail identical in both
+  paths and swaps only the four-wide body, so the host gate exercises the same
+  arithmetic the intrinsics run. That version is correct and worth 1.17x
+  (8.35 to 7.12).
 - **The FFT lock** replaced the reference's DFT-as-convolution transforms
   (512 basis rows times 1024 taps per frame) and also shrank the arena from
   121 MB to 66 MB. On the host it was worth little because the lock was already
   cheap there; it matters more on the device.
+- **int8 is a size win, not a speed win.** The kernels accumulate in fp32 over
+  the int8 weights and scale once per output row, which is what weight-only
+  quantisation means: the arithmetic is unchanged, so the device time is
+  unchanged (8.35 to 8.24), and the gain is the blobs, 32.3 MB to 16.4 MB, plus
+  memory traffic that the test sentence is too small to show.
 
-The next lever is int8 (the plan's M6): per-output-channel weights with the
-fp32 keep-list the shipped ONNX itself uses, which is what the onnxruntime
-baseline runs and what the 3.2x gap calls for. After that, a careful NEON pass
-over the same stride-1 loops, with the index arithmetic shared with the scalar
-path so the host gate still covers it.
+Both of those levers are now in, which leaves the 2.75x to the baseline. What
+remains is concentrated in the strided paths NEON cannot reach directly: the
+ConvTranspose upsampling stages, whose scatter form can be rewritten as gather
+passes over the output by residue class (each one a contiguous stride-1
+convolution, and so vectorisable), and then the fuller int8 arithmetic with
+quantised activations, which is the sanoTTS scheme and a substantially larger
+job. A separate small win is an int8 LSTM kernel, which would take the blobs
+from 16.4 MB to the plan's 9 MB class.
 
 ## Layout
 
