@@ -320,6 +320,9 @@ function Audiobook:_initSubmodules()
             local HighlightManager = dofile(pp .. "highlightmanager.lua")
             local SyncController = dofile(pp .. "synccontroller.lua")
             self.bt_manager = dofile(pp .. "btmanager.lua")
+            -- Exposed so the media path can raise the same Bluetooth-vs-silence
+            -- advisory without loading a second copy of the module.
+            self.bt_ui = BtUI
 
             self.text_parser = TextParser:new()
             self.tts_engine = TTSEngine:new{
@@ -399,6 +402,9 @@ function Audiobook:_initSubmodules()
     if not self.bt_manager then
         pcall(function()
             self.bt_manager = dofile(pp .. "btmanager.lua")
+            -- Exposed so the media path can raise the same Bluetooth-vs-silence
+            -- advisory without loading a second copy of the module.
+            self.bt_ui = BtUI
         end)
     end
 
@@ -1395,6 +1401,13 @@ function Audiobook:startReadAlong(text, start_pos)
                 BtMediaControl.start(self)
             end
         end
+        -- Kept separate from the watcher above so its start condition does not
+        -- change, and widened to bluealsa.  A device that is paired but not
+        -- connected is silent with no other symptom, so say so before
+        -- synthesis rather than letting the user wait it out.
+        BtUI.warnIfBtRouteSilent(self,
+            self.tts_engine.audio_player_type == "gst-bt"
+                or self.tts_engine.audio_player_type == "bluealsa")
     end)
 
     -- v0.1.9.6: Pre-synthesis warning when Piper (or another WAV-producing

@@ -1281,6 +1281,14 @@ function MediaEngine:play(on_complete, on_fail)
     self._android_playback_confirmed = false
 
     if self._use_persistent_pipeline then
+        -- This pipeline feeds the A2DP sink, so this playback is going over
+        -- Bluetooth.  With no device connected it is silence, and the media
+        -- path had no advisory at all: the read-aloud path started the
+        -- disconnect watcher, this one never did.  See BtUI.warnIfBtRouteSilent.
+        if self.plugin and self.plugin.bt_ui then
+            self.plugin.bt_ui.startWatcher(self.plugin)
+            self.plugin.bt_ui.warnIfBtRouteSilent(self.plugin, true)
+        end
         local ok = self:_playPersistentPipeline(gen)
         if ok then
             self.is_playing = true

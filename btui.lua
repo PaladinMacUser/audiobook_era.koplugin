@@ -418,6 +418,117 @@ end
 -- device is still connected, and shows a notification if everything
 -- disconnects.  Runs only while this plugin is in use to avoid
 -- unnecessary battery drain.
+--- Warn when the output is routed to Bluetooth but nothing is connected.
+--
+-- A paired-but-disconnected device is otherwise indistinguishable from a
+-- broken player: no link means no sink, nothing holds the audio socket, the
+-- pipeline stalls, and the only symptom is silence.
+--
+-- This is the case the disconnect watcher cannot see, because that watcher
+-- only fires on a connected -> disconnected transition and stays quiet for a
+-- device that was already gone when playback began.
+--
+-- Fires only when the route really is Bluetooth and no audio device is
+-- connected, so a user on the built-in speaker is never nagged.  Honours
+-- bt_disconnect_check as the off switch and warns once per playback rather
+-- than once per tick.
+--
+-- @tparam table plugin  Audiobook widget container
+-- @tparam boolean routed_to_bt  Whether this playback's audio goes to a
+--   Bluetooth sink. There is no single signal for that in the plugin: the
+--   read-aloud path knows it from `tts_engine.audio_player_type` being
+--   "gst-bt" or "bluealsa", and the media path from its persistent pipeline
+--   being the A2DP sink. Callers pass whichever applies.
+-- @treturn bool  True when the warning was shown
+function BtUI.warnIfBtRouteSilent(plugin, routed_to_bt)
+    local bt = plugin and plugin.bt_manager
+    if not bt or not routed_to_bt then return false end
+
+    if bt:anyAudioDeviceConnected() then
+        -- A live device clears the flag so a later drop warns again.
+        plugin._bt_silent_warned = nil
+        return false
+    end
+    return BtUI._showBtSilentDialog(plugin)
+end
+
+--- Show the "no Bluetooth device connected" dialog, once per playback.
+--
+-- Split from the route check because the disconnect watcher is only running
+-- while a Bluetooth route is active, so it needs the dialog without that gate.
+--
+-- Returns silently on Kindle (its BT is OS-managed and cannot be enumerated)
+-- and when the user has turned the advisory off, so every caller can invoke it
+-- without repeating those conditions.
+--
+-- @tparam table plugin  Audiobook widget container
+-- @treturn bool  True when the dialog was shown
+function BtUI._showBtSilentDialog(plugin)
+    local bt = plugin and plugin.bt_manager
+    if not bt then return false end
+    if bt:getStackType() == "kindle" then return false end
+    -- bt_disconnect_check is the existing off switch for Bluetooth advisories,
+    -- reused here so there is one setting rather than two.
+    if plugin:getSetting("bt_disconnect_check", 30) == 0 then return false end
+    if plugin._bt_silent_warned then return false end
+    plugin._bt_silent_warned = true
+
+    local name = plugin:getSetting("bt_device_name", nil)
+    local address = plugin:getSetting("bt_device_addr", nil)
+
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local buttons = {}
+
+    if address then
+        table.insert(buttons, {{
+            text = name and T(_("Reconnect %1"), name) or _("Reconnect"),
+            callback = function()
+                UIManager:close(plugin._bt_silent_dialog)
+                UIManager:show(InfoMessage:new{
+                    text = name and T(_("Reconnecting to %1..."), name)
+                        or _("Reconnecting..."),
+                    timeout = 2,
+                })
+                local ok, err = bt:connect(address)
+                UIManager:show(InfoMessage:new{
+                    text = ok and (name and T(_("Connected to %1."), name)
+                            or _("Connected."))
+                        or (err or _("Could not reconnect. Turn the speaker on and try again.")),
+                    timeout = ok and 2 or 6,
+                })
+                -- Let a later attempt warn again if it did not take.
+                if ok then plugin._bt_silent_warned = nil end
+            end,
+        }})
+    end
+
+    table.insert(buttons, {{
+        text = _("Play anyway"),
+        callback = function() UIManager:close(plugin._bt_silent_dialog) end,
+    }})
+
+    -- Name it only when Bluetooth is actually on; otherwise the honest
+    -- statement is that it is off, and the reconnect button simply fails.
+    local powered = bt:isPowered()
+    local title
+    if not powered then
+        title = _("Bluetooth is off, so you will not hear anything.")
+    elseif name then
+        title = T(_("Bluetooth is on but %1 is not connected, so you will not hear anything."), name)
+    else
+        title = _("Bluetooth is on but no audio device is connected, so you will not hear anything.")
+    end
+
+    plugin._bt_silent_dialog = ButtonDialog:new{
+        title = title,
+        buttons = buttons,
+    }
+    UIManager:show(plugin._bt_silent_dialog)
+    logger.warn("BtUI: no connected BT audio device, warned (powered:",
+        tostring(powered), "device:", name or "none", ")")
+    return true
+end
+
 function BtUI.startWatcher(plugin)
     -- On Kindle, we can't enumerate BT devices via BlueZ, so the
     -- disconnect watcher would always report "no devices". Skip it.
@@ -453,23 +564,25 @@ function BtUI._scheduleBTDisconnectCheck(plugin)
             return
         end
 
-        local any_connected = false
-        local ok, devices = pcall(plugin.bt_manager.listAudioDevices, plugin.bt_manager)
-        if ok and devices then
-            for _, dev in ipairs(devices) do
-                if dev.connected then
-                    any_connected = true
-                    break
-                end
-            end
-        end
+        local any_connected = plugin.bt_manager:anyAudioDeviceConnected()
 
         if plugin._bt_last_connected == nil then
             plugin._bt_last_connected = any_connected
+            -- The watcher only runs while a Bluetooth route is active, so a
+            -- device that was already gone when playback began has no
+            -- transition to detect and the baseline is the only chance to say
+            -- so.  Without this the plugin plays into silence and explains
+            -- nothing, which is exactly how it fails in the field.
+            if not any_connected then
+                BtUI._showBtSilentDialog(plugin)
+            end
         elseif plugin._bt_last_connected and not any_connected then
             plugin._bt_last_connected = any_connected
+            local name = plugin:getSetting("bt_device_name", nil)
             UIManager:show(InfoMessage:new{
-                text = _("Bluetooth audio device disconnected."),
+                text = name
+                    and T(_("Bluetooth audio device %1 disconnected."), name)
+                    or _("Bluetooth audio device disconnected."),
                 timeout = 4,
             })
         else

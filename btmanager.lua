@@ -2016,6 +2016,20 @@ function BTManager:isConnected(address)
     return out:match("boolean true") ~= nil
 end
 
+--- Check whether any audio-capable device is currently connected.
+-- A Bluetooth route with nothing connected is silent, so this is the test both
+-- the start-of-playback guard and the disconnect watcher need.  It reads the
+-- device list, which is cached for five seconds, so it is cheap enough to poll.
+-- @treturn bool
+function BTManager:anyAudioDeviceConnected()
+    local ok, devices = pcall(self.listAudioDevices, self)
+    if not ok or not devices then return false end
+    for _, dev in ipairs(devices) do
+        if dev.connected then return true end
+    end
+    return false
+end
+
 --- Get the name of a device.
 -- @string address  MAC address
 -- @treturn string name (may be "")
