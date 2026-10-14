@@ -510,12 +510,12 @@ int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f
             kok_leaky_relu(cur, (long)cur_ch * cur_len, 0.1f);
             if (i == 0) {
                 int stride = dw->uprate[1];
-                kok_conv1d(nsrc, har, &dw->noise_w[i], dw->noise_b[i], nfft + 2, out_ch,
-                           hframes, stride * 2, stride, (stride + 1) / 2, 1);
+                kok_conv1d_a(a, nsrc, har, &dw->noise_w[i], dw->noise_b[i], nfft + 2,
+                             out_ch, hframes, stride * 2, stride, (stride + 1) / 2, 1);
                 hb = (hframes + 2 * ((stride + 1) / 2) - stride * 2) / stride + 1;
             } else {
-                kok_conv1d(nsrc, har, &dw->noise_w[i], dw->noise_b[i], nfft + 2, out_ch,
-                           hframes, 1, 1, 0, 1);
+                kok_conv1d_a(a, nsrc, har, &dw->noise_w[i], dw->noise_b[i], nfft + 2,
+                             out_ch, hframes, 1, 1, 0, 1);
                 hb = hframes;
             }
 #ifdef KOK_DUMP_STAGES
@@ -540,8 +540,9 @@ int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f
 #endif
             upd = (cur_len - 1) * dw->uprate[i] - 2 * ((dw->upkern[i] - dw->uprate[i]) / 2)
                   + dw->upkern[i];
-            kok_convtr1d(ups, cur, &dw->ups_w[i], dw->ups_b[i], cur_ch, out_ch, cur_len,
-                         dw->upkern[i], dw->uprate[i], (dw->upkern[i] - dw->uprate[i]) / 2, 0, 1);
+            kok_convtr1d_a(a, ups, cur, &dw->ups_w[i], dw->ups_b[i], cur_ch, out_ch,
+                           cur_len, dw->upkern[i], dw->uprate[i],
+                           (dw->upkern[i] - dw->uprate[i]) / 2, 0, 1);
 #ifdef KOK_DUMP_STAGES
             {
                 char fn[128];

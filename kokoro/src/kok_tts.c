@@ -77,8 +77,9 @@ int main(int argc, char **argv) {
     const char *dump_ids_p = NULL;
     unsigned long long seed = 1234;
     double arena_mb = 128.0;
+    int aq8 = 0;               /* run the linear algebra over quantised activations */
     int quiet = 0;
-    for (int i = 1; i < argc - 1; i++) {
+    for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--meta")) meta_p = argv[++i];
         else if (!strcmp(argv[i], "--text")) text_p = argv[++i];
         else if (!strcmp(argv[i], "--dec")) dec_p = argv[++i];
@@ -90,11 +91,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--seed")) seed = strtoull(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "--arena-mb")) arena_mb = atof(argv[++i]);
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
+        else if (!strcmp(argv[i], "--aq8")) aq8 = 1;
     }
     if (!meta_p || !text_p || !dec_p || (!ids_p && !sentence_p)) {
         fprintf(stderr, "usage: %s --meta M --text TEXTBLOB --dec D "
                         "(--ids I | --sentence \"text\") [--out O] [--seed N] "
-                        "[--arena-mb N] [--src S] [--dump-ids P]\n", argv[0]);
+                        "[--arena-mb N] [--src S] [--dump-ids P] [--aq8]\n", argv[0]);
         return 2;
     }
 
@@ -138,6 +140,7 @@ int main(int argc, char **argv) {
     float *arena_mem = malloc((size_t)(arena_mb * 1048576.0 / 4.0) * sizeof(float) + 64);
     if (!arena_mem) { fprintf(stderr, "kok_tts: no memory for the arena\n"); return 2; }
     kok_arena_init(&arena, arena_mem, (size_t)(arena_mb * 1048576.0 / 4.0));
+    arena.aq8 = aq8;
 
     kok_text_out out;
     memset(&out, 0, sizeof out);

@@ -21,6 +21,7 @@ void kok_arena_init(kok_arena *a, void *mem, size_t floats) {
     a->base = (float *)mem;
     a->cap = floats;
     a->top = 0;
+    a->aq8 = 0;
 }
 
 void *kok_arena_alloc(kok_arena *a, size_t floats) {
@@ -28,6 +29,10 @@ void *kok_arena_alloc(kok_arena *a, size_t floats) {
     float *p = a->base + a->top;
     a->top += floats;
     return p;
+}
+
+void *kok_arena_bytes(kok_arena *a, size_t nbytes) {
+    return kok_arena_alloc(a, (nbytes + sizeof(float) - 1) / sizeof(float));
 }
 
 void kok_arena_reset(kok_arena *a) { a->top = 0; }
@@ -345,6 +350,63 @@ void kok_convtr1d_aq8(float *restrict out, const float *restrict x,
     }
 }
 
+/* ---- dispatch ---- */
+void kok_conv1d_a(kok_arena *a, float *out, const float *x, const kok_w *w,
+                  const float *b, int Cin, int Cout, int T, int K,
+                  int stride, int pad, int dil) {
+    if (a->aq8 && w->q && K >= 5) {
+        int Tp = (T + 2 * pad - dil * (K - 1) - 1) / stride + 1;
+        size_t m2 = a->top;
+        int8_t *xq = kok_arena_bytes(a, (size_t)Cin * T);
+        float *xs = kok_arena_bytes(a, (size_t)Cin * sizeof(float));
+        int32_t *tacc = kok_arena_bytes(a, (size_t)Tp * sizeof(int32_t));
+        if (xq && xs && tacc) {
+            kok_conv1d_aq8(out, x, w, b, Cin, Cout, T, K, stride, pad, dil, xq, xs, tacc);
+            a->top = m2;
+            return;
+        }
+        a->top = m2;
+    }
+    kok_conv1d(out, x, w, b, Cin, Cout, T, K, stride, pad, dil);
+}
+
+void kok_linear_a(kok_arena *a, float *out, const float *x, const kok_w *w,
+                  const float *b, int Cin, int Cout, int T) {
+    if (0) {
+        size_t m2 = a->top;
+        int8_t *xq = kok_arena_bytes(a, (size_t)Cin * T);
+        float *xs = kok_arena_bytes(a, (size_t)Cin * sizeof(float));
+        int32_t *tacc = kok_arena_bytes(a, (size_t)T * sizeof(int32_t));
+        if (xq && xs && tacc) {
+            kok_linear_aq8(out, x, w, b, Cin, Cout, T, xq, xs, tacc);
+            a->top = m2;
+            return;
+        }
+        a->top = m2;
+    }
+    kok_linear(out, x, w, b, Cin, Cout, T);
+}
+
+void kok_convtr1d_a(kok_arena *a, float *out, const float *x, const kok_w *w,
+                    const float *b, int Cin, int Cout, int T, int K,
+                    int stride, int pad, int out_pad, int groups) {
+    if (a->aq8 && w->q && K >= 12) {
+        int Tp = (T - 1) * stride - 2 * pad + K + out_pad;
+        size_t m2 = a->top;
+        int8_t *xq = kok_arena_bytes(a, (size_t)Cin * T);
+        float *xs = kok_arena_bytes(a, (size_t)Cin * sizeof(float));
+        int32_t *tacc = kok_arena_bytes(a, (size_t)Tp * sizeof(int32_t));
+        if (xq && xs && tacc) {
+            kok_convtr1d_aq8(out, x, w, b, Cin, Cout, T, K, stride, pad, out_pad,
+                             groups, xq, xs, tacc);
+            a->top = m2;
+            return;
+        }
+        a->top = m2;
+    }
+    kok_convtr1d(out, x, w, b, Cin, Cout, T, K, stride, pad, out_pad, groups);
+}
+
 /* ---- normalisation ---- */
 void kok_layer_norm(float *x, const float *gamma, const float *beta, int C, int T, float eps) {
     for (int t = 0; t < T; t++) {
@@ -559,16 +621,16 @@ int kok_arb_forward(float *out, const float *x, const kok_arb *b, const float *s
     if (b->upsample) {
         float *up = kok_arena_alloc(a, (size_t)Cin * T_out);
         if (!up) return -1;
-        kok_convtr1d(up, buf, &b->pool_w, b->pool_b, Cin, Cin, T, 3, 2, 1, 1, Cin);
-        kok_conv1d(res, up, &b->c1_w, b->c1_b, Cin, Cout, T_out, 3, 1, 1, 1);
+        kok_convtr1d_a(a, up, buf, &b->pool_w, b->pool_b, Cin, Cin, T, 3, 2, 1, 1, Cin);
+        kok_conv1d_a(a, res, up, &b->c1_w, b->c1_b, Cin, Cout, T_out, 3, 1, 1, 1);
     } else {
-        kok_conv1d(res, buf, &b->c1_w, b->c1_b, Cin, Cout, T, 3, 1, 1, 1);
+        kok_conv1d_a(a, res, buf, &b->c1_w, b->c1_b, Cin, Cout, T, 3, 1, 1, 1);
     }
     /* AdaIN -> leaky -> conv2 */
     kok_adain1d(buf, res, Cout, T_out, s, style_dim, b->n2_fc_w, b->n2_fc_b,
                 b->n2_norm_w, b->n2_norm_b, 1e-5f);
     kok_leaky_relu(buf, (long)Cout * T_out, 0.2f);
-    kok_conv1d(res, buf, &b->c2_w, b->c2_b, Cout, Cout, T_out, 3, 1, 1, 1);
+    kok_conv1d_a(a, res, buf, &b->c2_w, b->c2_b, Cout, Cout, T_out, 3, 1, 1, 1);
 
     /* shortcut: nearest upsample (PyTorch interpolate), then 1x1 if the widths differ */
     if (b->upsample) {
@@ -578,12 +640,12 @@ int kok_arb_forward(float *out, const float *x, const kok_arb *b, const float *s
             for (int t = 0; t < T; t++) { srow[2 * t] = xrow[t]; srow[2 * t + 1] = xrow[t]; }
         }
         if (b->sc_w.f || b->sc_w.q)
-            kok_conv1d(out, shc, &b->sc_w, NULL, Cin, Cout, T_out, 1, 1, 0, 1);
+            kok_conv1d_a(a, out, shc, &b->sc_w, NULL, Cin, Cout, T_out, 1, 1, 0, 1);
         else
             memcpy(out, shc, (size_t)Cin * T_out * sizeof(float));
     } else {
         if (b->sc_w.f || b->sc_w.q)
-            kok_conv1d(out, x, &b->sc_w, NULL, Cin, Cout, T, 1, 1, 0, 1);
+            kok_conv1d_a(a, out, x, &b->sc_w, NULL, Cin, Cout, T, 1, 1, 0, 1);
         else
             memcpy(out, x, (size_t)Cin * T * sizeof(float));
     }

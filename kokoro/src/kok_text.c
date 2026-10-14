@@ -287,9 +287,9 @@ static int albert_layer(const kok_text_w *tw, const kok_config *c, float *x, int
     float *ff = kok_arena_alloc(a, (size_t)inter * T);
     if (!q || !k || !v || !ctx || !sc || !ff) return -1;
 
-    kok_linear(q, x, &tw->q_w, tw->q_b, C, C, T);
-    kok_linear(k, x, &tw->k_w, tw->k_b, C, C, T);
-    kok_linear(v, x, &tw->v_w, tw->v_b, C, C, T);
+    kok_linear_a(a, q, x, &tw->q_w, tw->q_b, C, C, T);
+    kok_linear_a(a, k, x, &tw->k_w, tw->k_b, C, C, T);
+    kok_linear_a(a, v, x, &tw->v_w, tw->v_b, C, C, T);
     const float scale = 1.0f / sqrtf((float)hs);
     for (int h = 0; h < heads; h++) {
         const float *qh = q + (size_t)h * hs * T;
@@ -316,14 +316,14 @@ static int albert_layer(const kok_text_w *tw, const kok_config *c, float *x, int
         }
     }
     /* dense + residual LayerNorm */
-    kok_linear(ff, ctx, &tw->dense_w, tw->dense_b, C, C, T);
+    kok_linear_a(a, ff, ctx, &tw->dense_w, tw->dense_b, C, C, T);
     for (long i = 0; i < (long)C * T; i++) x[i] += ff[i];
     kok_layer_norm(x, tw->att_ln_w, tw->att_ln_b, C, T, 1e-12f);
 
     /* feed-forward with gelu_new, then the full-layer LayerNorm */
-    kok_linear(ff, x, &tw->ffn_w, tw->ffn_b, C, inter, T);
+    kok_linear_a(a, ff, x, &tw->ffn_w, tw->ffn_b, C, inter, T);
     kok_gelu_new(ff, (long)inter * T);
-    kok_linear(ctx, ff, &tw->ffn_out_w, tw->ffn_out_b, inter, C, T);
+    kok_linear_a(a, ctx, ff, &tw->ffn_out_w, tw->ffn_out_b, inter, C, T);
     for (long i = 0; i < (long)C * T; i++) x[i] += ctx[i];
     kok_layer_norm(x, tw->full_ln_w, tw->full_ln_b, C, T, 1e-12f);
     return 0;
@@ -341,7 +341,7 @@ static int albert_forward(const kok_text_w *tw, const kok_config *c, const int *
         for (int d = 0; d < emb; d++) h[d * T + t] = we[d] + pe[d] + tw->tok_emb[d];
     }
     kok_layer_norm(h, tw->emb_ln_w, tw->emb_ln_b, emb, T, 1e-12f);
-    kok_linear(out, h, &tw->map_w, tw->map_b, emb, C, T);
+    kok_linear_a(a, out, h, &tw->map_w, tw->map_b, emb, C, T);
     /* each application of the shared block needs the same scratch, so release
      * it between layers while keeping the caller's outer allocations */
     size_t mark = a->top;
@@ -429,7 +429,7 @@ static int durations_forward(const kok_text_w *tw, const kok_config *c, const fl
     kok_lstm_w b = {tw->pros_lstm.w_ih_r, tw->pros_lstm.w_hh_r, tw->pros_lstm.b_ih_r, tw->pros_lstm.b_hh_r};
     int rc = kok_bilstm(h, d, dhid + sd, T, dhid / 2, &f, &b, a);
     if (rc) return rc;
-    kok_linear(logits, h, &tw->dur_w, tw->dur_b, dhid, maxdur, T);
+    kok_linear_a(a, logits, h, &tw->dur_w, tw->dur_b, dhid, maxdur, T);
     kok_sigmoid(logits, (long)maxdur * T);
     for (int t = 0; t < T; t++) {
         double acc = 0.0;
@@ -493,9 +493,9 @@ static int asr_proj_forward(const kok_text_w *tw, const kok_config *c, const flo
     const int asr = c->v[KOK_D_ASR_DIM];
     float *mid = kok_arena_alloc(a, (size_t)asr * T);
     if (!mid) return -1;
-    kok_linear(mid, t_en, &tw->ap0_w, tw->ap0_b, tech, asr, T);
+    kok_linear_a(a, mid, t_en, &tw->ap0_w, tw->ap0_b, tech, asr, T);
     kok_gelu_erf(mid, (long)asr * T);
-    kok_linear(out, mid, &tw->ap2_w, tw->ap2_b, asr, asr, T);
+    kok_linear_a(a, out, mid, &tw->ap2_w, tw->ap2_b, asr, asr, T);
     return 0;
 }
 
@@ -533,7 +533,7 @@ int kok_text_forward(const kok_model *mo, const int *ids, long n_tokens, int mod
     if (!bert_out || !d_en || !t_en || !d) return -1;
     rc = albert_forward(tw, c, ids, T, bert_out, a);
     if (rc) return rc;
-    kok_linear(d_en, bert_out, &tw->be_w, tw->be_b, C, dhid, T);
+    kok_linear_a(a, d_en, bert_out, &tw->be_w, tw->be_b, C, dhid, T);
     rc = duration_encoder_forward(tw, c, d_en, T, d, a);
     if (rc) return rc;
     rc = durations_forward(tw, c, d, T, out->dur_raw, out->durs, 1.0f, a);

@@ -18,10 +18,12 @@ typedef struct {
     float *base;
     size_t cap;     /* floats */
     size_t top;     /* floats used */
+    int aq8;        /* run the linear algebra over quantised activations */
 } kok_arena;
 
 void kok_arena_init(kok_arena *a, void *mem, size_t floats);
 void *kok_arena_alloc(kok_arena *a, size_t floats);   /* NULL when exhausted */
+void *kok_arena_bytes(kok_arena *a, size_t nbytes);   /* rounded up to floats */
 void kok_arena_reset(kok_arena *a);
 size_t kok_arena_peak(const kok_arena *a);
 
@@ -63,6 +65,17 @@ void kok_conv1d_aq8(float *restrict out, const float *restrict x,
  * depthwise pool upsample (groups=Cin, kernel 3, stride 2). */
 /* The same scheme for a projection: x is [Cin, T], the weight [Cout, Cin] with a
  * scale per output channel. */
+/* Dispatch wrappers: the quantised path when the arena asks for it and the
+ * weights are quantised, otherwise the fp32 kernel. The scratch is carved from
+ * the arena and the top restored, so a call costs a convolution either way. */
+void kok_conv1d_a(kok_arena *a, float *out, const float *x, const kok_w *w,
+                  const float *b, int Cin, int Cout, int T, int K,
+                  int stride, int pad, int dil);
+void kok_linear_a(kok_arena *a, float *out, const float *x, const kok_w *w,
+                  const float *b, int Cin, int Cout, int T);
+void kok_convtr1d_a(kok_arena *a, float *out, const float *x, const kok_w *w,
+                    const float *b, int Cin, int Cout, int T, int K,
+                    int stride, int pad, int out_pad, int groups);
 void kok_linear_aq8(float *restrict out, const float *restrict x,
                     const kok_w *restrict w, const float *restrict b,
                     int Cin, int Cout, int T,

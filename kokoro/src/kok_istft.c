@@ -173,11 +173,11 @@ int kok_res1_forward(float *out, const float *x, const kok_res1 *b, const float 
         kok_adain1d(xt, acc, C, T, s, style_dim, b->a1[i].fc_w, b->a1[i].fc_b,
                     b->a1[i].norm_w, b->a1[i].norm_b, 1e-5f);
         kok_snake(xt, b->alpha1[i], C, T);
-        kok_conv1d(out, xt, &b->c1w[i], b->c1b[i], C, C, T, K, 1, pad, dil);
+        kok_conv1d_a(a, out, xt, &b->c1w[i], b->c1b[i], C, C, T, K, 1, pad, dil);
         kok_adain1d(xt, out, C, T, s, style_dim, b->a2[i].fc_w, b->a2[i].fc_b,
                     b->a2[i].norm_w, b->a2[i].norm_b, 1e-5f);
         kok_snake(xt, b->alpha2[i], C, T);
-        kok_conv1d(out, xt, &b->c2w[i], b->c2b[i], C, C, T, K, 1, K / 2, 1);
+        kok_conv1d_a(a, out, xt, &b->c2w[i], b->c2b[i], C, C, T, K, 1, K / 2, 1);
         for (long j = 0; j < (long)C * T; j++) acc[j] += out[j];
     }
     memcpy(out, acc, (size_t)C * T * sizeof(float));
