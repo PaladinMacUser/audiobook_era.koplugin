@@ -66,7 +66,7 @@ rm -rf "$BUNDLE_DIR"
 mkdir -p "$ESPEAK_DEST/bin" "$ESPEAK_DEST/lib" "$ESPEAK_DEST/share/espeak-ng-data/lang/gmw" "$ESPEAK_DEST/share/espeak-ng-data/voices"
 
 # Plugin Lua files first
-for f in absbrowse.lua abscache.lua absclient.lua abssync.lua androidmediasession.lua androidplayer.lua androidtts.lua audiobook_gettext.lua audiobookplayer.lua benchmarkrunner.lua btmanager.lua btmediacontrol.lua btui.lua bugreport.lua debuglog.lua downloader.lua epubmediaoverlay.lua highlightmanager.lua m4bparser.lua main.lua mediaaligner.lua mediaengine.lua mediasync.lua menubuilder.lua _meta.lua piperqueue.lua sessionrecorder.lua synccontroller.lua textparser.lua transcoder.lua ttsengine.lua updater.lua utils.lua wavutils.lua; do
+for f in absbrowse.lua abscache.lua absclient.lua abssync.lua androidmediasession.lua androidplayer.lua androidtts.lua audiobook_gettext.lua audiobookplayer.lua benchmarkrunner.lua btmanager.lua btmediacontrol.lua btui.lua bugreport.lua debuglog.lua downloader.lua epubmediaoverlay.lua highlightmanager.lua m4bparser.lua audioout.lua main.lua mediaaligner.lua mediaengine.lua mediasync.lua menubuilder.lua _meta.lua piperqueue.lua sessionrecorder.lua synccontroller.lua textparser.lua transcoder.lua ttsengine.lua updater.lua utils.lua wavutils.lua; do
     if [ -f "$SCRIPT_DIR/$f" ]; then
         cp "$SCRIPT_DIR/$f" "$PLUGIN_DEST/"
     fi
@@ -547,6 +547,22 @@ echo ""
 echo "=== Bundle ready ==="
 du -sh "$PLUGIN_DEST"
 
+# ── audioout daemon (Tier 2: owned audio output, Kobo MTK) ────────────
+# Built OUTSIDE the nix sandbox against the Debian Jessie 2.19 sysroot so
+# it runs BARE under the device loader and dlopens the device's
+# libgstreamer (see dev/audioout/PLAN.md for why the bundled-loader
+# approach cannot work here: GLIBC_PRIVATE symbol mixing).
+if [ -f "$SCRIPT_DIR/dev/audioout/build-daemon.sh" ]; then
+    if bash "$SCRIPT_DIR/dev/audioout/build-daemon.sh"; then
+        mkdir -p "$PLUGIN_DEST/audioout"
+        cp "$SCRIPT_DIR/dev/audioout/out/audioout" "$PLUGIN_DEST/audioout/audioout"
+        chmod +x "$PLUGIN_DEST/audioout/audioout"
+        echo "Bundled audioout/audioout"
+    else
+        echo "WARNING: audioout daemon build failed; bundling without it" >&2
+    fi
+fi
+
 # ── Rename ELF binaries to .bin extension ──────────────────────────────
 # Some Windows zip extractors / antivirus software silently quarantine or
 # skip Linux ELF executables that have no file extension.  Adding .bin
@@ -554,7 +570,7 @@ du -sh "$PLUGIN_DEST"
 # on first run (see ttsengine.lua detectBackend).
 echo ""
 echo "=== Renaming ELF binaries to .bin (Windows extraction workaround) ==="
-for elf in "$ESPEAK_DEST/bin/espeak-ng" "$PIPER_DEST/piper" "$PIPER_DEST/piper_phonemize" "$PIPER_DEST/espeak-ng" "$BLUEALSA_DEST/bin/bluealsa" "$PLUGIN_DEST/wav-play/wav-play" "$PLUGIN_DEST/bin/ffmpeg" "$PLUGIN_DEST/bin/ffmpeg-legacy" "$PLUGIN_DEST/espeak-ng-legacy/bin/espeak-ng"; do
+for elf in "$ESPEAK_DEST/bin/espeak-ng" "$PIPER_DEST/piper" "$PIPER_DEST/piper_phonemize" "$PIPER_DEST/espeak-ng" "$BLUEALSA_DEST/bin/bluealsa" "$PLUGIN_DEST/wav-play/wav-play" "$PLUGIN_DEST/bin/ffmpeg" "$PLUGIN_DEST/bin/ffmpeg-legacy" "$PLUGIN_DEST/espeak-ng-legacy/bin/espeak-ng" "$PLUGIN_DEST/audioout/audioout"; do
     if [ -f "$elf" ]; then
         mv "$elf" "${elf}.bin"
         echo "  $(basename "$elf") -> $(basename "$elf").bin"

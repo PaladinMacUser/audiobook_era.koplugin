@@ -76,7 +76,7 @@ jobs:
       - name: Verify bundle
         run: |
           PLUGIN_DIR="kobo-tts-bundle/audiobook.koplugin"
-          EXPECTED_LUA_COUNT=34
+          EXPECTED_LUA_COUNT=35
 
           echo "=== Lua files ==="
           ls -la "$PLUGIN_DIR"/*.lua
@@ -94,6 +94,16 @@ jobs:
               echo "ffmpeg: OK"
           else
               echo "ERROR: bin/ffmpeg missing"
+              exit 1
+          fi
+          echo ""
+
+          echo "=== audioout daemon ==="
+          if [ -f "$PLUGIN_DIR/audioout/audioout" ] || [ -f "$PLUGIN_DIR/audioout/audioout.bin" ]; then
+              ls -la "$PLUGIN_DIR"/audioout/ 2>/dev/null || true
+              echo "audioout: OK"
+          else
+              echo "ERROR: audioout daemon missing"
               exit 1
           fi
           echo ""
