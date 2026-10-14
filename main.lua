@@ -4364,7 +4364,25 @@ function Audiobook:_releaseAudiobookChromeMargins()
     local tp = ui.typeset
     if tp and tp.unscaled_margins then
         local Event = require("ui/event")
+        -- Restoring the user margins re-typesets the page.  ReaderRolling
+        -- usually re-anchors to the page being read, but its xpointer can be
+        -- stale when something navigated the document directly (page peek,
+        -- rotation remap, TOC jump), and then the view settles on an earlier
+        -- page (the session start).  Capture the page before the reflow and
+        -- put it back once the new layout has settled.
+        local keep_xp
+        if ui.rolling and ui.document and ui.document.getXPointer then
+            pcall(function() keep_xp = ui.document:getXPointer() end)
+        end
         ui:handleEvent(Event:new("SetPageMargins", tp.unscaled_margins))
+        if keep_xp and ui.rolling and not (Device and Device.isAndroid and Device:isAndroid()) then
+            UIManager:scheduleIn(0.3, function()
+                if not (ui and ui.rolling and ui.document) then return end
+                pcall(function()
+                    ui:handleEvent(Event:new("GotoXPointer", keep_xp))
+                end)
+            end)
+        end
         dlog("overlay-margin", "restored-live")
     end
 end

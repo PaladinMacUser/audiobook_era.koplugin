@@ -198,6 +198,40 @@ function PiperQueue:setModel(model)
 end
 
 --[[--
+Set the synthesis rate.  The rate is baked into each server's command line
+as its length scale (Piper `--length_scale`, sanoTTS `--length-scale`), so a
+server that is already running keeps the old speed.  Restart the servers when
+it changes so the new speed actually reaches the audio; the next synthesis
+spawns them with the fresh flag.
+
+The rate affects only the synthesis engine.  espeak applies it per call, so
+this is a no-op for that backend.
+--]]
+function PiperQueue:setRate(rate, old_rate)
+    local engine = self.engine
+    -- The caller may already have written the new rate into engine.rate, so
+    -- take the previous value from the argument when it is given.
+    local old = tonumber(old_rate) or engine.rate or 1.0
+    rate = math.max(0.25, math.min(2.0, tonumber(rate) or 1.0))
+    engine.rate = rate
+    if math.abs(rate - old) < 0.01 then return end
+    -- Drop audio that is already synthesized: the queue prefetches far ahead,
+    -- so those sentences were produced at the old speed and would keep playing
+    -- at the old speed long after the user asked for a new one.  Dropping them
+    -- makes the change audible from the next sentence onward, at the cost of
+    -- re-synthesizing them.  This matters in per-process mode too, where there
+    -- are no servers to restart but the stale queue is the same.
+    logger.warn("PiperQueue: Rate changed", old, "->", rate,
+        (self._servers_running or self._servers_starting)
+            and "- restarting servers to apply the new length scale"
+            or "- flushing the prefetch queue")
+    if self._servers_running or self._servers_starting then
+        self:stopServers()
+    end
+    self:cleanQueue()
+end
+
+--[[--
 Set the Piper speaker id (multi-speaker models).
 @param id number  Speaker id (0-based)
 --]]
@@ -335,16 +369,21 @@ function PiperQueue:buildBaseCommand()
         local vcfg = engine.sanotts_voice_cfg or {}
         local vengine = vcfg.engine or (voice_name == "kristin" and "int8" or "pq8")
         local engine_args
+        -- The rate slider maps to the length scale for every sanoTTS engine
+        -- that has a duration path: pq8 and f32 take it per call, and the int8
+        -- (R7) engine applies it as a ratio on top of its native 1.08 (see
+        -- snt_server).  Rate 1.0 emits no flag, keeping native speed.
+        local rate = engine.rate or 1.0
+        local ls = 1.0 / math.max(0.25, rate)
+        local length_flag = ""
+        if math.abs(ls - 1.0) > 0.01 then
+            length_flag = string.format(" --length-scale %.2f", ls)
+        end
         if vengine == "int8" then
-            engine_args = " --engine int8"
+            engine_args = " --engine int8" .. length_flag
         else
-            engine_args = vengine == "f32" and " --engine f32" or " --engine pq8"
-            engine_args = engine_args .. " --pause-scale 2.5"
-            local rate = engine.rate or 1.0
-            local ls = 1.0 / math.max(0.25, rate)
-            if math.abs(ls - 1.0) > 0.01 then
-                engine_args = string.format("%s --length-scale %.2f", engine_args, ls)
-            end
+            engine_args = (vengine == "f32" and " --engine f32" or " --engine pq8")
+                .. " --pause-scale 2.5" .. length_flag
         end
         local espeak_voice_flag = string.format(' --voice "%s"', vcfg.espeak_voice or "en-us")
         local phoneme_flag = vcfg.phonemes and vcfg.phonemes ~= "en"
@@ -696,6 +735,11 @@ rm -f "$FIFO" "${FIFO}.pid" "${FIFO}.piper_pid"
         if all_ready then
             pq._servers_running = true
             pq._servers_starting = false
+            -- A successful start clears the retry budget.  The counter only
+            -- exists to stop rapid retry loops after failures; leaving it
+            -- latched would drop the session into slow per-process mode after
+            -- any deliberate restart (for example a speed change).
+            pq._server_start_attempts = 0
             logger.warn("PiperQueue: All", SERVER_COUNT,
                 "servers ready in",
                 time.to_ms(UIManager:getTime() - start_time), "ms")

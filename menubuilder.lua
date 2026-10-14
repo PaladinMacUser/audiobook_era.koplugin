@@ -2007,6 +2007,34 @@ function MenuBuilder._androidVoicePickerItems(plugin)
     return items, current_idx
 end
 
+--- sanoTTS voice picker items: only the voices whose blobs shipped.
+-- The espeak language list does not apply to this backend.
+function MenuBuilder._sanottsVoicePickerItems(plugin)
+    local items = {}
+    local current = 1
+    local voices = plugin.tts_engine and plugin.tts_engine.listSanottsVoices
+        and plugin.tts_engine:listSanottsVoices() or {}
+    local selected = plugin:getSetting("sanotts_voice", nil)
+        or (plugin.tts_engine and plugin.tts_engine.sanotts_voice_name)
+        or "amy"
+    for _, voice in ipairs(voices) do
+        local name, label = voice.name, voice.label
+        table.insert(items, {
+            text = label,
+            callback = function()
+                plugin.tts_engine:setSanottsVoice(name)
+                plugin:setSetting("sanotts_voice", name)
+                UIManager:show(InfoMessage:new{
+                    text = T(_("Voice set to %1."), label),
+                    timeout = 2,
+                })
+            end,
+        })
+        if selected == name then current = #items end
+    end
+    return items, current
+end
+
 function MenuBuilder._piperVoicePickerItems(plugin)
     local items = {}
     local current = 1
@@ -2104,7 +2132,12 @@ function MenuBuilder.showVoicePicker(plugin)
         return
     end
     local items, current
-    if backend == plugin.tts_engine.BACKENDS.PIPER then
+    if backend == plugin.tts_engine.BACKENDS.SANOTTS then
+        -- sanoTTS has its own small voice inventory.  Without this branch it
+        -- fell through to the espeak language list, offering languages the
+        -- backend cannot synthesize.
+        items, current = MenuBuilder._sanottsVoicePickerItems(plugin)
+    elseif backend == plugin.tts_engine.BACKENDS.PIPER then
         items, current = MenuBuilder._piperVoicePickerItems(plugin)
     else
         items, current = MenuBuilder._espeakVoicePickerItems(plugin)
@@ -2155,6 +2188,16 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
         end
     elseif backend == plugin.tts_engine.BACKENDS.PIPER then
         voice_label = plugin:getSetting("piper_model_label", "default")
+    elseif backend == plugin.tts_engine.BACKENDS.SANOTTS then
+        -- Name the sanoTTS voice actually selected, not an espeak language.
+        local name = plugin:getSetting("sanotts_voice", nil)
+            or plugin.tts_engine.sanotts_voice_name or "amy"
+        voice_label = name
+        if plugin.tts_engine.listSanottsVoices then
+            for _, v in ipairs(plugin.tts_engine:listSanottsVoices()) do
+                if v.name == name then voice_label = v.label break end
+            end
+        end
     else
         voice_label = plugin:getSetting("tts_voice_label", "English (GB)")
     end
@@ -2172,19 +2215,36 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
                 plugin:getSetting("speech_rate", 1.0),
                 function(v) return string.format("%.2fx", v) end,
                 function(v)
-                    plugin:setSetting("speech_rate", v)
-                    if plugin.tts_engine then plugin.tts_engine:setRate(v) end
-                    if plugin.sync_controller and plugin.sync_controller.playback_bar
-                        and plugin.sync_controller.playback_bar.updateSpeed then
-                        pcall(function()
-                            plugin.sync_controller.playback_bar:updateSpeed(v)
-                        end)
+                    -- Route through the sync controller where possible: it
+                    -- updates the engine, the bar, and re-reads the current
+                    -- sentence so the new rate is heard immediately.
+                    if plugin.sync_controller and plugin.sync_controller.setSpeechRate then
+                        plugin.sync_controller:setSpeechRate(v)
+                    else
+                        plugin:setSetting("speech_rate", v)
+                        if plugin.tts_engine then plugin.tts_engine:setRate(v) end
+                        if plugin.sync_controller and plugin.sync_controller.playback_bar
+                            and plugin.sync_controller.playback_bar.updateSpeed then
+                            pcall(function()
+                                plugin.sync_controller.playback_bar:updateSpeed(v)
+                            end)
+                        end
                     end
                     UIManager:show(InfoMessage:new{
                         text = T(_("Speech rate: %1x"), v),
                         timeout = 1.5,
                     })
                 end)
+        end,
+    })
+    -- Sleep timer.  TTS has no full-screen player, so this menu is where the
+    -- timer lives during read-along.
+    table.insert(items, {
+        text = _("Sleep timer"),
+        callback = function()
+            if plugin._showSleepTimerDialog then
+                plugin:_showSleepTimerDialog()
+            end
         end,
     })
     if backend == plugin.tts_engine.BACKENDS.PIPER then

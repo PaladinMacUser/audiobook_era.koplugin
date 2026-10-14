@@ -646,6 +646,7 @@ int main(int argc, char **argv) {
     const char *model = NULL;
     const char *engine = "int8";
     int rate = 0; /* resolved after arg parse: 22050 int8, 24000 nano */
+    int length_scale_given = 0;
     for (int i = 1; i < argc - 1; i++) {
         if (!strcmp(argv[i], "--model")) model = argv[i + 1];
         else if (!strcmp(argv[i], "--engine")) engine = argv[i + 1];
@@ -658,7 +659,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--period-ms")) g_period_ms = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "--rate")) rate = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "--seed")) { g_seed = strtoull(argv[i + 1], NULL, 0); g_seed_set = 1; }
-        else if (!strcmp(argv[i], "--length-scale")) g_length_scale = (float)atof(argv[i + 1]);
+        else if (!strcmp(argv[i], "--length-scale")) {
+            g_length_scale = (float)atof(argv[i + 1]);
+            length_scale_given = 1;
+        }
         else if (!strcmp(argv[i], "--phonemes")) {
             if (!strcmp(argv[i + 1], "fr")) { g_map = PHONEME_MAP_FR; g_map_n = PHONEME_MAP_FR_N; }
             else if (strcmp(argv[i + 1], "en")) {
@@ -673,6 +677,13 @@ int main(int argc, char **argv) {
     if (!strcmp(engine, "pq8")) g_engine_pq8 = 1;
     if (!strcmp(engine, "f32")) g_engine_f32 = 1;
     if (!rate) rate = g_engine_nano ? 24000 : 22050;
+    /* The int8 (R7) engine has no per-call scale; it renders at a runtime
+     * global whose native value is 1.08.  Apply the requested length scale as
+     * a ratio on top of that, so --length-scale 1.0 (and omitting the flag)
+     * keeps the voice's native speed.  pq8 and f32 take the value per call. */
+    if (length_scale_given && !g_engine_nano && !g_engine_pq8 && !g_engine_f32) {
+        snt_length_scale = 1.08f * g_length_scale;
+    }
     if (!model || (!g_engine_nano && (!g_espeak_bin || !g_espeak_data))) {
         fprintf(stderr, "usage: %s --model <dir> --engine int8|pq8|nano|f32 [--espeak-bin <bin> --espeak-data <dir>] [--phonemes en|fr] [--rate 22050|24000] [--seed N] [--length-scale F]\n", argv[0]);
         return 2;

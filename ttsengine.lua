@@ -644,8 +644,15 @@ Set speech rate.
 @param rate number Rate multiplier (0.5 to 2.0)
 --]]
 function TTSEngine:setRate(rate)
+    local old = self.rate or 1.0
     self.rate = math.max(0.25, math.min(2.0, rate))
     logger.dbg("TTSEngine: Rate set to", self.rate)
+    -- Piper and sanoTTS bake the rate into the server command line, so a
+    -- running server keeps the old speed until it restarts.  Pass the old
+    -- rate explicitly: self.rate already holds the new value here.
+    if self._piper and self._piper.setRate then
+        self._piper:setRate(self.rate, old)
+    end
 end
 --[[--
 Set speech pitch.
@@ -4466,8 +4473,8 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         end
         -- Always use a single-file pipeline (merged or original)
         play_cmd = string.format(
-            'gst-launch-1.0 filesrc location="%s" ! wavparse ! audioconvert ! audioresample ! "audio/x-raw,format=S16LE,rate=48000,channels=2" ! mtkbtmwrpcaudiosink',
-            self.current_audio_file
+            'gst-launch-1.0 filesrc location="%s" ! wavparse ! audioconvert ! audioresample ! "audio/x-raw,format=S16LE,rate=48000,channels=2"%s ! mtkbtmwrpcaudiosink',
+            self.current_audio_file, self:_gstVolumeFragment()
         )
     else
         -- If a crash-retry proved a specific device/conversion combo works
@@ -6245,18 +6252,45 @@ Write the persistent BT pipeline feeder script to /tmp.
 The script starts gst-launch reading from a named FIFO and feeds it
 raw PCM (silence when idle, real audio when playing).
 --]]
+--[[--
+GStreamer `volume` element fragment for the current speech level, or "" when
+the element is unavailable.  The element ships in gst-plugins-base, but a
+stripped firmware build may lack it: probe once and fall back to unity rather
+than risk a pipeline that refuses to start.
+
+Needed because speech_volume had no audible effect on the BT paths.  The
+espeak backend bakes the level into synthesis via `-a`, but Piper's WAV goes
+straight through the gst pipeline, where nothing applied it.
+--]]
+function TTSEngine:_gstVolumeFragment()
+    if self._gst_volume_available == nil then
+        local h = io.popen("gst-inspect-1.0 volume 2>/dev/null | head -1")
+        local res = h and h:read("*a") or ""
+        if h then h:close() end
+        self._gst_volume_available = (res and res:match("Factory Details") ~= nil) or false
+    end
+    if not self._gst_volume_available then return "" end
+    local v = math.max(0.0, math.min(1.0, self.volume or 1.0))
+    return string.format(" ! volume volume=%.3f", v)
+end
+
 function TTSEngine:_writePipelineScript()
     local sr = self._pipeline_sample_rate or 22050
     -- Silence chunk: ~50ms at sample rate, 16-bit mono
     -- MUST be even (multiple of block_align=2) to preserve PCM sample alignment!
     local silence_samples = math.floor(sr * 0.05)
     local silence_bytes = silence_samples * 2
+    -- Digital gain element (see _gstVolumeFragment).  Empty when the
+    -- device's GStreamer has no `volume` element, so a stripped build can
+    -- never stop playback.
+    local vol_frag = self:_gstVolumeFragment()
+    local vol_elem = vol_frag ~= "" and (vol_frag .. " \\\n") or ""
     local script = string.format([=[
 #!/bin/sh
 CTRL="/tmp/audiobook_ctrl"
 FIFO="/tmp/audiobook_fifo"
 mkdir -p "$CTRL"
-rm -f "$CTRL/stop" "$CTRL/play" "$CTRL/done" "$CTRL/gst_pid"
+rm -f "$CTRL/stop" "$CTRL/play" "$CTRL/pause" "$CTRL/done" "$CTRL/gst_pid"
 rm -f "$FIFO"
 mkfifo "$FIFO"
 # Silence chunk: ~50ms at %dHz 16-bit mono = %d samples × 2 bytes = %d bytes
@@ -6264,19 +6298,22 @@ dd if=/dev/zero bs=%d count=1 of="$CTRL/s.raw" 2>/dev/null
 # Start gst-launch reading raw PCM from FIFO.
 # sync=false — let the BT A2DP hardware clock control the playback rate
 # via socket backpressure, instead of GStreamer's pipeline clock.
-# This is CRITICAL for SIGSTOP/SIGCONT pause/resume: with sync=true,
-# CLOCK_MONOTONIC advances during SIGSTOP but audio timestamps don't,
-# so GStreamer sees all buffered audio as "late" on SIGCONT and plays
-# it in a burst (causing choppy audio on the first sentence after
-# unpause).  With sync=false there is no clock to go stale.
 # The Lua caller shrinks the pipe buffer to 16KB via
 # fcntl(F_SETPIPE_SZ) to reduce latency while keeping enough headroom
 # to absorb CPU stalls during Piper synthesis.
+#
+# Pause is handled by feeding silence, never by freezing gst-launch.
+# SIGSTOP freezes the whole process, so it stops writing to the MTK
+# Bluetooth sink, and the sink underruns and comes back latched with
+# garbled audio for the rest of the session (only a fresh session clears
+# it).  Instead this script keeps gst-launch running and, on pause, stops
+# feeding the clip and feeds silence chunks into the FIFO so the sink
+# stays fed.  Resume continues the clip where it stopped.
 gst-launch-1.0 filesrc location="$FIFO" \
   ! rawaudioparse use-sink-caps=false format=pcm pcm-format=s16le sample-rate=%d num-channels=1 \
   ! audioconvert ! audioresample \
   ! "audio/x-raw,format=S16LE,rate=48000,channels=2" \
-  ! queue max-size-time=500000000 max-size-bytes=131072 \
+%s  ! queue max-size-time=500000000 max-size-bytes=131072 \
   ! mtkbtmwrpcaudiosink sync=false >/dev/null 2>"$CTRL/pipeline_stderr" &
 GST_PID=$!
 # Open FIFO write end — keeps it alive between individual writes.
@@ -6286,7 +6323,7 @@ exec 3>"$FIFO"
 # Lua uses the gst_pid file as a "ready" indicator before trying to
 # open(O_WRONLY|O_NONBLOCK) on the FIFO for pipe buffer resize.
 echo $GST_PID > "$CTRL/gst_pid"
-cleanup() { exec 3>&- 2>/dev/null; kill $GST_PID 2>/dev/null; rm -f "$FIFO" "$CTRL/s.raw" "$CTRL/gst_pid" "$CTRL/pipeline_stderr"; }
+cleanup() { exec 3>&- 2>/dev/null; kill $GST_PID 2>/dev/null; rm -f "$FIFO" "$CTRL/s.raw" "$CTRL/gst_pid" "$CTRL/pipeline_stderr" "$CTRL/pause"; }
 trap cleanup EXIT TERM
 # Track total bytes written to detect/fix alignment
 TOTAL_BYTES=0
@@ -6305,8 +6342,23 @@ while kill -0 $GST_PID 2>/dev/null && [ ! -f "$CTRL/stop" ]; do
     # Get audio data size (file size minus 44-byte WAV header)
     FSIZE=$(wc -c < "$FILE")
     DSIZE=$((FSIZE - 44))
-    # Skip 44-byte WAV header, output raw PCM
-    tail -c +45 "$FILE" >&3
+    # Write the PCM in chunks instead of one tail, so a pause can stop
+    # feeding audio without freezing gst-launch.  4096 16-bit samples is
+    # ~186 ms at 22050 Hz: short enough that a pause lands quickly, long
+    # enough to keep the fork rate low on a single-core Kobo.
+    OFF=0
+    while [ "$OFF" -lt "$DSIZE" ]; do
+      # 44-byte header + OFF is even, so bs=2 skip counts whole samples.
+      dd if="$FILE" bs=2 skip=$(((44 + OFF) / 2)) count=4096 2>/dev/null >&3
+      OFF=$((OFF + 8192))
+      if [ -f "$CTRL/pause" ]; then
+        while [ -f "$CTRL/pause" ] && [ ! -f "$CTRL/stop" ]; do
+          cat "$CTRL/s.raw" >&3
+          usleep 20000
+        done
+      fi
+      [ -f "$CTRL/stop" ] && break
+    done
     TOTAL_BYTES=$((TOTAL_BYTES + DSIZE))
     touch "$CTRL/done"
   else
@@ -6315,7 +6367,7 @@ while kill -0 $GST_PID 2>/dev/null && [ ! -f "$CTRL/stop" ]; do
     usleep 1000
   fi
 done
-]=], sr, silence_samples, silence_bytes, silence_bytes, sr, silence_bytes)
+]=], sr, silence_samples, silence_bytes, silence_bytes, sr, vol_elem, silence_bytes)
     local f = io.open(PIPELINE_SCRIPT, "w")
     if not f then return false end
     f:write(script)
@@ -6429,7 +6481,7 @@ function TTSEngine:_startPersistentPipeline()
         return false
     end
     -- Clean control files
-    os.execute("rm -f " .. PIPELINE_CTRL_DIR .. "/stop " .. PIPELINE_CTRL_DIR .. "/play " .. PIPELINE_CTRL_DIR .. "/done")
+    os.execute("rm -f " .. PIPELINE_CTRL_DIR .. "/stop " .. PIPELINE_CTRL_DIR .. "/play " .. PIPELINE_CTRL_DIR .. "/pause " .. PIPELINE_CTRL_DIR .. "/done")
     -- Launch pipeline in background
     local h = io.popen(PIPELINE_SCRIPT .. " >/dev/null 2>/dev/null & echo $!")
     local pid_str = h and h:read("*a") or ""
@@ -6451,6 +6503,9 @@ function TTSEngine:_startPersistentPipeline()
     self.audio_pid = gst_pid  -- for pause/resume compatibility
     self._socket_clean = false
     self._persistent_pipeline = true
+    -- Remember the gain baked into this pipeline's `volume` element so
+    -- _ensurePersistentPipeline can tell when the user changed it.
+    self._pipeline_volume = self.volume or 1.0
 
     -- Shrink the FIFO pipe buffer from 64KB to 16KB.
     -- At 22050Hz mono 16-bit (44100 B/s): 16KB ≈ 370ms.
@@ -6535,6 +6590,9 @@ function TTSEngine:_stopPersistentPipeline(reason)
     -- Signal feeder to stop (harmless if no feeder is running)
     local sf = io.open(PIPELINE_CTRL_DIR .. "/stop", "w")
     if sf then sf:write("1"); sf:close() end
+    -- Clear any pause flag so a stopped-then-restarted pipeline is not
+    -- created already paused.
+    os.execute("rm -f " .. PIPELINE_CTRL_DIR .. "/pause")
     -- Kill tracked processes
     if self._pipeline_gst_pid then
         os.execute("kill -9 " .. self._pipeline_gst_pid .. " 2>/dev/null")
@@ -6602,12 +6660,23 @@ function TTSEngine:_ensurePersistentPipeline()
         -- If the audio sample rate changed (e.g. switching from espeak 22050Hz
         -- to MBROLA 16000Hz), the pipeline must be restarted with the new rate
         -- or rawaudioparse will play audio at the wrong speed.
-        if self._target_sample_rate and self._pipeline_sample_rate
-                and self._target_sample_rate ~= self._pipeline_sample_rate then
+        local rate_changed = self._target_sample_rate and self._pipeline_sample_rate
+            and self._target_sample_rate ~= self._pipeline_sample_rate
+        -- The volume is a gst element baked into the pipeline command line, so
+        -- a change only takes effect by restarting it.  This runs from play()
+        -- at a sentence boundary, where the previous clip has finished, so the
+        -- restart never cuts audible speech.
+        local vol_changed = self._pipeline_volume ~= nil
+            and math.abs((self.volume or 1.0) - self._pipeline_volume) > 0.001
+        if rate_changed then
             logger.warn("TTSEngine: Sample rate changed from",
                 self._pipeline_sample_rate, "to", self._target_sample_rate,
                 "Hz — restarting pipeline")
             self:_stopPersistentPipeline("rate_change")
+        elseif vol_changed then
+            logger.warn("TTSEngine: Volume changed to",
+                self.volume, "— restarting pipeline")
+            self:_stopPersistentPipeline("volume_change")
         else
             return true
         end
@@ -7073,20 +7142,20 @@ function TTSEngine:pause()
         -- Kindle LIPC: pause via playermgr
         elseif self.audio_player_type == "kindle-lipc" then
             os.execute("lipc-set-prop com.lab126.playermgr Pause '' 2>/dev/null")
-        -- Freeze only gst-launch (SIGSTOP).  The wrapper shell script is
-        -- left running so it stays blocked on the FIFO; this prevents the
-        -- MTK BT sink from seeing a full underrun, which causes stutter
-        -- on resume.  With the wrapper alive the FIFO stays primed with
-        -- data and the MTK A2DP connection remains in a stable state.
+        -- Ask the feeder to stop writing the clip and feed silence instead.
+        -- Never SIGSTOP gst-launch: freezing it stops the PCM flow into the
+        -- MTK Bluetooth sink, the sink underruns, and it comes back latched
+        -- with garbled audio for the rest of the session (only a new session
+        -- clears it).  With the feeder quiet, gst keeps consuming silence so
+        -- the sink stays fed and resumes cleanly where it left off.
         elseif self._persistent_pipeline then
-            if self:_pipelineSignal(self._pipeline_gst_pid, "STOP") then
-                logger.warn("TTSEngine: Paused persistent pipeline, gst=",
-                    self._pipeline_gst_pid)
+            local pf = io.open(PIPELINE_CTRL_DIR .. "/pause", "w")
+            if pf then
+                pf:write("1")
+                pf:close()
+                logger.warn("TTSEngine: Paused persistent pipeline (feeder silence)")
             else
-                logger.warn("TTSEngine: Pause failed — gst-launch dead, clearing pipeline")
-                self._persistent_pipeline = false
-                self._pipeline_gst_pid = nil
-                self._pipeline_wrapper_pid = nil
+                logger.warn("TTSEngine: Pause failed — cannot write pause flag")
             end
         elseif self.audio_pid then
             os.execute("kill -STOP " .. self.audio_pid .. " 2>/dev/null")
@@ -7117,19 +7186,13 @@ function TTSEngine:resume()
         -- Kindle LIPC: resume via playermgr
         elseif self.audio_player_type == "kindle-lipc" then
             os.execute("lipc-set-prop com.lab126.playermgr Play '' 2>/dev/null")
-        -- Unfreeze only gst-launch (SIGCONT).  The wrapper was never
-        -- frozen, so it is already blocked on the FIFO; as soon as
-        -- gst-launch resumes reading the audio flows again seamlessly.
+        -- Clear the pause flag: the feeder resumes the clip where it stopped
+        -- and stops feeding silence.  gst-launch was never frozen, so the
+        -- Bluetooth sink never underran.
         elseif self._persistent_pipeline then
-            if self:_pipelineSignal(self._pipeline_gst_pid, "CONT") then
-                logger.warn("TTSEngine: Resumed persistent pipeline, pause was",
-                    pause_ms, "ms, total_pause=", self._total_pause_ms, "ms")
-            else
-                logger.warn("TTSEngine: Resume failed — gst-launch dead, will restart on next play()")
-                self._persistent_pipeline = false
-                self._pipeline_gst_pid = nil
-                self._pipeline_wrapper_pid = nil
-            end
+            os.execute("rm -f " .. PIPELINE_CTRL_DIR .. "/pause")
+            logger.warn("TTSEngine: Resumed persistent pipeline (feeder), pause was",
+                pause_ms, "ms, total_pause=", self._total_pause_ms, "ms")
         elseif self.audio_pid then
             os.execute("kill -CONT " .. self.audio_pid .. " 2>/dev/null")
         end

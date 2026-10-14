@@ -650,7 +650,9 @@ function AudiobookPlayer:setupUI()
     -- setting every tick, so each press shifts the highlight immediately;
     -- the new value flashes in the mini time display until the next
     -- regular time update overwrites it.
-    -- TTS: same slot holds speed + sleep timer (no SMIL sync offset).
+    -- TTS: this slot holds the speed button and the settings gear.  TTS has no
+    -- full-screen player, so the gear is the way into voice, speed, pauses,
+    -- volume and the sleep timer.
     local nudge_group = {}
     if self.tts_mode then
         self._mini_speed = Button:new{
@@ -662,12 +664,12 @@ function AudiobookPlayer:setupUI()
             bordersize = 0,
             show_parent = self,
         }
-        self._mini_sleep = Button:new{
-            text = self:_formatSleepTimerText(self._sleep_timer_remaining, self._sleep_timer_active),
+        self._mini_settings = Button:new{
+            text = "⚙",
             width = mini_btn_size,
             height = mini_btn_size,
             text_font_size = 16,
-            callback = function() self:onSleepTimer() end,
+            callback = function() self:onTtsSettings() end,
             bordersize = 0,
             show_parent = self,
         }
@@ -675,7 +677,7 @@ function AudiobookPlayer:setupUI()
         nudge_group = {
             self._mini_speed,
             HorizontalSpan:new{ width = spacing },
-            self._mini_sleep,
+            self._mini_settings,
             HorizontalSpan:new{ width = spacing },
         }
     elseif self.on_sync_nudge then
@@ -715,11 +717,11 @@ function AudiobookPlayer:setupUI()
         }
     end
 
-    -- Volume nudge buttons (♪− / ♪+), shown on the left of the mini bar so
-    -- they sit apart from the sync buttons on the right.  Reuses _applyVolume,
-    -- which flashes the level in the time slot and debounces the apply.
+    -- Volume nudge buttons (♪− / ♪+).  These belong to audiobook and music
+    -- playback; TTS reaches volume from its settings gear instead, so its
+    -- mini bar stays uncluttered.
     local vol_group = {}
-    if self.on_volume then
+    if not self.tts_mode and self.on_volume then
         self._mini_vol_minus = Button:new{
             text = "♪−",
             width = mini_btn_size,
@@ -767,8 +769,10 @@ function AudiobookPlayer:setupUI()
         }
     end
 
-    -- Create the centered title/time stack now that side buttons have reserved
+    -- Create the centered title stack now that side buttons have reserved
     -- their full width, so the text cannot overlap the volume/sync buttons.
+    -- TTS carries no time on the bar: read-along has no meaningful clock
+    -- (there is no audio timeline, only sentences), so the line is dropped.
     self._mini_title = TextWidget:new{
         text = (self.chapter_title and self.chapter_title ~= "" and self.chapter_title)
             or self.output_name or self.title or _("Audiobook"),
@@ -776,16 +780,25 @@ function AudiobookPlayer:setupUI()
         max_width = center_max_width,
         truncate_left = false,
     }
-    self._mini_time = TextWidget:new{
-        text = self.current_time_str or "",
-        face = Font:getFace("cfont", 11),
-        max_width = center_max_width,
-    }
-    local mini_center = VerticalGroup:new{
-        align = "center",
-        self._mini_title,
-        self._mini_time,
-    }
+    local mini_center
+    if self.tts_mode then
+        self._mini_time = nil
+        mini_center = VerticalGroup:new{
+            align = "center",
+            self._mini_title,
+        }
+    else
+        self._mini_time = TextWidget:new{
+            text = self.current_time_str or "",
+            face = Font:getFace("cfont", 11),
+            max_width = center_max_width,
+        }
+        mini_center = VerticalGroup:new{
+            align = "center",
+            self._mini_title,
+            self._mini_time,
+        }
+    end
 
     local mini_row = HorizontalGroup:new{
         align = "center",
@@ -830,6 +843,18 @@ function AudiobookPlayer:setupUI()
     if self.start_minimized then
         self:_applyMinimizedGeometry()
         self:_updateMiniWidgets()
+    end
+
+    -- TTS: seed the center line with the first context item.  The cycler
+    -- itself starts in show(), once the widget is visible.
+    if self.tts_mode then
+        local lines = self:_ttsInfoLines()
+        if #lines > 0 then
+            self._tts_info_idx = 1
+            if self._mini_title then
+                self._mini_title:setText(lines[1])
+            end
+        end
     end
 end
 
@@ -905,6 +930,8 @@ function AudiobookPlayer:onMinimize()
 end
 
 function AudiobookPlayer:_restore()
+    -- TTS read-along has no full-screen player: the mini bar is the whole UI.
+    if self.tts_mode then return end
     self._minimized = false
     self._scrubber_dragging = false
     self._scrubber_drag_pct = nil
@@ -1223,9 +1250,6 @@ function AudiobookPlayer:updateSleepTimer(remaining_seconds, active)
     local text = self:_formatSleepTimerText(self._sleep_timer_remaining, self._sleep_timer_active)
     if self.sleep_timer_button then
         self.sleep_timer_button:setText(text, self.sleep_timer_button.width)
-    end
-    if self._mini_sleep then
-        self._mini_sleep:setText(text, self._mini_sleep.width)
     end
     UIManager:setDirty(self, function()
         if self._minimized then
@@ -1555,8 +1579,9 @@ function AudiobookPlayer:_applyVolume(delta)
     if self.volume_widget then
         self.volume_widget:setText(self:_volumeText())
     end
-    -- Mini bar: flash the level in the time slot, like the sync nudge.
-    if self._mini_time then
+    -- When minimized, flash the level in the mini time slot (the volume row
+    -- itself is off-screen).  While expanded the volume widget shows it.
+    if self._minimized and self._mini_time then
         self._mini_time:setText(string.format("vol %d%%", pct))
     end
     UIManager:setDirty(self, function()
@@ -1692,7 +1717,9 @@ function AudiobookPlayer:_updateMiniWidgets()
             track = self.title or _("Audiobook")
         end
     end
-    if self._mini_title then
+    -- TTS owns its center line through the context cycler (see
+    -- _scheduleTtsInfo); do not clobber it with the chapter/track name.
+    if self._mini_title and not self.tts_mode then
         self._mini_title:setText(track)
     end
     if self._mini_time then
@@ -1705,16 +1732,76 @@ function AudiobookPlayer:_updateMiniWidgets()
     if self._mini_speed then
         self._mini_speed:setText(self:_speedText(), self._mini_speed.width)
     end
-    if self._mini_sleep then
-        self._mini_sleep:setText(
-            self:_formatSleepTimerText(self._sleep_timer_remaining, self._sleep_timer_active),
-            self._mini_sleep.width)
-    end
     if self._mini_refocus then
         -- Make the existing ○ control more obvious while the hint is active.
         local label = self._return_hint_active and "◎" or "○"
         self._mini_refocus:setText(label, self._mini_refocus.width)
     end
+end
+
+--- TTS context lines for the mini bar center, shown one at a time.
+-- Read-along has no clock and no meaningful track title, so the center line
+-- carries what is actually in effect: engine, voice, speed, volume.
+function AudiobookPlayer:_ttsInfoLines()
+    local p = self.plugin
+    if not p or not p.getSetting then return {} end
+    local lines = {}
+    local engine = p.tts_engine
+    local backend = engine and engine.backend or nil
+    local engine_names = {
+        espeak = "espeak-ng",
+        piper = "Piper",
+        sanotts = "sanoTTS",
+        ["sanotts-jp"] = "sanoTTS-jp",
+        pico = "Pico TTS",
+        flite = "Flite",
+        festival = "Festival",
+        android = _("System TTS"),
+        ["platform-native"] = _("Native voice"),
+    }
+    if backend then
+        lines[#lines + 1] = engine_names[backend] or backend
+    end
+
+    local voice
+    if backend == "piper" then
+        voice = p:getSetting("piper_model_label", "")
+    elseif backend == "android" then
+        voice = p:getSetting("android_tts_voice_label", "")
+    else
+        voice = p:getSetting("tts_voice_label", "")
+    end
+    if voice and voice ~= "" then
+        lines[#lines + 1] = voice
+    end
+
+    lines[#lines + 1] = string.format("%s %sx", _("Speed"),
+        tostring(p:getSetting("speech_rate", 1.0)))
+    lines[#lines + 1] = string.format("%s %d%%", _("Volume"),
+        math.floor((p:getSetting("speech_volume", 1.0) or 1.0) * 100))
+    return lines
+end
+
+--- Advance the TTS center line to the next context item, on a timer.
+-- The bar is narrow, so the items cycle instead of being clipped.
+function AudiobookPlayer:_scheduleTtsInfo()
+    if not (self.tts_mode and self._tts_info_active and self.visible) then return end
+    UIManager:scheduleIn(3.5, function()
+        if not (self.tts_mode and self._tts_info_active and self.visible) then return end
+        local lines = self:_ttsInfoLines()
+        if #lines == 0 then
+            self:_scheduleTtsInfo()
+            return
+        end
+        self._tts_info_idx = ((self._tts_info_idx or 0) % #lines) + 1
+        if self._mini_title then
+            self._mini_title:setText(lines[self._tts_info_idx])
+        end
+        UIManager:setDirty(self, function()
+            return "ui", self._minimized and self.dimen or nil
+        end)
+        self:_scheduleTtsInfo()
+    end)
 end
 
 --- Toggle Readest-style "return to read-aloud" cue on the mini bar.
@@ -1738,11 +1825,18 @@ function AudiobookPlayer:show()
     -- If setupUI already minimized us (read-along mode), keep it minimized
     -- and avoid a disruptive full-screen flash.
     UIManager:show(self, self._minimized and "ui" or "full")
+    if self.tts_mode then
+        self._tts_info_active = true
+        self:_scheduleTtsInfo()
+    end
 end
 
 function AudiobookPlayer:hide()
     self.visible = false
     self._minimized = false
+    -- Stop the TTS context cycler so it does not keep a timer alive (and
+    -- touch a widget that is being torn down).
+    self._tts_info_active = false
     UIManager:close(self)
     UIManager:setDirty("all", "full")
 end
@@ -1860,18 +1954,7 @@ function AudiobookPlayer:handleEvent(event)
                         end
                         return true
                     end
-                    -- TTS mini bar: speed and sleep occupy the sync-nudge slot.
-                    if self._mini_speed
-                        and self:_isTapOnWidget(ges.pos, self._mini_speed) then
-                        self:onSpeed()
-                        return true
-                    end
-                    if self._mini_sleep
-                        and self:_isTapOnWidget(ges.pos, self._mini_sleep) then
-                        self:onSleepTimer()
-                        return true
-                    end
-                    -- Tap on the volume buttons?
+                    -- Volume buttons (audiobook / music mini bar).
                     if self._mini_vol_minus
                         and self:_isTapOnWidget(ges.pos, self._mini_vol_minus) then
                         if self._mini_vol_minus.callback then
@@ -1884,6 +1967,18 @@ function AudiobookPlayer:handleEvent(event)
                         if self._mini_vol_plus.callback then
                             self._mini_vol_plus.callback()
                         end
+                        return true
+                    end
+                    -- TTS mini bar: speed and settings occupy the sync-nudge
+                    -- slot (TTS has no sync offset).
+                    if self._mini_speed
+                        and self:_isTapOnWidget(ges.pos, self._mini_speed) then
+                        self:onSpeed()
+                        return true
+                    end
+                    if self._mini_settings
+                        and self:_isTapOnWidget(ges.pos, self._mini_settings) then
+                        self:onTtsSettings()
                         return true
                     end
                     -- Tap on the refocus button?
@@ -1906,8 +2001,11 @@ function AudiobookPlayer:handleEvent(event)
                         self:onRefocus()
                         return true
                     end
-                    -- Tap anywhere else on the mini bar -> restore full player
-                    self:_restore()
+                    -- TTS has no full-screen player: a tap on empty bar space
+                    -- does nothing.  Audiobook / music expand to the player.
+                    if not self.tts_mode then
+                        self:_restore()
+                    end
                     return true
                 end
                 -- Gesture outside mini bar (or non-tap on bar) -> forward to underlying UI
@@ -2175,6 +2273,10 @@ function AudiobookPlayer:updatePlayState(is_playing)
 end
 
 function AudiobookPlayer:updateCurrentWord(word)
+    -- TTS shows a cycling context line (engine, voice, speed, volume) in the
+    -- mini bar rather than the word being spoken: the highlight already shows
+    -- the word on the page, and overwriting the bar with each word was noise.
+    if self.tts_mode then return end
     if word and word ~= "" then
         self:updateChapterTitle(word)
     end

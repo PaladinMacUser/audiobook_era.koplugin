@@ -1915,9 +1915,10 @@ function SyncController:showPlaybackBar()
                 plugin:_cancelSleepTimer()
             end
         end,
-        on_refocus = function()
-            controller:realignToReadingPage()
-        end,
+        -- No on_refocus: TTS read-along always follows the sentence, so the
+        -- view cannot be browsed away from the highlight and there is nothing
+        -- to re-align to.  Audiobook overlay playback keeps its refocus button
+        -- (see mediasync.lua), where manual page turns are allowed.
         on_tts_settings = function()
             local MenuBuilder = dofile(PLUGIN_PATH .. "menubuilder.lua")
             if MenuBuilder and MenuBuilder.showTtsSettingsPicker then
@@ -1980,6 +1981,22 @@ end
 Hide the playback control bar and refresh the screen.
 --]]
 function SyncController:hidePlaybackBar()
+    -- Remember the page being read before the bar (and its reserved margin)
+    -- go away.  Releasing the margin re-typesets the page, and a stale
+    -- re-anchor there sends the reader back to where read-aloud began
+    -- (possibly many pages earlier).  Re-assert the captured page once the
+    -- new layout has settled, and log both positions so a recurrence is
+    -- visible in the bug report.
+    local ui = self.plugin and self.plugin.ui
+    local keep_xp, page, rolling_xp
+    if ui and ui.document then
+        pcall(function() keep_xp = ui.document:getXPointer() end)
+        pcall(function() page = ui.document:getCurrentPage() end)
+    end
+    if ui and ui.rolling then
+        rolling_xp = ui.rolling.xpointer
+    end
+
     if self.playback_bar then
         self.playback_bar:hide()
         self.playback_bar = nil
@@ -1994,6 +2011,22 @@ function SyncController:hidePlaybackBar()
         -- highlight artifacts.  Skipped under a locked inset: no reflow
         -- happened, so a full flash is pure cost.
         UIManager:setDirty("all", "full")
+    end
+
+    if keep_xp and ui and ui.rolling then
+        logger.warn("SyncController: hidePlaybackBar page", page,
+            "doc_xp=", tostring(keep_xp), "rolling_xp=", tostring(rolling_xp))
+        UIManager:scheduleIn(0.4, function()
+            if not (ui and ui.rolling and ui.document) then return end
+            local now
+            pcall(function() now = ui.document:getXPointer() end)
+            logger.warn("SyncController: post-stop page", page, "doc_xp=", tostring(now))
+            if now ~= keep_xp then
+                pcall(function()
+                    ui:handleEvent(Event:new("GotoXPointer", keep_xp))
+                end)
+            end
+        end)
     end
 end
 
@@ -3293,7 +3326,44 @@ function SyncController:setSpeechRate(speed)
     if self.playback_bar and self.playback_bar.updateSpeed then
         pcall(function() self.playback_bar:updateSpeed(speed) end)
     end
+    -- Piper and sanoTTS apply the rate when they synthesize, so audio that is
+    -- already synthesized keeps the old speed.  The engine prefetches many
+    -- sentences ahead and concatenates up to ~30 s per group, so without this
+    -- the user hears no change for a long time and the control looks dead.
+    -- Re-read the current sentence at the new rate instead.  Only while
+    -- playing: restarting a paused session would start playback again.
+    if self.state == self.STATE.PLAYING then
+        pcall(function() self:_restartFromCurrentSentence() end)
+    end
     return speed
+end
+
+--[[--
+Drop the audio already synthesized at the old rate and start again from the
+sentence being spoken, so a mid-session speed (or voice) change is heard at
+once instead of after the prefetched queue and the current concat group drain.
+Mirrors the primitives seekToProgress uses.
+--]]
+function SyncController:_restartFromCurrentSentence()
+    if not self.parsed_data or not self.total_sentences or self.total_sentences < 1 then
+        return
+    end
+    local target = (self.current_sentence and self.current_sentence.index)
+        or self.reading_sentence_idx
+    target = tonumber(target)
+    if not target or target < 1 then return end
+    if target > self.total_sentences then target = self.total_sentences end
+    logger.warn("SyncController: restarting at sentence", target,
+        "to apply the new speech rate")
+    self:_cleanConcatFiles()
+    pcall(function() self.tts_engine:stop() end)
+    if self.highlight_manager then
+        pcall(function() self.highlight_manager:clearHighlights() end)
+    end
+    self._highest_dispatched_idx = nil
+    -- readNextSentence() increments, so land on `target`.
+    self.reading_sentence_idx = target - 1
+    self:readNextSentence()
 end
 
 -- Same rate list as the speech-rate picker in the TTS settings dialog.
