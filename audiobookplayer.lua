@@ -1768,6 +1768,33 @@ function AudiobookPlayer:_ttsInfoLines()
         voice = p:getSetting("piper_model_label", "")
     elseif backend == "android" then
         voice = p:getSetting("android_tts_voice_label", "")
+    elseif backend == "sanotts" then
+        -- The sanoTTS voice is chosen by name; tts_voice_label belongs to the
+        -- espeak backend and would name an unrelated language here.  Prefer
+        -- the live engine state, then the persisted setting, and map the name
+        -- to its display label.
+        local name = (engine and engine.sanotts_voice_name)
+            or p:getSetting("sanotts_voice", nil) or "amy"
+        voice = name
+        if engine and engine.listSanottsVoices then
+            local ok, voices = pcall(function() return engine:listSanottsVoices() end)
+            if ok and voices then
+                for _, v in ipairs(voices) do
+                    if v.name == name then
+                        -- The full label carries a size and a comment
+                        -- ("kristin (English light, less accurate)") that the
+                        -- narrow bar would clip; the name alone identifies it.
+                        voice = (v.label or name):match("^([^%(]+)") or name
+                        voice = voice:gsub("%s+$", "")
+                        break
+                    end
+                end
+            end
+        end
+    elseif backend == "sanotts-jp" then
+        -- Single bring-your-own-weights voice: there is no espeak label to
+        -- show, and printing one would be wrong.
+        voice = nil
     else
         voice = p:getSetting("tts_voice_label", "")
     end
