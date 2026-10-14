@@ -668,6 +668,12 @@ Set speech volume.
 --]]
 function TTSEngine:setVolume(volume)
     self.volume = math.max(0.0, math.min(1.0, volume))
+    -- audioout daemon applies volume live on the volume element: no
+    -- pipeline rebuild, unlike the gst-bt path (the whole point of
+    -- owning the output).
+    if self._audioout_active and self._audioout_client then
+        self._audioout_client:setVolume(self.volume)
+    end
     logger.dbg("TTSEngine: Volume set to", self.volume)
 end
 --[[--
@@ -2517,6 +2523,59 @@ Play the synthesized audio.
        Each entry: {file=path, duration_ms=number}
 @return boolean Success
 --]]
+--[[--
+Client for the audioout daemon (Tier 2, default off via the
+`audioout_enabled` setting). The daemon owns the audio pipeline across
+sentences: no restart churn on volume/rate changes, a real
+rendered-position clock from a sink-pad probe, and deterministic
+completion via status polling. See dev/audioout/PLAN.md.
+--]]
+function TTSEngine:_getAudioOut()
+    if self._audioout_client then return self._audioout_client end
+    local dir = self.plugin_dir or ""
+    local bin = dir .. "audioout/audioout"
+    -- Release zips ship ELF binaries as <name>.bin (Windows extraction
+    -- guard); rename back on first use, mirroring detectBackend's helper.
+    local f = io.open(bin, "r")
+    if f then
+        f:close()
+    else
+        os.execute("test -f '" .. bin .. ".bin' && mv '" .. bin .. ".bin' '"
+            .. bin .. "' && chmod +x '" .. bin .. "' 2>/dev/null")
+        f = io.open(bin, "r")
+        if not f then
+            logger.warn("TTSEngine: audioout daemon binary not found at", bin)
+            return nil
+        end
+        f:close()
+    end
+    local ok_load, AudioOut = pcall(dofile, dir .. "audioout.lua")
+    if not ok_load or not AudioOut then
+        logger.warn("TTSEngine: audioout.lua failed to load")
+        return nil
+    end
+    self._audioout_client = AudioOut:new{
+        daemon_path = bin,
+        rate = self._target_sample_rate or 22050,
+        channels = 1,
+        volume = self.volume or 1.0,
+    }
+    return self._audioout_client
+end
+
+-- True when the experimental daemon path is enabled and usable on this
+-- device (Kobo MTK BT output only, same gate as the persistent pipeline).
+function TTSEngine:_useAudioOut()
+    -- Session-only degradation: once the daemon path failed this session,
+    -- stay on the legacy path until the next session (fallback policy).
+    if self.use_audioout_fallback then return false end
+    if not (self.plugin and self.plugin.getSetting
+            and self.plugin:getSetting("audioout_enabled", false)) then
+        return false
+    end
+    return self.audio_player_type == "gst-bt"
+end
+
 function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     local t0 = UIManager:getTime()
     -- Register the TTS audio file with the session recorder, if active.
@@ -4225,6 +4284,104 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     -- For Bluetooth: use a single persistent gst-launch that never stops.
     -- A feeder script writes silence between sentences to keep BT A2DP alive,
     -- and switches to real audio on demand via a control file.
+    -- === AUDIOOUT DAEMON PATH (Tier 2, default off) ===
+    -- Replaces the shell-wrapper persistent pipeline for TTS read-along:
+    -- the daemon keeps the pipeline up across sentences, feeds silence
+    -- between groups (no 120 s keepalive WAV), and reports a real clock.
+    -- Completion is deterministic: the daemon counts a clip done when the
+    -- RENDERED position passes its end, not on a duration estimate.
+    if self:_useAudioOut() then
+        -- Handle WAV merge for concatenated sentences (same as gst-bt).
+        if concat_files and #concat_files > 0 then
+            self:mergeWavFiles(concat_files)
+            self._concat_durations = { self._current_audio_duration_ms }
+            for _, cf in ipairs(concat_files) do
+                table.insert(self._concat_durations, cf.duration_ms)
+            end
+        else
+            self._concat_durations = nil
+        end
+        self._expected_play_duration_ms = self:getAudioDurationMs()
+        if self.current_audio_file then
+            self._target_sample_rate = WavUtils.readSampleRateFromPath(self.current_audio_file)
+            if self._target_sample_rate <= 0 then
+                self._target_sample_rate = 22050
+            end
+        end
+        local ao = self:_getAudioOut()
+        if not ao then
+            logger.warn("TTSEngine: audioout unavailable; falling back for this session")
+            self.use_audioout_fallback = true   -- session-only degradation
+        else
+            if self._completion_timer_fn then
+                UIManager:unschedule(self._completion_timer_fn)
+                self._completion_timer_fn = nil
+            end
+            if self._pending_launch_fn then
+                UIManager:unschedule(self._pending_launch_fn)
+                self._pending_launch_fn = nil
+            end
+            self.play_generation = (self.play_generation or 0) + 1
+            local my_gen = self.play_generation
+            if not ao:isRunning() then
+                local ok_start = ao:start()
+                if not ok_start then
+                    logger.warn("TTSEngine: audioout daemon did not start; falling back")
+                    self._audioout_active = nil
+                    if on_fail then on_fail() end
+                    return false
+                end
+            end
+            local resp = ao:play(self.current_audio_file,
+                { rate = self._target_sample_rate or 22050, channels = 1 })
+            if not resp or not resp.ok then
+                logger.warn("TTSEngine: audioout play refused:",
+                    resp and resp.error or "timeout")
+                self.is_speaking = false
+                if on_fail then on_fail() end
+                return false
+            end
+            self._audioout_active = true
+            self._audioout_done_baseline = resp.done_count or 0
+            self._audioout_start_ms = resp.start_ms or 0
+            self._audioout_fed_end_ms = resp.fed_end_ms
+            self._audio_launched_at = UIManager:getTime()
+            self._total_pause_ms = 0
+            -- Warm-BT output latency class measured in M0 (~300 ms: pipe +
+            -- queue + sink; refined against the daemon clock in the sync
+            -- wiring follow-up).
+            self.playback_latency_ms = 300
+            logger.warn("TTSEngine: play() via audioout, dur=",
+                self._expected_play_duration_ms, "ms, start_ms=",
+                self._audioout_start_ms, "fed_end_ms=", self._audioout_fed_end_ms,
+                "gen=", my_gen, "piper_q=", self:getPiperQueueSnapshot())
+            self:startTimingLoop()
+            local engine = self
+            local function pollAudiooutCompletion()
+                if (engine.play_generation or 0) ~= my_gen then return end
+                if not engine.is_speaking then return end
+                local st = engine._audioout_client
+                    and engine._audioout_client:status()
+                if st and (st.done_count or 0) > (engine._audioout_done_baseline or 0) then
+                    if engine.is_paused then
+                        -- the backlog drained during pause; fire on resume
+                        UIManager:scheduleIn(0.3, pollAudiooutCompletion)
+                        return
+                    end
+                    logger.warn("TTSEngine: audioout clip rendered (pos=",
+                        st.pos_ms, "ms, fed_end=", engine._audioout_fed_end_ms, "ms)")
+                    engine:onPlaybackComplete()
+                    return
+                end
+                UIManager:scheduleIn(0.25, pollAudiooutCompletion)
+            end
+            engine._completion_timer_fn = pollAudiooutCompletion
+            UIManager:scheduleIn(0.3, pollAudiooutCompletion)
+            return true
+        end
+        -- fall through to the legacy gst-bt path on session fallback
+    end
+
     if self.audio_player_type == "gst-bt" then
         -- Handle WAV merge for concatenated sentences
         if concat_files and #concat_files > 0 then
@@ -7142,6 +7299,10 @@ function TTSEngine:pause()
         -- Kindle LIPC: pause via playermgr
         elseif self.audio_player_type == "kindle-lipc" then
             os.execute("lipc-set-prop com.lab126.playermgr Pause '' 2>/dev/null")
+        -- audioout daemon: same feeder-silence semantics, owned in C.
+        elseif self._audioout_active and self._audioout_client then
+            self._audioout_client:pause()
+            logger.warn("TTSEngine: Paused audioout (daemon feeds silence)")
         -- Ask the feeder to stop writing the clip and feed silence instead.
         -- Never SIGSTOP gst-launch: freezing it stops the PCM flow into the
         -- MTK Bluetooth sink, the sink underruns, and it comes back latched
@@ -7186,6 +7347,11 @@ function TTSEngine:resume()
         -- Kindle LIPC: resume via playermgr
         elseif self.audio_player_type == "kindle-lipc" then
             os.execute("lipc-set-prop com.lab126.playermgr Play '' 2>/dev/null")
+        -- audioout daemon: resume feeding at the exact clip offset.
+        elseif self._audioout_active and self._audioout_client then
+            self._audioout_client:resume()
+            logger.warn("TTSEngine: Resumed audioout, pause was",
+                pause_ms, "ms, total_pause=", self._total_pause_ms, "ms")
         -- Clear the pause flag: the feeder resumes the clip where it stopped
         -- and stops feeding silence.  gst-launch was never frozen, so the
         -- Bluetooth sink never underran.
@@ -7265,6 +7431,16 @@ function TTSEngine:stop()
                 "com.lab126.playermgr", "Stop", "")
         end
         os.execute("lipc-set-prop com.lab126.playermgr Stop '' 2>/dev/null")
+    end
+
+    -- audioout daemon: drop the queue and release the pipeline so the BT
+    -- datapath can suspend (same battery intent as this stop path). The
+    -- daemon process itself stays up for reuse; it is killed via
+    -- forceKillAll/plugin teardown.
+    if self._audioout_active and self._audioout_client then
+        self._audioout_client:stop()
+        self._audioout_client:release()
+        logger.warn("TTSEngine: audioout queue dropped, pipeline released")
     end
 
     -- Stop persistent pipeline or legacy keepalive
@@ -7356,6 +7532,12 @@ function TTSEngine:forceKillAll()
             self._lipc_handle = nil
         end
     end
+    -- audioout daemon: full shutdown on force-kill (plugin teardown path).
+    if self._audioout_client then
+        self._audioout_client:stopDaemon()
+        self._audioout_active = nil
+    end
+
     -- Stop persistent pipeline or legacy keepalive
     if self._persistent_pipeline then
         self:_stopPersistentPipeline("force_kill_all")

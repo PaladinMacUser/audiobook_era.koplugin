@@ -2247,6 +2247,25 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
             end
         end,
     })
+    -- Tier 2 audio output daemon (Kobo MTK Bluetooth only).  Owns the
+    -- pipeline across sentences: no restart churn, real playback clock,
+    -- deterministic completion.  Default off; failures fall back to the
+    -- legacy pipeline for the rest of the session.
+    if plugin.bt_manager and plugin.bt_manager:isMtkKobo() then
+        table.insert(items, {
+            text = _("Use audio output daemon (experimental)"),
+            checked_func = function()
+                return plugin:getSetting("audioout_enabled", false)
+            end,
+            callback = function()
+                plugin:toggleSetting("audioout_enabled", false)
+            end,
+            help_text = _(
+                "Routes read-aloud audio through a background daemon that " ..
+                "keeps the Bluetooth pipeline open between sentences and " ..
+                "tracks real playback position. Experimental.")
+        })
+    end
     if backend == plugin.tts_engine.BACKENDS.PIPER then
         table.insert(items, {
             text = T(_("Sentence gap (. ? !): %1s"), plugin:getSetting("piper_sentence_gap", 0.3)),
