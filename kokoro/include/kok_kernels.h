@@ -55,6 +55,17 @@ void kok_conv1d_aq8(float *restrict out, const float *restrict x,
                     const kok_w *restrict w, const float *restrict b,
                     int Cin, int Cout, int T, int K, int stride, int pad, int dil,
                     int8_t *restrict xq, float *restrict xs, int32_t *restrict tacc);
+
+/* The same scheme for the transposed convolution. The weights are laid out
+ * [in, out, K] and carry a scale per output channel, as kok_convtr1d reads
+ * them. Both call sites are covered: the decoder's upsampling stages
+ * (groups=1, stride 10 and 6 with kernels 20 and 12) and the AdainResBlk
+ * depthwise pool upsample (groups=Cin, kernel 3, stride 2). */
+void kok_convtr1d_aq8(float *restrict out, const float *restrict x,
+                      const kok_w *restrict w, const float *restrict b,
+                      int Cin, int Cout, int T, int K, int stride, int pad,
+                      int out_pad, int groups,
+                      int8_t *restrict xq, float *restrict xs, int32_t *restrict tacc);
 void kok_conv1d(float *restrict out, const float *restrict x, const kok_w *restrict w,
                 const float *restrict b, int Cin, int Cout, int T, int K,
                 int stride, int pad, int dil);

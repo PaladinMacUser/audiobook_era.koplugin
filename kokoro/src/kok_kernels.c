@@ -233,6 +233,69 @@ void kok_conv1d_aq8(float *restrict out, const float *restrict x,
     }
 }
 
+/* Quantised transposed convolution. The scatter itself is strided, so there is
+ * nothing for the four-wide body to do; the win is the same as the forward
+ * kernel, over int8 weights and activations with the channels combined in
+ * fp32. */
+void kok_convtr1d_aq8(float *restrict out, const float *restrict x,
+                      const kok_w *restrict w, const float *restrict b,
+                      int Cin, int Cout, int T, int K, int stride, int pad,
+                      int out_pad, int groups,
+                      int8_t *restrict xq, float *restrict xs, int32_t *restrict tacc) {
+    int Tp = (T - 1) * stride - 2 * pad + K + out_pad;
+    int cig = Cin / groups, cog = Cout / groups;
+    if (!w->q) return;
+
+    for (int c = 0; c < Cin; c++) {
+        const float *xrow = x + (size_t)c * T;
+        float m = 0.0f;
+        for (int t = 0; t < T; t++) {
+            float v = fabsf(xrow[t]);
+            if (v > m) m = v;
+        }
+        float s = m > 1e-12f ? m / 127.0f : 1e-12f;
+        xs[c] = s;
+        float inv = 1.0f / s;
+        int8_t *qrow = xq + (size_t)c * T;
+        for (int t = 0; t < T; t++) {
+            int r = (int)lrintf(xrow[t] * inv);
+            if (r > 127) r = 127;
+            else if (r < -127) r = -127;
+            qrow[t] = (int8_t)r;
+        }
+    }
+
+    for (int o = 0; o < Cout; o++) {
+        int g = o / cog, co = o % cog;
+        float *orow = out + (size_t)o * Tp;
+        float bias = b ? b[o] : 0.0f;
+        float ws = w->scale ? (w->per_row ? w->scale[o] : w->scale[0]) : 1.0f;
+        for (int t = 0; t < Tp; t++) orow[t] = bias;
+        for (int ci = 0; ci < cig; ci++) {
+            int c = g * cig + ci;
+            const int8_t *qrow = xq + (size_t)c * T;
+            for (int t = 0; t < Tp; t++) tacc[t] = 0;
+            for (int k = 0; k < K; k++) {
+                int wv = w->q[((size_t)c * cog + co) * K + k];
+                if (wv == 0) continue;
+                int off = k - pad;
+                int t_lo = off >= 0 ? 0 : ((-off + stride - 1) / stride);
+                int t_hi = T;
+                if (off + (long)(T - 1) * stride >= Tp) {
+                    int max_t = Tp - 1 - off;
+                    t_hi = max_t / stride + 1;
+                    if (t_hi > T) t_hi = T;
+                }
+                if (t_lo >= t_hi) continue;
+                int idx = off + t_lo * stride;
+                for (int t = t_lo; t < t_hi; t++, idx += stride) tacc[idx] += wv * qrow[t];
+            }
+            float m = xs[c] * ws;
+            for (int t = 0; t < Tp; t++) orow[t] += (float)tacc[t] * m;
+        }
+    }
+}
+
 /* ---- normalisation ---- */
 void kok_layer_norm(float *x, const float *gamma, const float *beta, int C, int T, float eps) {
     for (int t = 0; t < T; t++) {
