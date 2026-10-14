@@ -444,7 +444,10 @@ int kok_dec_forward(const kok_model *mo, const float *asr, int F, const float *f
         snprintf(fn, sizeof fn, "/tmp/ck_upsw%d.bin", q);
         FILE *fh = fopen(fn, "wb");
         if (fh) {
-            fwrite(dw->ups_w[q], sizeof(float), (size_t)(uic0 >> q) * (uic0 >> (q + 1)) * dw->upkern[q], fh);
+            /* weights are a kok_w now; only the fp32 blob can be dumped raw */
+            if (dw->ups_w[q].f)
+                fwrite(dw->ups_w[q].f, sizeof(float),
+                       (size_t)(uic0 >> q) * (uic0 >> (q + 1)) * dw->upkern[q], fh);
             fclose(fh);
         }
     }
