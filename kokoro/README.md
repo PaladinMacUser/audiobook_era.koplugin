@@ -342,30 +342,29 @@ the two agree in sign here but not in magnitude, and a host-only speedup is not
 evidence either way. The per-row streaming body is a local optimum on this
 core, and the 2.75x has to come from somewhere other than restructuring it.
 
-## Quantised activations (in progress)
+## Quantised activations (measured, shipped behind --aq8)
 
 The remaining structural idea was int8 activations (the sanoTTS scheme). It has
-been measured in three parts: the kernel on the device, the accuracy through the
-whole pipeline, and the cost of the per-channel scales the accuracy needs. It is
-being built toward the operating point at the end of this section.
+been measured in parts, built, and wired behind `--aq8` (off by default). It
+gives 1.21x end to end at negligible quality cost, and that is close to the
+ceiling on this core, for the reason set out at the end of this section.
 
-**The kernel is fast, and how fast depends on the scaling scheme.** On the
-device, the hot convolution (32 channels, K=11, T=28921) at the same tap order
-and loop shape, as a ratio against the fp32 NEON body measured in the same run:
+**The kernel is faster, but only by about half.** On the device, the hot
+convolution (32 channels, K=11, T=28921) at the same tap order and loop shape,
+measured with the shipped kernels against the fp32 body in the same run:
 
 | form | vs fp32 body |
 |---|---|
 | int16 activations + weights | ~1.5x |
-| int8, one activation scale per tensor | 3.5-3.8x |
-| int8, per-channel activation scales | 2.5-2.9x |
+| int8, per-channel activation scales | ~1.35x |
 
-ARMv7 NEON has no 8-bit dot product (`vmlal_s16` does 4 MACs per instruction,
-the same as `vmlaq_f32`), so the win is not lane throughput: the fp32 body is
-bound by something other than arithmetic, which is also why NEON alone was worth
-only 1.27x. The per-channel column is the one that matters, because a single
-scale per tensor does not survive the graph (see below); it costs about a third
-of the win, because the channels have to be combined in fp32 so that each keeps
-its own scale.
+ARMv7 NEON has no 8-bit dot product: `vmlal_s16` does four multiply-accumulates
+per instruction, exactly as many as `vmlaq_f32`, and int8 costs two extra
+widening instructions per four MACs on top. So the win is not lane throughput
+and not even arithmetic, it is memory traffic from quarter-width operands, which
+is why it stops near 1.4x rather than the 3.5x an early scratch benchmark
+reported. The table further down records that correction and the core limitation
+behind it.
 
 **A single activation scale per tensor is not enough.** Simulating activation
 quantisation inside the fp32 pipeline, with oracle calibration (each tensor's
@@ -404,24 +403,79 @@ convolution, so the final, largest stage owns essentially all of the damage.
 That is also the stage worth speeding up, so the fix is not to skip it but to
 give it more precision.
 
-**Chosen operating point.** Final waveform-rate stack at 10-bit (int16
-storage), everything else at 8-bit with per-channel scales. Measured on five
-sentences against fp32, by log-spectral deviation:
+**Wired and measured.** The dispatch is in: `kok_arena` carries an `aq8` flag,
+`kok_conv1d_a`/`kok_linear_a`/`kok_convtr1d_a` pick the quantised kernel when it
+is set and carve their scratch from the arena, and the driver takes `--aq8`.
+The graph itself is untouched, because the quantisation is dynamic inside each
+kernel: every convolution still takes fp32 in and gives fp32 out, so no tensor
+flow changes and the fp32 path and its golden gate are unaffected.
 
-| operating point | mean dev | p95 dev | logspec SNR | proj. device RTF |
-|---|---|---|---|---|
-| everything 8-bit | 1.29 dB | 4.50 dB | 25.11 dB | ~4.3 |
-| **final stack 10-bit, rest 8-bit** | **0.75 dB** | **2.54 dB** | **30.60 dB** | **~4.8** |
-| final stack fp32, rest 8-bit | 0.73 dB | 2.49 dB | 30.80 dB | ~5.1 |
-| everything 10-bit | 0.44 dB | 1.68 dB | 34.26 dB | ~5.9 |
+The result is smaller than the kernel measurements suggested, and the reason is
+worth recording. The shipped kernels head to head on the hot shape, on the
+device:
 
-The RTF column is a projection from the measured kernel ratios and the host time
-split, not a measurement. The regression gate is a mean band deviation at or
-under 1.5 dB and a log-spectral SNR at or above 24 dB against the fp32 path,
-plus listening; those sit at the measured level with a little margin.
+| kernel | s per call | vs fp32 |
+|---|---|---|
+| `kok_conv1d` (fp32) | 0.926 | 1.00x |
+| `kok_conv1d_aq8` | 0.668 | 1.39x |
+
+The per-channel combine costs two passes over `Tp` for every (output, input)
+channel pair. At K=11 that is 18% of the multiply-add work on paper, but those
+passes are scalar while the multiply-add loop is NEON, so they cost more than
+the paper figure suggests. Two earlier scratch benchmarks reported better
+numbers for this and for the folded form (2.7x and 3.8x); neither ran the
+shipped kernels, and the projections built on them were wrong. The folded form
+was built and measured properly below, and it is not worth its complexity either.
+
+End to end on the device, against the weight-only int8 path: text 7.47 to 7.36 s
+(unchanged), decoder 34.11 to 26.74 s (1.28x), total 41.75 to 34.02 s, RTF 6.93
+to 5.65. The text half is left on fp32 deliberately: a linear projection is K=1,
+where the combine passes cost twice the multiply-add work, so the dispatch
+requires K >= 5, which also excludes every 1x1 shortcut.
+
+Accuracy against the fp32 path, harmonic source held fixed:
+
+| run | waveform | logspec | mean dev |
+|---|---|---|---|
+| weight-only int8 | 34.04 dB | 38.46 dB | 0.27 dB |
+| aq8 | 30.77 dB | 37.73 dB | 0.32 dB |
+
+So the cost is 0.73 dB of log-spectral SNR, inside the gate below. The runtime
+quantises less than the simulation did (only convolution inputs, not every
+convolution output), which is why the operating-point table above reads worse
+than the engine measures.
+
+**The gate.** Mean band deviation at or under 1.5 dB and log-spectral SNR at or
+above 24 dB against the fp32 path, plus listening. Those sit well below what the
+engine achieves, as a regression guard rather than a quality claim.
 
 The spike kernels and the simulation live in ~/audiobook-int8-spike/, with the
 listening renders under validate/ and points/.
+
+**Where the ceiling is, and why.** The fold was built and measured, and it is
+not worth carrying. On the device, same harness as the shipped kernels, on the
+hot shape:
+
+| kernel | vs fp32 | layer SNR |
+|---|---|---|
+| `kok_conv1d_aq8` (per-channel scales, shipping) | 1.35x | 43.59 dB |
+| folded (`w'[o,c,k] = w[o,c,k]*xs[c]`, pure integer) | 1.63x | 41.59 dB |
+
+So the fold is accurate (41.59 dB) but buys only 1.21x over the form that ships,
+about 5% end to end, in exchange for a calibration pass, a new file format and
+clipping risk on unseen prosody. It was reverted.
+
+The reason it is not worth more is the core, not the kernel. **ARMv7 NEON has no
+8-bit dot product**: `vmlal_s16` performs four multiply-accumulates per
+instruction, exactly as many as `vmlaq_f32`, and using int8 rather than int16
+costs two extra widening instructions per four MACs. So on this chip int8
+activations have no arithmetic advantage at all. The only gain is memory
+traffic, from quarter-width operands, and this loop is not purely
+bandwidth-bound, which caps the whole idea near 1.2-1.6x. An earlier scratch
+benchmark reported 3.5-3.8x here; it did not run the shipped kernels, and the
+projections built on it were wrong. On an ARMv8 core with SDOT/UDOT the
+arithmetic argument would hold, so the scheme is worth revisiting if the target
+moves there.
 
 The remaining kernels are worth at most their shares (LSTM 9%, ConvTranspose
 7%, AdaIN 5%), so on their own no combination of them closes the gap to the
