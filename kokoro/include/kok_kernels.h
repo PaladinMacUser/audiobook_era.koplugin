@@ -39,6 +39,22 @@ typedef struct {
 } kok_w;
 
 /* ---- linear algebra ---- */
+
+/* Convolution over dynamically quantised activations. The input is scanned
+ * once for a per-input-channel absmax, quantised to int8 on that scale, run
+ * through the integer kernels with per-output-channel int8 weights, and the
+ * channels are combined in fp32 so that each keeps its own scale. The scan
+ * costs Cin*T, which is 1/(Cout*K) of the convolution itself, and it adapts to
+ * the input instead of needing calibration baked in; per-channel scales are
+ * what the accuracy requires, a single scale per tensor does not survive the
+ * graph (see the quantised-activation section of kokoro/README.md).
+ *
+ * xq and tacc (Cin*T int8, Tp int32) are caller-owned scratch. The weights must
+ * be the per-output-channel int8 blob. */
+void kok_conv1d_aq8(float *restrict out, const float *restrict x,
+                    const kok_w *restrict w, const float *restrict b,
+                    int Cin, int Cout, int T, int K, int stride, int pad, int dil,
+                    int8_t *restrict xq, float *restrict xs, int32_t *restrict tacc);
 void kok_conv1d(float *restrict out, const float *restrict x, const kok_w *restrict w,
                 const float *restrict b, int Cin, int Cout, int T, int K,
                 int stride, int pad, int dil);
