@@ -2384,6 +2384,24 @@ function SyncController:startSentenceSyncLoop(sentence)
             return
         end
 
+        -- audioout daemon: its rendered-position clock replaces the whole
+        -- anchor dance below. pos_ms is what the sink is playing RIGHT NOW
+        -- (probe-measured, interpolated), and the group's first sample sits
+        -- at _audioout_start_ms, so word time = pos_ms - start_ms with no
+        -- latency constant at all. Before the first buffer renders, pos_ms
+        -- is 0 and the highlight simply waits: self-anchoring.
+        local adjusted
+        if self.tts_engine._audioout_active and self.tts_engine._audioout_client then
+            self._latency_locked = true
+            local st = self.tts_engine._audioout_client:status()
+            if not st or not st.pos_ms then
+                UIManager:scheduleIn(0.05, syncUpdate)
+                return
+            end
+            adjusted = (st.pos_ms or 0) - (self.tts_engine._audioout_start_ms or 0)
+        end
+
+        if not adjusted then
         -- Dynamic BT latency detection: poll GStreamer's stderr for the
         -- PLAYING transition.  Once detected, anchor the sync timer to NOW
         -- with only a small codec-buffering offset (~150ms).
@@ -2432,7 +2450,8 @@ function SyncController:startSentenceSyncLoop(sentence)
 
         local elapsed = time.to_ms(UIManager:getTime() - self.sentence_sync_start)
         local latency = self._locked_latency_ms or self.tts_engine.playback_latency_ms or 0
-        local adjusted = elapsed - latency
+        adjusted = elapsed - latency
+        end  -- end legacy wall-clock path (audioout computes adjusted above)
 
         -- Multi-sentence concat boundary detection: advance through split
         -- points as elapsed time crosses each one.

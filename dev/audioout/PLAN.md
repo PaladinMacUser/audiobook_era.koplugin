@@ -88,6 +88,19 @@ test unit), ttsengine wiring behind a default-off setting, packaging
 (package-for-kobo.sh, release.yml assertions, .gitignore for dev/audioout
 build output), and the orphan-sweep entry.
 
+## Sync wiring (the Tier 1 + Tier 2 composition)
+
+SyncController's word tick no longer guesses latency on the daemon path:
+when `tts_engine._audioout_active`, the tick takes the daemon's
+`status().pos_ms` (probe-measured, interpolated, capped at real audio end)
+minus the clip's `start_ms` from the play response, and skips the whole
+GStreamer-PLAYING anchor dance and its latency lock (100/300/500/1500/3000
+ms). Before the first buffer renders, pos is 0 and the highlight simply
+waits: the anchor is self-arming. The legacy wall-clock path is untouched
+for every other backend. The read-along bar and read-from-here still use
+the wall clock (polish, not correctness: the daemon offset is within the
+old lock's error band).
+
 ## Increments
 
 | Step | Scope | Ships |
