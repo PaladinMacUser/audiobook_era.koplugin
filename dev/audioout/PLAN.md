@@ -108,9 +108,25 @@ old lock's error band).
 | M0 | Clock spike on device: does a sink-pad probe give a usable clock from `mtkbtmwrpcaudiosink`? (this directory) | A number, not code |
 | M1 | `audioout` daemon (MTK, WAV/raw PCM clips, queue, pause via feed-stop + silence, real position, deterministic completion) + `audioout.lua` client + TTS path wired | TTS read-along on MTK with a real clock |
 | M2 | MediaEngine wired (ffmpeg decodes to raw PCM piped into the daemon), seek support | audiobook playback on MTK |
-| M3 | Delete both duplicated pipeline implementations; orphan sweep knows the daemon; bugreport/generate-report sections | the code reduction |
+| M3 | Orphan sweep knows the daemon; bugreport/generate-report audioout sections. Pipeline deletion REVISED: the wrapper paths stay as the session fallback (daemon missing, BT disconnected, start failure all route there); deletion is deferred until v0.3.0 has soaked | diagnostics + lifecycle |
 | M4 | BlueZ Kobo (ALSA/BlueALSA output inside the same daemon, reusing `wav-play.c`'s ALSA block) | second platform |
 | later | Kindle (mixersink via dlopen), PocketBook, Android | - |
+
+## Release
+
+Tier 2 ships as **v0.3.0** (user decision, 2026-10-15): bump `_meta.lua`,
+tag `v0.3.0`, push GitHub + Forgejo in one operation once CI on the
+previous release is green.
+
+## M2/M3 status (2026-10-16)
+
+- M2 done: MediaEngine routes through the daemon in external stream mode
+  (commit `d75bf99`). ffmpeg keeps decoding per track into the daemon's
+  fifo; the probe clock is rebaselined per stream and frozen on pause.
+  Verified on device with fakesink; awaiting a real-audiobook listen.
+- M3 done: orphan sweep kills stale daemons at plugin init; bugreport and
+  generate-report.sh carry an audioout section (binary, setting, process,
+  socket, log tail). Pipeline deletion deferred (see M3 revision above).
 
 ## M0 spike design
 

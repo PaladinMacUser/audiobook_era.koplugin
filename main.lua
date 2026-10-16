@@ -3394,6 +3394,21 @@ function Audiobook:_killOrphanProcessesFromPreviousSession()
 
     local dominated = false
 
+    -- 0. Kill a stale audioout daemon.  It is normally reused across
+    --    sessions, but a daemon left over from an older plugin version
+    --    (updated binary, changed protocol) must not answer the new one.
+    local h_ao = io.popen("pgrep -c audioout 2>/dev/null")
+    if h_ao then
+        local count = tonumber(h_ao:read("*a"))
+        h_ao:close()
+        if count and count > 0 then
+            os.execute("killall -9 audioout 2>/dev/null")
+            os.execute("rm -f /tmp/audiobook_audioout.sock /tmp/audiobook_audioout.fifo")
+            dominated = true
+            logger.warn("Audiobook: Startup cleanup — killed stale audioout daemon")
+        end
+    end
+
     -- 1. Kill orphan gst-launch-1.0 (frees the exclusive BT A2DP socket)
     --    and gst-launch-0.10 (Kindle mixersink pipelines).
     --    Check if any gst-launch is running before paying the killall cost.

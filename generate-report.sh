@@ -197,6 +197,16 @@ fi
 # Kobo BT abstract socket
 BT_SOCKET=$(cat /proc/net/unix 2>/dev/null | grep -i 'kobo\|mtk\|bluetooth' | head -5 || echo "none")
 
+# audioout daemon (Tier 2)
+AO_BINARY="not found"
+PLUGIN_AO="kobo-tts-bundle/audiobook.koplugin/audioout/audioout"
+[ -f "$PLUGIN_AO" ] || PLUGIN_AO="/mnt/onboard/.adds/koreader/plugins/audiobook.koplugin/audioout/audioout"
+[ -f "$PLUGIN_AO" ] && AO_BINARY="present"
+AO_RUNNING=$(pgrep -c audioout 2>/dev/null || echo 0)
+AO_SOCKET="absent"
+[ -S /tmp/audiobook_audioout.sock ] && AO_SOCKET="present"
+AO_LOG=$(tail -c 1200 /tmp/audiobook_audioout.log 2>/dev/null || echo "no log")
+
 # ALSA PCM devices (may reveal BT sinks not in /proc/asound/cards)
 ALSA_PCM_DEVICES="n/a"
 if command -v aplay >/dev/null 2>&1; then
@@ -997,6 +1007,9 @@ ${ANDROID_SECTION:+${ANDROID_SECTION}
 ${SETTINGS_SECTION}
 
 ── Audio & TTS ──
+audioout daemon: binary=$AO_BINARY running=$AO_RUNNING socket=$AO_SOCKET
+$AO_LOG
+
   tts_in_path:
 $(printf '%b' "$TTS_CMDS")  players_in_path:
 $(printf '%b' "$PLAYER_CMDS")  alsa_cards: ${ALSA_CARDS}

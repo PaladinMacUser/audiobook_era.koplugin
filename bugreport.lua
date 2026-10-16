@@ -219,6 +219,38 @@ local function collectPluginInfo(plugin)
                 math.floor(100 * t_real / (t_real + t_est) + 0.5))
         end
 
+        -- audioout daemon (Tier 2): binary, setting, process, socket and
+        -- the tail of its stderr log.  Most "daemon path plays silence"
+        -- reports are diagnosable from these five fields alone.
+        local ao_dir = (plugin.tts_engine and plugin.tts_engine.plugin_dir)
+            or "/mnt/onboard/.adds/koreader/plugins/audiobook.koplugin/"
+        if ao_dir ~= "" and not ao_dir:match("/$") then ao_dir = ao_dir .. "/" end
+        local ao_bin = ao_dir .. "audioout/audioout"
+        local f = io.open(ao_bin, "r")
+        info.audioout_binary = f ~= nil
+        if f then f:close() end
+        info.audioout_enabled = tostring(plugin:getSetting("audioout_enabled", false))
+        local pg = io.popen("pgrep -c audioout 2>/dev/null")
+        if pg then
+            local n = tonumber(pg:read("*a"))
+            pg:close()
+            info.audioout_running = tostring((n or 0) > 0)
+        end
+        local sock = io.open("/tmp/audiobook_audioout.sock", "r")
+        info.audioout_socket = sock ~= nil
+        if sock then sock:close() end
+        local dlog = io.open("/tmp/audiobook_audioout.log", "r")
+        if dlog then
+            local tail_lines = {}
+            local all = dlog:read("*a")
+            dlog:close()
+            for line in (all or ""):gmatch("[^\r\n]+") do
+                tail_lines[#tail_lines + 1] = line
+                if #tail_lines > 12 then table.remove(tail_lines, 1) end
+            end
+            info.audioout_log_tail = table.concat(tail_lines, " | ")
+        end
+
         -- Android bridge state: on Android every CLI probe fails by design,
         -- so the bundled-binary fields alone make a working setup look
         -- broken (issue #44).  Report the JNI bridge explicitly.
