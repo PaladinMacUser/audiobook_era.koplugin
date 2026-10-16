@@ -1922,8 +1922,8 @@ function AudiobookPlayer:handleEvent(event)
             self:onPlayPause()
             return true
         end
-        if self._minimized and ges and self.ui_widget then
-            return self.ui_widget:handleEvent(event)
+        if self._minimized and ges then
+            return self:_dispatchGestureBelow(event)
         end
         return false
     end
@@ -2035,11 +2035,9 @@ function AudiobookPlayer:handleEvent(event)
                     end
                     return true
                 end
-                -- Gesture outside mini bar (or non-tap on bar) -> forward to underlying UI
-                if self.ui_widget then
-                    return self.ui_widget:handleEvent(event)
-                end
-                return false
+                -- Gesture outside mini bar (or non-tap on bar) -> deliver
+                -- below the bar, interleaved widgets first (see helper).
+                return self:_dispatchGestureBelow(event)
             end
         end
         -- Non-gesture events pass through
@@ -2189,6 +2187,36 @@ function AudiobookPlayer:handleEvent(event)
     end
 
     return InputContainer.handleEvent(self, event)
+end
+
+-- Deliver a gesture the bar did not consume: first to any widgets stacked
+-- between this bar and the reader (a ButtonDialog shown at read-aloud
+-- start, say), then to the reader.  KOReader's own dispatcher only hands
+-- unconsumed gestures to *active* sub-widgets of lower widgets, so without
+-- this pass a plain dialog between us and ReaderUI would never see a tap.
+function AudiobookPlayer:_dispatchGestureBelow(event)
+    local UIManager = require("ui/uimanager")
+    local stack = UIManager._window_stack
+    local below = {}
+    local seen_self = false
+    for j = #stack, 1, -1 do
+        local w = stack[j].widget
+        if seen_self then
+            if w == self.ui_widget then break end
+            below[#below + 1] = w
+        elseif w == self then
+            seen_self = true
+        end
+    end
+    for _, w in ipairs(below) do
+        if w.handleEvent and w:handleEvent(event) then
+            return true
+        end
+    end
+    if self.ui_widget then
+        return self.ui_widget:handleEvent(event)
+    end
+    return false
 end
 
 function AudiobookPlayer:_isTapOnWidget(pos, widget)
