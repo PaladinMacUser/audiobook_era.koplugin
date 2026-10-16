@@ -252,9 +252,19 @@ json_find(const char *json, const char *key, char *out, size_t outsz) {
     if (*p == '"') {
         p++;
         size_t n = 0;
+        /* Unescape the standard JSON escapes: KOReader's encoder writes
+         * "/" as "\/", and an unescaped path fails to open. */
         while (*p && *p != '"') {
-            if (n + 1 < outsz) out[n++] = *p++;
-            else p++;
+            char c = *p++;
+            if (c == '\\' && *p) {
+                char e = *p++;
+                if (e == '/' || e == '"' || e == '\\') c = e;
+                else if (e == 'n') c = '\n';
+                else if (e == 't') c = '\t';
+                else if (e == 'r') c = '\r';
+                else c = e;
+            }
+            if (n + 1 < outsz) out[n++] = c;
         }
         out[n] = 0;
         return 0;

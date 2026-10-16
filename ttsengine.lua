@@ -2532,7 +2532,11 @@ completion via status polling. See dev/audioout/PLAN.md.
 --]]
 function TTSEngine:_getAudioOut()
     if self._audioout_client then return self._audioout_client end
+    -- Join like detectBackend does, with an explicit "/": plugin_dir is
+    -- not guaranteed to carry a trailing slash (observed as the relative
+    -- "plugins/audiobook.koplugin" on Kobo).
     local dir = self.plugin_dir or ""
+    if dir ~= "" and not dir:match("/$") then dir = dir .. "/" end
     local bin = dir .. "audioout/audioout"
     -- Release zips ship ELF binaries as <name>.bin (Windows extraction
     -- guard); rename back on first use, mirroring detectBackend's helper.
@@ -2548,6 +2552,14 @@ function TTSEngine:_getAudioOut()
             return nil
         end
         f:close()
+    end
+    -- Resolve to an absolute path: os.execute spawns inherit the process
+    -- cwd, and a relative plugin_dir only resolves while that cwd happens
+    -- to match KOReader's launch directory.
+    local ok_util, util = pcall(require, "ffi/util")
+    if ok_util and util and util.realpath then
+        local abs = util.realpath(bin)
+        if abs then bin = abs end
     end
     local ok_load, AudioOut = pcall(dofile, dir .. "audioout.lua")
     if not ok_load or not AudioOut then
@@ -2573,7 +2585,15 @@ function TTSEngine:_useAudioOut()
             and self.plugin:getSetting("audioout_enabled", false)) then
         return false
     end
-    return self.audio_player_type == "gst-bt"
+    if self.audio_player_type ~= "gst-bt" then return false end
+    -- No connected peer: stand aside. The vendor sink stalls its init for
+    -- tens of seconds without an A2DP peer, which would time out every
+    -- play; the legacy pipeline handles the "Play anyway" flow instead.
+    local bt = self.plugin.bt_manager
+    if bt and bt.anyAudioDeviceConnected and not bt:anyAudioDeviceConnected() then
+        return false
+    end
+    return true
 end
 
 function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
@@ -4334,6 +4354,13 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
             end
             local resp = ao:play(self.current_audio_file,
                 { rate = self._target_sample_rate or 22050, channels = 1 })
+            if resp and not resp.ok and resp.error == "queue full" then
+                -- Stale clips from a dead previous group: drop and retry once.
+                logger.warn("TTSEngine: audioout queue full; flushing and retrying")
+                ao:flush()
+                resp = ao:play(self.current_audio_file,
+                    { rate = self._target_sample_rate or 22050, channels = 1 })
+            end
             if not resp or not resp.ok then
                 logger.warn("TTSEngine: audioout play refused:",
                     resp and resp.error or "timeout")
@@ -4357,9 +4384,23 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                 "gen=", my_gen, "piper_q=", self:getPiperQueueSnapshot())
             self:startTimingLoop()
             local engine = self
+            local stall_since_ms = nil
+            local last_seen_pos = nil
             local function pollAudiooutCompletion()
                 if (engine.play_generation or 0) ~= my_gen then return end
                 if not engine.is_speaking then return end
+                -- Mid-play BT drop: the sink goes silent and nothing will
+                -- ever render.  Fail like the legacy async-launch path so
+                -- SyncController can stop cleanly instead of freezing.
+                local plugin = engine.plugin
+                local bt = plugin and plugin.bt_manager
+                if bt and bt.anyAudioDeviceConnected
+                        and not bt:anyAudioDeviceConnected() then
+                    logger.warn("TTSEngine: audioout BT device lost mid-play; failing")
+                    engine.is_speaking = false
+                    if on_fail then on_fail() end
+                    return
+                end
                 local st = engine._audioout_client
                     and engine._audioout_client:status()
                 if st and (st.done_count or 0) > (engine._audioout_done_baseline or 0) then
@@ -4372,6 +4413,26 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                         st.pos_ms, "ms, fed_end=", engine._audioout_fed_end_ms, "ms)")
                     engine:onPlaybackComplete()
                     return
+                end
+                -- Render stall: the sink stopped accepting (dead peer that
+                -- D-Bus still lists, wedged firmware).  No position motion
+                -- for 6 s while a clip is up means nothing will ever play.
+                if st and not engine.is_paused and (st.queue or 0) > 0 then
+                    local pos = st.pos_ms or 0
+                    if last_seen_pos == nil or pos > (last_seen_pos or 0) then
+                        last_seen_pos = pos
+                        stall_since_ms = nil
+                    else
+                        stall_since_ms = stall_since_ms
+                            or UIManager:getTime()
+                        if time.to_ms(UIManager:getTime() - stall_since_ms) > 6000 then
+                            logger.warn("TTSEngine: audioout render stalled at pos=",
+                                pos, "ms for 6s; failing")
+                            engine.is_speaking = false
+                            if on_fail then on_fail() end
+                            return
+                        end
+                    end
                 end
                 UIManager:scheduleIn(0.25, pollAudiooutCompletion)
             end

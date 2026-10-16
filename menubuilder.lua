@@ -224,6 +224,26 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
         })
     end
 
+    -- Tier 2 audio output daemon (Kobo MTK Bluetooth only), also reachable
+    -- from the read-along overlay's TTS settings picker.  Default off;
+    -- failures fall back to the legacy pipeline for the session.
+    if plugin.bt_manager and plugin.bt_manager:isMtkKobo() then
+        table.insert(menu, {
+            text = _("Use audio output daemon (experimental)"),
+            checked_func = function()
+                return plugin:getSetting("audioout_enabled", false)
+            end,
+            callback = function()
+                plugin:toggleSetting("audioout_enabled", false)
+            end,
+            help_text = _(
+                "Routes read-aloud audio through a background daemon that "
+                .. "keeps the Bluetooth pipeline open between sentences and "
+                .. "tracks real playback position. Experimental."
+            ),
+        })
+    end
+
     -- Android TTS: HuggingFace catalog languages + installed system voices.
     -- (Piper ONNX models themselves cannot run on Android; they appear here
     -- as languages, and as voices if the user installed SherpaTTS / similar.)

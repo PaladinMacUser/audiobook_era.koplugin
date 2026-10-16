@@ -120,7 +120,13 @@ function AudioOut:start()
     if not self.daemon_path or not self.daemon_path:match("%S") then
         return nil, "no daemon path"
     end
-    local fifo = self.socket_path:gsub("_socket%.sock$", "_fifo")
+    -- Derive the fifo from the socket path; keep them distinct even if a
+    -- custom socket path does not end in .sock (the daemon cannot open a
+    -- fifo that collides with the socket file).
+    local fifo = self.socket_path:gsub("%.sock$", ".fifo")
+    if fifo == self.socket_path then
+        fifo = self.socket_path .. ".fifo"
+    end
     local cmd = string.format(
         '%s --socket "%s" --fifo "%s" --rate %d --channels %d --volume %.2f' ..
         ' > /dev/null 2>> "%s" &',
