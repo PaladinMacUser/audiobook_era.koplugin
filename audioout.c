@@ -153,6 +153,14 @@ static struct {
     long long external_base_ms;
     long long external_frozen_ms;       /* position while paused */
 
+    /* Acceptance pacing: a healthy A2DP sink accepts at real time.  A sink
+     * with a dead peer (D-Bus still lists it) swallows buffers at decode
+     * speed, which runs the clock and the read-along highlight away. */
+    int unpaced;
+    long long pace_last_acc_ms;
+    long long pace_last_wall_ms;
+    int pace_fast_ticks;
+
     int listen_fd;
     int client_fd;
 } S;
@@ -517,6 +525,8 @@ queue_clip(const char *path, long long gap_ms) {
     S.fed_end_ms = c.end_ms;
     S.all_fed = 0;
     S.announce_idle = 0;
+    S.unpaced = 0;
+    S.pace_fast_ticks = 0;
     S.queue[S.queue_len++] = c;
     log_line("queued %s dur=%lldms gap=%lldms span=[%lld..%lld]ms",
              path, c.duration_ms, gap_ms, c.start_ms, c.end_ms);
@@ -761,6 +771,8 @@ handle_command(char *line) {
         S.external_wait_first = 1;
         S.external_base_ms = 0;
         S.external_frozen_ms = 0;
+        S.unpaced = 0;
+        S.pace_fast_ticks = 0;
         log_line("external stream mode (%d x %d)", g_rate, g_channels);
         respond("{\"ok\":true,\"mode\":\"external\",\"fifo\":\"%s\"}",
                 S.fifo_path);
@@ -792,11 +804,11 @@ handle_command(char *line) {
         respond("{\"ok\":true,\"state\":\"%s\",\"pos_ms\":%lld,"
                 "\"accepted_ms\":%lld,\"fed_ms\":%lld,\"fed_end_ms\":%lld,"
                 "\"done_count\":%llu,\"queue\":%d,\"rate\":%d,\"channels\":%d,"
-                "\"volume\":%.2f,\"uptime_ms\":%lld}",
+                "\"volume\":%.2f,\"unpaced\":%d,\"uptime_ms\":%lld}",
                 state_str(), rend, (long long)(acc_bytes / OUT_BYTES_PER_MS),
                 fed, S.fed_end_ms, S.done_count, S.queue_len,
                 S.pipe_rate, S.pipe_channels, S.volume,
-                mono_ms() - g_started_ms);
+                S.unpaced, mono_ms() - g_started_ms);
     } else if (!strcmp(cmd, "volume")) {
         long long v = json_num(line, "value_x1000", 1000);
         double vol = (double)v / 1000.0;
@@ -830,6 +842,36 @@ static void
 tick_bookkeeping(void) {
     wall_now = mono_ms();
     refresh_clock();
+
+    /* Acceptance pacing watchdog.  Sustained acceptance faster than real
+     * time while a clip is up means the sink is swallowing (dead peer the
+     * connection manager still lists).  One flag, read by the client; the
+     * legacy path owns the retry UX for that case.  The first-buffer burst
+     * (M0: ~1.5 s accepted in one tick) rides out on the reset below. */
+    if (!S.paused && probe_seen && (S.queue_len > 0 || !S.all_fed)) {
+        long long acc = (long long)(acc_bytes / OUT_BYTES_PER_MS);
+        if (S.pace_last_wall_ms > 0) {
+            long long dw = wall_now - S.pace_last_wall_ms;
+            long long da = acc - S.pace_last_acc_ms;
+            if (dw > 0 && da > dw * 2 + 250) {
+                S.pace_fast_ticks++;
+                if (S.pace_fast_ticks >= 25 && !S.unpaced) {
+                    S.unpaced = 1;
+                    log_line("UNPACED: sink accepting %lldms of audio in %lldms"
+                             " of wall time; flagging for the client", da, dw);
+                    respond("{\"event\":\"unpaced\"}");
+                }
+            } else {
+                S.pace_fast_ticks = 0;
+            }
+        }
+        S.pace_last_acc_ms = acc;
+        S.pace_last_wall_ms = wall_now;
+    } else {
+        S.pace_last_acc_ms = 0;
+        S.pace_last_wall_ms = 0;
+        S.pace_fast_ticks = 0;
+    }
 
     /* Clip completion: the rendered estimate crossed the clip's end. */
     long long rend = rendered_ms();

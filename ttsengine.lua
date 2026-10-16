@@ -4403,6 +4403,17 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                 end
                 local st = engine._audioout_client
                     and engine._audioout_client:status()
+                if st and st.unpaced then
+                    -- The sink is swallowing buffers without pacing (dead
+                    -- A2DP peer the connection manager still lists).  Fail
+                    -- into the legacy path, whose premature-exit detection
+                    -- and BT messaging were built for this case.
+                    logger.warn("TTSEngine: audioout sink unpaced (dead BT link?); failing")
+                    engine._audioout_client:stop()
+                    engine.is_speaking = false
+                    if on_fail then on_fail() end
+                    return
+                end
                 if st and (st.done_count or 0) > (engine._audioout_done_baseline or 0) then
                     if engine.is_paused then
                         -- the backlog drained during pause; fire on resume
