@@ -2411,7 +2411,139 @@ function MediaEngine:_persistentFilterChain()
     return filter_chain
 end
 
+--[[--
+Client for the audioout daemon on the media path (Tier 2, gated by the
+same `audioout_enabled` setting as the TTS path). The daemon owns the
+pipeline; this engine keeps its per-track ffmpeg decoder and writes the
+decoded PCM into the daemon's fifo (external stream mode).
+--]]
+function MediaEngine:_getAudioOut()
+    if self._audioout_client then return self._audioout_client end
+    local dir = self._plugin_dir or ""
+    if dir ~= "" and not dir:match("/$") then dir = dir .. "/" end
+    local bin = dir .. "audioout/audioout"
+    local f = io.open(bin, "r")
+    if f then
+        f:close()
+    else
+        os.execute("test -f '" .. bin .. ".bin' && mv '" .. bin .. ".bin' '"
+            .. bin .. "' && chmod +x '" .. bin .. "' 2>/dev/null")
+        f = io.open(bin, "r")
+        if not f then return nil end
+        f:close()
+    end
+    local ok_util, util = pcall(require, "ffi/util")
+    if ok_util and util and util.realpath then
+        local abs = util.realpath(bin)
+        if abs then bin = abs end
+    end
+    local ok_load, AudioOut = pcall(dofile, dir .. "audioout.lua")
+    if not ok_load or not AudioOut then return nil end
+    self._audioout_client = AudioOut:new{ daemon_path = bin }
+    return self._audioout_client
+end
+
+function MediaEngine:_useAudioOut()
+    if self._audioout_session_fallback then return false end
+    local plugin = self.plugin
+    if not (plugin and plugin.getSetting
+            and plugin:getSetting("audioout_enabled", false)) then
+        return false
+    end
+    if not self._use_persistent_pipeline then return false end
+    -- No connected peer: the vendor sink stalls its init for tens of
+    -- seconds; the legacy wrapper path serves the Play-anyway flow.
+    local bt = plugin.bt_manager
+    if bt and bt.anyAudioDeviceConnected
+            and not bt:anyAudioDeviceConnected() then
+        return false
+    end
+    return true
+end
+
+function MediaEngine:_killAudiooutFeeder()
+    local pid = self._audioout_ffmpeg_pid
+    self._audioout_ffmpeg_pid = nil
+    if pid then
+        os.execute(string.format("kill -9 %d 2>/dev/null", pid))
+    end
+end
+
+-- Spawn the per-track ffmpeg decoder straight into the daemon's fifo,
+-- same decode semantics as the shell wrapper (offset, filter chain,
+-- optional session wav tee).
+function MediaEngine:_spawnAudiooutFeeder(offset, filter_chain, wav_out)
+    local ao = self._audioout_client
+    if not ao then return nil end
+    local ffmpeg = self.backend_cmd or "ffmpeg"
+    local filter_arg = ""
+    if filter_chain and filter_chain ~= "" then
+        filter_arg = string.format('-filter:a "%s"', filter_chain)
+    end
+    local log = "/tmp/audiobook_audioout_feeder.log"
+    local cmd = string.format(
+        '%s -ss %s -i "%s" %s -f s16le -ar 44100 -ac 2 - %s > "%s" 2>> "%s" & echo $!',
+        ffmpeg, tostring(offset or 0), self.current_path, filter_arg,
+        wav_out or "", ao:fifoPath(), log)
+    local pid_f = io.popen(cmd)
+    local pid = pid_f and tonumber(pid_f:read("*l") or "")
+    if pid_f then pid_f:close() end
+    self._audioout_ffmpeg_pid = pid
+    logger.warn("MediaEngine: audioout feeder pid=", pid, "offset=", offset)
+    return pid
+end
+
+function MediaEngine:_playAudiooutExternal(gen)
+    local ao = self:_getAudioOut()
+    if not ao then
+        logger.warn("MediaEngine: audioout unavailable; falling back for this session")
+        self._audioout_session_fallback = true
+        return false
+    end
+    if not ao:isRunning() and not ao:start() then
+        logger.warn("MediaEngine: audioout daemon did not start; falling back")
+        self._audioout_session_fallback = true
+        return false
+    end
+    local resp = ao:externalStart(44100, 2)
+    if not resp or not resp.ok then
+        logger.warn("MediaEngine: audioout external start refused:",
+            resp and resp.error or "timeout")
+        return false
+    end
+    self._audioout_external = true
+    self._killAudiooutFeeder()
+
+    -- Session recording tee, same as the wrapper path.
+    local wav_out = ""
+    if self.plugin and self.plugin.session_recorder
+            and self.plugin.session_recorder:isRecording()
+            and self.plugin.session_recorder._session_dir then
+        local audio_dir = self.plugin.session_recorder._session_dir .. "/audio"
+        os.execute('mkdir -p "' .. audio_dir:gsub('"', '\"') .. '" 2>/dev/null')
+        wav_out = string.format('-f wav "%s/audio/playback.wav"',
+            self.plugin.session_recorder._session_dir:gsub('"', '\"'))
+    end
+
+    self:_spawnAudiooutFeeder(self._seek_offset or 0,
+        self:_persistentFilterChain(), wav_out)
+    self._play_start_time = UIManager:getTime()
+    self._pause_start_time = nil
+    self._total_pause_ms = 0
+    self.is_playing = true
+    self.is_paused = false
+    self:_startPositionPoller(gen)
+    if self.current_duration and self.current_duration > 0 then
+        self:_startPersistentCompletionWatcher(gen, self.current_duration)
+    end
+    return true
+end
+
 function MediaEngine:_playPersistentPipeline(gen)
+    if self:_useAudioOut() then
+        if self:_playAudiooutExternal(gen) then return true end
+        -- fall through to the wrapper path for this session
+    end
     if not self._persistent_pipeline_active then
         if not self:_startPersistentPipeline() then
             logger.err("MediaEngine: persistent pipeline unavailable, disabling for this session")
@@ -2998,6 +3130,14 @@ function MediaEngine:pause()
     self.is_paused = true
     self._pause_start_time = UIManager:getTime()
 
+    if self._audioout_external and self._audioout_client then
+        -- Kill the ffmpeg feeder; the daemon feeds keepalive silence so
+        -- the A2DP link stays up, exactly like the wrapper path.
+        self:_killAudiooutFeeder()
+        self._audioout_client:pause()
+        logger.warn("MediaEngine: paused audioout external stream")
+        return
+    end
     if self._persistent_pipeline_active then
         -- Ask the wrapper to kill the ffmpeg feeder while keeping gst-launch
         -- alive.  Stopping the whole group with SIGSTOP freezes GStreamer's
@@ -3081,6 +3221,18 @@ end
 function MediaEngine:resume()
     if not self.is_playing or not self.is_paused then return end
 
+    if self._audioout_external and self._audioout_client then
+        local resume_pos = self:getPosition()
+        self.is_paused = false
+        if self._pause_start_time then
+            self._total_pause_ms = self._total_pause_ms + time.to_ms(UIManager:getTime() - self._pause_start_time)
+            self._pause_start_time = nil
+        end
+        self._audioout_client:resume()
+        self:_spawnAudiooutFeeder(resume_pos, self:_persistentFilterChain(), "")
+        logger.warn("MediaEngine: resumed audioout external stream at", resume_pos)
+        return
+    end
     if self._persistent_pipeline_active then
         -- Restart the ffmpeg feeder at the position where we paused.  The
         -- wrapper kept gst-launch alive and fed silence while we were paused,
@@ -3233,6 +3385,11 @@ function MediaEngine:stop()
         pcall(function() self._android_player:stop() end)
     end
 
+    if self._audioout_external then
+        self:_killAudiooutFeeder()
+        if self._audioout_client then self._audioout_client:stop() end
+        self._audioout_external = false
+    end
     if self._persistent_pipeline_active then
         self:_stopPersistentPipeline("stop")
     end
@@ -3485,6 +3642,33 @@ function MediaEngine:seek(seconds, mode)
             self._paused_position = target
         end
 
+        if self._audioout_external and self._audioout_client then
+            logger.warn("MediaEngine: audioout seek mode=", mode,
+                "target=", target, "was_playing=", was_playing)
+            self._seek_offset = target
+            self._paused_position = target
+            self:_killAudiooutFeeder()
+            self:_nextGeneration()
+            local new_gen = self.play_generation
+            if was_playing then
+                self._audioout_client:resume()
+                self:_spawnAudiooutFeeder(target, self:_persistentFilterChain(), "")
+                self._play_start_time = UIManager:getTime()
+                self._total_pause_ms = 0
+                self._pause_start_time = nil
+                self.is_playing = true
+                self.is_paused = false
+            else
+                -- Seeking while paused must not start audio; resume() will
+                -- restart the feeder from the new offset.
+                self._audioout_client:pause()
+                self.is_playing = true
+                self.is_paused = true
+                self._pause_start_time = UIManager:getTime()
+            end
+            self:_startPersistentCompletionWatcher(new_gen, self.current_duration)
+            return true
+        end
         if self._persistent_pipeline_active then
             logger.warn("MediaEngine: persistent-pipeline seek mode=", mode,
                 "req=", seconds, "current=", self:getPosition(),

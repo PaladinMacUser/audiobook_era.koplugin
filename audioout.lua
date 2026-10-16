@@ -123,10 +123,7 @@ function AudioOut:start()
     -- Derive the fifo from the socket path; keep them distinct even if a
     -- custom socket path does not end in .sock (the daemon cannot open a
     -- fifo that collides with the socket file).
-    local fifo = self.socket_path:gsub("%.sock$", ".fifo")
-    if fifo == self.socket_path then
-        fifo = self.socket_path .. ".fifo"
-    end
+    local fifo = self:fifoPath()
     local cmd = string.format(
         '%s --socket "%s" --fifo "%s" --rate %d --channels %d --volume %.2f' ..
         ' > /dev/null 2>> "%s" &',
@@ -173,6 +170,21 @@ function AudioOut:flush() return self:_command({ cmd = "flush" }, 8000) end
 -- Tear the pipeline down without killing the daemon: session stop. The
 -- next play() rebuilds lazily.
 function AudioOut:release() return self:_command({ cmd = "release" }, 8000) end
+
+-- External stream mode (media path): an outside writer (ffmpeg) feeds the
+-- fifo; the daemon builds the pipeline and reports the probe clock.
+function AudioOut:externalStart(rate, channels)
+    return self:_command({ cmd = "external", rate = rate or 44100,
+                           channels = channels or 2 }, 8000)
+end
+
+function AudioOut:fifoPath()
+    if self._fifo_path then return self._fifo_path end
+    local fifo = self.socket_path:gsub("%.sock$", ".fifo")
+    if fifo == self.socket_path then fifo = self.socket_path .. ".fifo" end
+    self._fifo_path = fifo
+    return fifo
+end
 function AudioOut:setVolume(v)
     return self:_command({ cmd = "volume", value_x1000 = math.floor(v * 1000 + 0.5) })
 end

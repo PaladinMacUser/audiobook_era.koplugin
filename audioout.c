@@ -108,6 +108,56 @@ typedef struct {
 
 static GstApi G;
 
+typedef struct {
+    char path[MAX_PATH];
+    int fd;
+    unsigned long long data_offset;
+    unsigned long long data_size;   /* PCM bytes */
+    unsigned long long file_pos;    /* next byte to feed */
+    int in_bps;                     /* input bytes per second */
+    long long duration_ms;
+    long long gap_ms_after;
+    long long start_ms;             /* stream position of first PCM */
+    long long end_ms;               /* start + duration + gap */
+} Clip;
+
+static struct {
+    GstElement *pipe;
+    GstElement *sink;
+    GstBus *bus;
+    int pipe_rate, pipe_channels;
+    double volume;
+    int pipeline_retries;
+    long long pipeline_last_fail_ms;
+
+    char fifo_path[MAX_PATH];
+    int fifo_fd;
+    unsigned long long fifo_written;    /* input bytes handed to the fifo */
+
+    Clip queue[MAX_QUEUE];
+    int queue_len;
+    int feed_idx;                       /* clip being fed, -1 = none active */
+    int all_fed;                        /* every queued clip written out */
+    long long gap_left_ms;              /* silence owed before the next clip */
+    int paused;
+
+    long long fed_end_ms;               /* end of everything queued so far */
+    unsigned long long done_count;
+    int announce_idle;
+
+    /* External stream mode (media path): an outside writer (ffmpeg) feeds
+     * the fifo; the daemon builds the pipeline, stays off the stream, and
+     * reports position from the probe clock. */
+    int external_active;
+    int external_wait_first;            /* rebaseline base at first movement */
+    long long external_base_ms;
+    long long external_frozen_ms;       /* position while paused */
+
+    int listen_fd;
+    int client_fd;
+} S;
+
+
 /* ------------------------------------------------------------------ */
 /* Clock                                                                */
 /* ------------------------------------------------------------------ */
@@ -157,6 +207,11 @@ refresh_clock(void) {
         acc_bytes = b;
         acc_boundary_ms = (long long)((b > last ? b - last : 0) / OUT_BYTES_PER_MS);
         acc_arrival_ms = wall_now;
+        if (S.external_active && S.external_wait_first) {
+            S.external_base_ms =
+                (long long)(acc_bytes / OUT_BYTES_PER_MS) - acc_boundary_ms;
+            S.external_wait_first = 0;
+        }
     }
 }
 
@@ -174,47 +229,6 @@ rendered_ms(void) {
 /* ------------------------------------------------------------------ */
 /* Daemon state                                                         */
 /* ------------------------------------------------------------------ */
-
-typedef struct {
-    char path[MAX_PATH];
-    int fd;
-    unsigned long long data_offset;
-    unsigned long long data_size;   /* PCM bytes */
-    unsigned long long file_pos;    /* next byte to feed */
-    int in_bps;                     /* input bytes per second */
-    long long duration_ms;
-    long long gap_ms_after;
-    long long start_ms;             /* stream position of first PCM */
-    long long end_ms;               /* start + duration + gap */
-} Clip;
-
-static struct {
-    GstElement *pipe;
-    GstElement *sink;
-    GstBus *bus;
-    int pipe_rate, pipe_channels;
-    double volume;
-    int pipeline_retries;
-    long long pipeline_last_fail_ms;
-
-    char fifo_path[MAX_PATH];
-    int fifo_fd;
-    unsigned long long fifo_written;    /* input bytes handed to the fifo */
-
-    Clip queue[MAX_QUEUE];
-    int queue_len;
-    int feed_idx;                       /* clip being fed, -1 = none active */
-    int all_fed;                        /* every queued clip written out */
-    long long gap_left_ms;              /* silence owed before the next clip */
-    int paused;
-
-    long long fed_end_ms;               /* end of everything queued so far */
-    unsigned long long done_count;
-    int announce_idle;
-
-    int listen_fd;
-    int client_fd;
-} S;
 
 static const char *g_socket_path = SOCKET_PATH_DEFAULT;
 static const char *g_sink_name = "mtkbtmwrpcaudiosink";
@@ -530,6 +544,7 @@ fifo_write(const unsigned char *buf, unsigned long long len) {
 /* One feed tick: active clip, then inter-clip gap, then keepalive. */
 static void
 feed_tick(void) {
+    if (S.external_active) return;   /* the outside writer owns the stream */
     if (S.paused || S.fifo_fd < 0) return;
     if (S.feed_idx < 0 && S.queue_len == 0) {
         fifo_write(silence_chunk, SILENCE_CHUNK);   /* idle keepalive */
@@ -696,9 +711,20 @@ handle_command(char *line) {
                 S.queue[S.queue_len - 1].start_ms,
                 S.queue[S.queue_len - 1].duration_ms);
     } else if (!strcmp(cmd, "pause")) {
+        if (S.external_active && !S.paused) {
+            S.external_frozen_ms = (long long)(acc_bytes / OUT_BYTES_PER_MS)
+                                   - S.external_base_ms;
+            if (S.external_frozen_ms < 0) S.external_frozen_ms = 0;
+        }
         S.paused = 1;
         respond("{\"ok\":true,\"state\":\"paused\"}");
     } else if (!strcmp(cmd, "resume")) {
+        if (S.external_active && S.paused) {
+            /* New epoch: the writer restarts at an offset chosen by the
+             * client; rebaseline the stream position at first movement. */
+            S.external_wait_first = 1;
+            S.external_base_ms = 0;
+        }
         S.paused = 0;
         respond("{\"ok\":true,\"state\":\"%s\"}", state_str());
     } else if (!strcmp(cmd, "stop")) {
@@ -706,6 +732,7 @@ handle_command(char *line) {
         respond("{\"ok\":true,\"state\":\"idle\"}");
     } else if (!strcmp(cmd, "flush")) {
         drop_queue();
+        S.external_active = 0;
         if (S.pipe) {
             pipeline_teardown();
             reset_stream();
@@ -715,8 +742,31 @@ handle_command(char *line) {
             }
         }
         respond("{\"ok\":true,\"state\":\"idle\"}");
+    } else if (!strcmp(cmd, "external")) {
+        long long rate = json_num(line, "rate", g_rate);
+        long long channels = json_num(line, "channels", g_channels);
+        drop_queue();
+        if (!S.pipe || (int)rate != S.pipe_rate ||
+                (int)channels != S.pipe_channels) {
+            pipeline_teardown();
+            g_rate = (int)rate;
+            g_channels = (int)channels;
+            reset_stream();
+            if (fifo_open() != 0 || pipeline_build(g_rate, g_channels) != 0) {
+                respond("{\"ok\":false,\"error\":\"pipeline build failed\"}");
+                return;
+            }
+        }
+        S.external_active = 1;
+        S.external_wait_first = 1;
+        S.external_base_ms = 0;
+        S.external_frozen_ms = 0;
+        log_line("external stream mode (%d x %d)", g_rate, g_channels);
+        respond("{\"ok\":true,\"mode\":\"external\",\"fifo\":\"%s\"}",
+                S.fifo_path);
     } else if (!strcmp(cmd, "release")) {
         drop_queue();
+        S.external_active = 0;
         if (S.pipe) {
             pipeline_teardown();
             reset_stream();
@@ -730,6 +780,15 @@ handle_command(char *line) {
         long long fed = (long long)((S.fifo_written * 1000ull) /
                                     (unsigned long long)(g_rate * g_channels * 2));
         if (rend > S.fed_end_ms) rend = S.fed_end_ms;
+        if (S.external_active) {
+            /* External mode: position is stream-relative from the probe,
+             * frozen while paused (keepalive silence would otherwise run
+             * the clock away from the media position). */
+            rend = S.paused ? S.external_frozen_ms
+                            : (long long)(acc_bytes / OUT_BYTES_PER_MS)
+                                  - S.external_base_ms;
+            if (rend < 0) rend = 0;
+        }
         respond("{\"ok\":true,\"state\":\"%s\",\"pos_ms\":%lld,"
                 "\"accepted_ms\":%lld,\"fed_ms\":%lld,\"fed_end_ms\":%lld,"
                 "\"done_count\":%llu,\"queue\":%d,\"rate\":%d,\"channels\":%d,"
