@@ -881,6 +881,84 @@ in TTSEngine:generateTimingEstimates.
 @param text string
 @return number
 --]]
+
+-- ── Japanese highlight units ────────────────────────────────────────────
+-- Mirrors the sanoTTS-jp server's per-character classifier
+-- (sanotts-jp/snt_jp_server.c) so sidecar spans map one to one: every
+-- character except whitespace and CJK punctuation, with small kana and the
+-- long-vowel mark merged into the preceding unit.
+
+local function utf8_cp_at(s, i)
+    local b = s:byte(i)
+    if not b then return nil, 0 end
+    if b < 0x80 then return b, 1 end
+    if b < 0xE0 then
+        return (b % 0x20) * 0x40 + ((s:byte(i + 1) or 0) % 0x40), 2
+    end
+    if b < 0xF0 then
+        return (b % 0x10) * 0x1000
+               + ((s:byte(i + 1) or 0) % 0x40) * 0x40
+               + ((s:byte(i + 2) or 0) % 0x40), 3
+    end
+    if b < 0xF8 then
+        return (b % 0x08) * 0x40000
+               + ((s:byte(i + 1) or 0) % 0x40) * 0x1000
+               + ((s:byte(i + 2) or 0) % 0x40) * 0x40
+               + ((s:byte(i + 3) or 0) % 0x40), 4
+    end
+    return b, 1
+end
+
+local function cp_is_small_kana_jp(cp)
+    return cp == 0x3041 or cp == 0x3043 or cp == 0x3045 or cp == 0x3047
+        or cp == 0x3049 or cp == 0x3063 or cp == 0x3083 or cp == 0x3085
+        or cp == 0x3087 or cp == 0x3095 or cp == 0x3096
+        or cp == 0x30A1 or cp == 0x30A3 or cp == 0x30A5 or cp == 0x30A7
+        or cp == 0x30A9 or cp == 0x30C3 or cp == 0x30E3 or cp == 0x30E5
+        or cp == 0x30E7 or cp == 0x30F5 or cp == 0x30F6
+        or (cp >= 0xFF67 and cp <= 0xFF6F)
+end
+
+local function cp_is_prolong_jp(cp)
+    return cp == 0x30FC or cp == 0xFF70
+end
+
+local function cp_is_jp_skip_jp(cp)
+    return cp == 32 or cp == 9 or cp == 10 or cp == 13
+        or cp == 0x3001 or cp == 0x3002
+        or cp == 0xFF0C or cp == 0xFF0E
+        or cp == 0xFF01 or cp == 0xFF1F
+        or cp == 0xFF1B or cp == 0xFF1A
+        or cp == 0x2026 or cp == 0x2015 or cp == 0x2025
+        or (cp >= 0x300C and cp <= 0x300F)
+        or cp == 0xFF08 or cp == 0xFF09
+end
+
+-- Per-character highlight units for Japanese text.
+local function jp_timing_units(text)
+    local units = {}
+    local i, n = 1, #text
+    while i <= n do
+        local cp, w = utf8_cp_at(text, i)
+        w = w or 1
+        if cp_is_jp_skip_jp(cp) then
+            i = i + w
+        else
+            local us, ue = i, i + w - 1
+            i = i + w
+            while i <= n do
+                local c2, w2 = utf8_cp_at(text, i)
+                if c2 and (cp_is_small_kana_jp(c2) or cp_is_prolong_jp(c2)) then
+                    ue = i + w2 - 1
+                    i = i + w2
+                else break end
+            end
+            units[#units + 1] = text:sub(us, ue)
+        end
+    end
+    return units
+end
+
 local function countTimingWords(text)
     local n = 0
     for word in text:gmatch("%S+") do
@@ -929,11 +1007,35 @@ function PiperQueue:_buildSentenceTiming(side, first_clause, last_clause, seg_st
             spans[#spans + 1] = w
         end
     end
-    if #spans ~= countTimingWords(text) then return nil end
-
-    local recs, i = {}, 0
+    -- Japanese has no whitespace words: the sanoTTS-jp server emits one
+    -- span per highlight unit (character), so accept either the whitespace
+    -- word count or the jp unit count.
+    local words_ws = {}
+    local n_ws = 0
     for word in text:gmatch("%S+") do
         if (word:gsub("[%p]", "")) ~= "" then
+            n_ws = n_ws + 1
+            words_ws[#words_ws + 1] = word
+        end
+    end
+    local units = jp_timing_units(text)
+    local n_units = #units
+    local cjk = (#spans == n_units) and (n_units ~= n_ws)
+    if #spans ~= n_ws and #spans ~= n_units then return nil end
+
+    local recs, i = {}, 0
+    if cjk then
+        for _, word in ipairs(units) do
+            i = i + 1
+            local w = spans[i]
+            local s = math.floor((w.start_sample - seg_start) * 1000 / side.rate)
+            local e = math.floor((w.end_sample - seg_start) * 1000 / side.rate)
+            if s < 0 then s = 0 end
+            if e <= s then e = s + 1 end
+            recs[#recs + 1] = { word = word, start_time = s, end_time = e }
+        end
+    else
+        for _, word in ipairs(words_ws) do
             i = i + 1
             local w = spans[i]
             local s = math.floor((w.start_sample - seg_start) * 1000 / side.rate)

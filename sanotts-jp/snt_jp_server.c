@@ -66,6 +66,8 @@
  * heap.  Chunking keeps us inside all of it. */
 #define JP_LINE_MAX     65536
 #define JP_CHUNK_MAX    512      /* bytes per synthesis chunk (UTF-8 safe) */
+#define JP_MAX_UNITS    512      /* highlight units per request */
+#define SAAN_HOP_SAMPLES 256     /* SAAN_HOP: frames to PCM samples */
 #define JP_KEY_MAX      1024
 #define JP_MAX_TOK      96
 #define JP_MAX_LABEL    512
@@ -170,9 +172,104 @@ static uint8_t *dict_slurp(const char *path, size_t *size) {
  * esp32/main/saan_kanji.c saan_kanji_to_ids(): same chain, plain libc for
  * the OpenJTalk temporary heap, static arrays for the fixed-capacity stages.
  * Returns 0 on success; negative on too-long/key/analyze/feature/ids errors. */
+/* Timing out-params (optional): per-NJD-node UTF-8 surface byte length and
+ * mora count, for the read-along highlight's per-character spans. */
+/* ── per-character timing units ────────────────────────────────────────
+ * Japanese has no whitespace words; the read-along highlight works per
+ * character, merging small kana and the long-vowel mark into the preceding
+ * unit, and skipping whitespace and CJK punctuation.  The plugin's
+ * TextParser implements the same rule client-side. */
+
+static size_t utf8_decode(const char *s, size_t remaining, uint32_t *cp) {
+    unsigned char c = (unsigned char)s[0];
+    if (c < 0x80) { *cp = c; return 1; }
+    if ((c & 0xE0) == 0xC0 && remaining >= 2) {
+        *cp = ((c & 0x1F) << 6) | ((unsigned char)s[1] & 0x3F);
+        return 2;
+    }
+    if ((c & 0xF0) == 0xE0 && remaining >= 3) {
+        *cp = ((c & 0x0F) << 12) | (((unsigned char)s[1] & 0x3F) << 6)
+              | ((unsigned char)s[2] & 0x3F);
+        return 3;
+    }
+    if ((c & 0xF8) == 0xF0 && remaining >= 4) {
+        *cp = ((c & 0x07) << 18) | (((unsigned char)s[1] & 0x3F) << 12)
+              | (((unsigned char)s[2] & 0x3F) << 6) | ((unsigned char)s[3] & 0x3F);
+        return 4;
+    }
+    *cp = c;
+    return 1;
+}
+
+static int cp_is_jp_content(uint32_t cp) {
+    return (cp >= 0x3041 && cp <= 0x30FF)
+        || (cp >= 0x3400 && cp <= 0x4DBF)
+        || (cp >= 0x4E00 && cp <= 0x9FFF)
+        || (cp >= 0xF900 && cp <= 0xFAFF)
+        || (cp >= 0xFF66 && cp <= 0xFF9D);
+}
+
+static int cp_is_small_kana(uint32_t cp) {
+    return (cp >= 0x3041 && cp <= 0x3083 && (cp == 0x3041 || cp == 0x3043
+                || cp == 0x3045 || cp == 0x3047 || cp == 0x3049 || cp == 0x3063))
+        || cp == 0x3083 || cp == 0x3085 || cp == 0x3087
+        || cp == 0x3095 || cp == 0x3096
+        || cp == 0x30A1 || cp == 0x30A3 || cp == 0x30A5 || cp == 0x30A7
+        || cp == 0x30A9 || cp == 0x30C3 || cp == 0x30E3 || cp == 0x30E5
+        || cp == 0x30E7 || cp == 0x30F5 || cp == 0x30F6
+        || (cp >= 0xFF67 && cp <= 0xFF6F);
+}
+
+static int cp_is_prolong(uint32_t cp) {
+    return cp == 0x30FC || cp == 0xFF70;
+}
+
+static int cp_is_jp_skip(uint32_t cp) {
+    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r'
+        || cp == 0x3001 || cp == 0x3002
+        || cp == 0xFF0C || cp == 0xFF0E
+        || cp == 0xFF01 || cp == 0xFF1F
+        || cp == 0xFF1B || cp == 0xFF1A
+        || cp == 0x2026 || cp == 0x2015 || cp == 0x2025
+        || cp == 0x300C || cp == 0x300D || cp == 0x300E || cp == 0x300F
+        || cp == 0xFF08 || cp == 0xFF09;
+}
+
+static int chunk_units(const char *p, size_t end, size_t base,
+                       size_t *ustart, size_t *uend, int cap) {
+    size_t i = 0;
+    int n = 0;
+    while (i < end) {
+        uint32_t cp;
+        size_t w = utf8_decode(p + i, end - i, &cp);
+        if (w == 0) w = 1;
+        if (cp_is_jp_skip(cp)) { i += w; continue; }
+        size_t us = i, ue = i + w;
+        i += w;
+        while (i < end) {
+            uint32_t c2;
+            size_t w2 = utf8_decode(p + i, end - i, &c2);
+            if (w2 == 0) w2 = 1;
+            if (cp_is_small_kana(c2) || cp_is_prolong(c2)) {
+                ue = i + w2;
+                i += w2;
+                continue;
+            }
+            break;
+        }
+        if (n < cap) {
+            ustart[n] = base + us;
+            uend[n] = base + ue;
+        }
+        n++;
+    }
+    return n;
+}
+
+static size_t utf8_floor(const char *s, size_t pos);  /* defined below */
+
 static int kanji_to_ids(const jdict_t *d, const char *text, size_t nbytes,
-                        int32_t *ids, int32_t ids_cap,
-                        int32_t *n_ids) {
+                        int32_t *ids, int32_t ids_cap, int32_t *n_ids) {
     *n_ids = 0;
     if (nbytes >= JP_KEY_MAX) return -1;
 
@@ -182,9 +279,6 @@ static int kanji_to_ids(const jdict_t *d, const char *text, size_t nbytes,
 
     int nt = jdict_analyze(d, s_key, key_n, s_vit, JP_VITERBI_N, s_tok, JP_MAX_TOK);
     if (nt <= 0) return -3;
-    /* Stop here before anything mallocs: 44 input tokens caps the OpenJTalk
-     * temporary heap (upstream M-98).  TTSEngine's sentence splitting keeps
-     * chunks well under this; longer input is chunked by the caller. */
     if (nt > 44) return -1;
 
     int nf = 0;
@@ -195,8 +289,6 @@ static int kanji_to_ids(const jdict_t *d, const char *text, size_t nbytes,
             return -4;
         int r;
         if (s_tok[i].entry & JDICT_UNKNOWN_FLAG) {
-            /* Guess the reading first: an unguessed unknown word is dropped
-             * from the audio entirely (upstream B-0). */
             r = jdict_unk_guess(d, s_tok[i].entry, surf,
                                 s_feat_store[nf], JP_FEAT_MAX);
             if (r < 0)
@@ -224,28 +316,6 @@ static int kanji_to_ids(const jdict_t *d, const char *text, size_t nbytes,
     njd_set_accent_type(&njd);
     njd_set_unvoiced_vowel(&njd);
     njd_set_long_vowel(&njd);
-
-    int nk = 0;
-    for (NJDNode *p = njd.head; p && nk < JP_MAX_TOK; p = p->next, nk++) {
-        snprintf(s_k4[nk].pos,   ACCENT_STR_MAX,  "%s", NJDNode_get_pos(p));
-        snprintf(s_k4[nk].ctype, ACCENT_STR_MAX,  "%s", NJDNode_get_ctype(p));
-        snprintf(s_k4[nk].cform, ACCENT_STR_MAX,  "%s", NJDNode_get_cform(p));
-        snprintf(s_k4[nk].orig,  ACCENT_STR_MAX,  "%s", NJDNode_get_orig(p));
-        snprintf(s_k4[nk].pron,  ACCENT_PRON_MAX, "%s", NJDNode_get_pron(p));
-        snprintf(s_k4[nk].read,  ACCENT_PRON_MAX, "%s", NJDNode_get_read(p));
-        s_k4[nk].acc = NJDNode_get_acc(p);
-        s_k4[nk].mora_size = NJDNode_get_mora_size(p);
-        s_k4[nk].chain_flag = NJDNode_get_chain_flag(p);
-    }
-    accent_apply(s_k4, nk, ACCENT_ALL, k7_dan_table, K7_N_DAN);
-    {
-        int i = 0;
-        for (NJDNode *p = njd.head; p && i < nk; p = p->next, i++) {
-            NJDNode_set_pron(p, s_k4[i].pron);
-            NJDNode_set_acc(p, s_k4[i].acc);
-            NJDNode_set_chain_flag(p, s_k4[i].chain_flag);
-        }
-    }
 
     njd2jpcommon(&jp, &njd);
     JPCommon_make_label(&jp);
@@ -298,6 +368,13 @@ static int json_fields(char *line, char **input, char **output) {
 }
 
 /* Move a UTF-8 boundary backwards from pos (pos stays if already one). */
+/* ── per-character timing units ────────────────────────────────────────
+ * Japanese has no whitespace words; the read-along highlight works per
+ * character, merging small kana (ゃゅょ...) and the long-vowel mark into
+ * the preceding unit, and skipping whitespace and CJK punctuation.  The
+ * audiobook plugin's TextParser implements the same rule client-side, so
+ * the unit order here matches the words there one for one. */
+
 static size_t utf8_floor(const char *s, size_t pos) {
     while (pos > 0 && ((unsigned char)s[pos] & 0xC0) == 0x80) pos--;
     return pos;
@@ -383,6 +460,13 @@ int main(int argc, char **argv) {
         size_t acc_n = 0, acc_cap = 0;
         int had_error = 0;
 
+        /* Timing units for the request: audio-sample spans per highlight
+         * unit (character), accumulated across chunks. */
+        long *u_start = calloc(JP_MAX_UNITS, sizeof(long));
+        long *u_end = calloc(JP_MAX_UNITS, sizeof(long));
+        int n_units = 0;
+        int align_ok = 1;
+
         /* Sentence-sized chunks; every saan_synthesize call stays in the
          * length range the core was validated on. */
         size_t text_n = strlen(input);
@@ -411,6 +495,11 @@ int main(int argc, char **argv) {
             if (n_ids <= 0) {
                 pcm_append_silence(&acc, &acc_n, &acc_cap,
                                    22050 * JP_SILENCE_MS / 1000);
+                if (align_ok && u_start) {
+                    size_t us[JP_MAX_UNITS], ue[JP_MAX_UNITS];
+                    if (chunk_units(chunk, nbytes, 0, us, ue, JP_MAX_UNITS) > 0)
+                        align_ok = 0;   /* content chars we cannot span */
+                }
                 continue;
             }
 
@@ -427,6 +516,76 @@ int main(int argc, char **argv) {
                 had_error = 1;
                 break;
             }
+            /* Read-along timing: derive per-character sample spans from the
+             * duration student's per-token output (out.d_hat). */
+            if (align_ok && u_start && n_units < JP_MAX_UNITS) {
+                size_t ustart[JP_MAX_UNITS], uend[JP_MAX_UNITS];
+                int cap = JP_MAX_UNITS - n_units;
+                int un = chunk_units(chunk, nbytes, 0, ustart, uend, cap);
+                long base = (long)acc_n;   /* samples before this chunk */
+                if (un <= 0) {
+                    /* nothing pronounced in this chunk: no units, fine */
+                } else if (route == SAAN_G2P_ROUTE_KANA) {
+                    /* Kana: g2p each unit in isolation for its token count,
+                     * then sum d_hat over that run.  The N-allophone rewrite
+                     * is 1:1 so counts match the whole-chunk stream. */
+                    int32_t cnt[JP_MAX_UNITS];
+                    long sum = 0;
+                    int bad = 0;
+                    for (int uu = 0; uu < un; uu++) {
+                        int32_t uid[512];
+                        int32_t un_ids = 0;
+                        if (saan_g2p(input + ustart[uu] - pos,
+                                     uend[uu] - ustart[uu],
+                                     uid, 512, &un_ids, NULL) != SAAN_OK
+                                || un_ids <= 0) { bad = 1; break; }
+                        cnt[uu] = un_ids;
+                        sum += un_ids;
+                    }
+                    if (bad || sum != n_ids) {
+                        fprintf(stderr, "{\"timing\": \"kana count %ld vs %d\"}\n",
+                                sum, n_ids);
+                        align_ok = 0;
+                    } else {
+                        long idx = 0;
+                        long sstart = 0;
+                        for (int uu = 0; uu < un; uu++) {
+                            long frames = 0;
+                            for (int k = 0; k < cnt[uu]; k++)
+                                frames += out.d_hat[idx + (long)k];
+                            idx += cnt[uu];
+                            u_start[n_units] = base + sstart;
+                            u_end[n_units] = base + sstart + frames * SAAN_HOP_SAMPLES;
+                            n_units++;
+                            sstart += frames * SAAN_HOP_SAMPLES;
+                        }
+                    }
+                } else if (route == SAAN_G2P_ROUTE_DICT) {
+                    /* Kanji chunks: NJD chaining merges word boundaries (は+い
+                     * becomes one node), so exact per-character attribution is
+                     * not derivable; distribute the chunk's duration evenly
+                     * across its units.  Japanese being mora-timed, this
+                     * tracks speech closely except where kanji readings are
+                     * much longer than kana ones. */
+                    long frames_total = 0;
+                    for (int32_t i = 0; i < n_ids; i++) frames_total += out.d_hat[i];
+                    if (frames_total <= 0) align_ok = 0;
+                    else {
+                        long running = 0;
+                        for (int uu = 0; uu < un; uu++) {
+                            long share = frames_total / un;
+                            if (uu == un - 1) share = frames_total - running;
+                            u_start[n_units] = base + running * SAAN_HOP_SAMPLES;
+                            u_end[n_units] = base + (running + share)
+                                             * SAAN_HOP_SAMPLES;
+                            n_units++;
+                            running += share;
+                        }
+                    }
+                } else {
+                    align_ok = 0;
+                }
+            }
             if (pcm_append(&acc, &acc_n, &acc_cap, out.pcm, out.n_samples) != 0)
                 had_error = 1;
             free(arena);
@@ -435,6 +594,24 @@ int main(int argc, char **argv) {
 
         if (acc_n == 0)
             pcm_append_silence(&acc, &acc_n, &acc_cap, 22050 * JP_SILENCE_MS / 1000);
+        /* Read-along timing sidecar, same contract as sanotts/snt_server.c:
+         * written and closed before the WAV path reaches stdout.  One clause
+         * (the request), one span per highlight unit (character). */
+        if (align_ok && n_units > 0 && acc_n > 0) {
+            char tpath[1100];
+            snprintf(tpath, sizeof tpath, "%s.timing", output);
+            FILE *tf = fopen(tpath, "w");
+            if (tf) {
+                fprintf(tf, "sntt 1 22050 %d %zu 1 %d\n",
+                        SAAN_HOP_SAMPLES, acc_n, n_units);
+                fprintf(tf, "c 0 0 0 0 0 %zu 0 %d\n", acc_n, n_units);
+                for (int i = 0; i < n_units; i++)
+                    fprintf(tf, "w %d %ld %ld\n", i, u_start[i], u_end[i]);
+                fclose(tf);
+            }
+        }
+        free(u_start);
+        free(u_end);
         if (write_wav(output, acc, (int)acc_n) != 0) {
             fprintf(stderr, "{\"error\": \"cannot write %s\"}\n", output);
             fflush(stderr);

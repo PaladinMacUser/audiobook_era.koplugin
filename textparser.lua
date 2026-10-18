@@ -548,6 +548,87 @@ Parse text into words with positions.
 @param text string Input text
 @return table Array of word objects
 --]]
+
+-- ── CJK highlight units (Japanese) ──────────────────────────────────────
+-- Japanese has no whitespace words; the read-along highlight works per
+-- character, merging small kana and the long-vowel mark into the preceding
+-- unit and skipping CJK punctuation.  Mirrors the jp server's classifier
+-- (sanotts-jp/snt_jp_server.c) so sidecar spans map one to one.
+
+local function utf8_cp_at(s, i)
+    local b = s:byte(i)
+    if not b then return nil, 0 end
+    if b < 0x80 then return b, 1 end
+    if b < 0xE0 then
+        return (b % 0x20) * 0x40 + ((s:byte(i + 1) or 0) % 0x40), 2
+    end
+    if b < 0xF0 then
+        return (b % 0x10) * 0x1000
+               + ((s:byte(i + 1) or 0) % 0x40) * 0x40
+               + ((s:byte(i + 2) or 0) % 0x40), 3
+    end
+    if b < 0xF8 then
+        return (b % 0x08) * 0x40000
+               + ((s:byte(i + 1) or 0) % 0x40) * 0x1000
+               + ((s:byte(i + 2) or 0) % 0x40) * 0x40
+               + ((s:byte(i + 3) or 0) % 0x40), 4
+    end
+    return b, 1
+end
+
+local function cp_is_small_kana(cp)
+    return cp == 0x3041 or cp == 0x3043 or cp == 0x3045 or cp == 0x3047
+        or cp == 0x3049 or cp == 0x3063 or cp == 0x3083 or cp == 0x3085
+        or cp == 0x3087 or cp == 0x3095 or cp == 0x3096
+        or cp == 0x30A1 or cp == 0x30A3 or cp == 0x30A5 or cp == 0x30A7
+        or cp == 0x30A9 or cp == 0x30C3 or cp == 0x30E3 or cp == 0x30E5
+        or cp == 0x30E7 or cp == 0x30F5 or cp == 0x30F6
+        or (cp >= 0xFF67 and cp <= 0xFF6F)
+end
+
+local function cp_is_prolong(cp)
+    return cp == 0x30FC or cp == 0xFF70
+end
+
+local function cp_is_jp_skip(cp)
+    return cp == 32 or cp == 9 or cp == 10 or cp == 13
+        or cp == 0x3001 or cp == 0x3002
+        or cp == 0xFF0C or cp == 0xFF0E
+        or cp == 0xFF01 or cp == 0xFF1F
+        or cp == 0xFF1B or cp == 0xFF1A
+        or cp == 0x2026 or cp == 0x2015 or cp == 0x2025
+        or (cp >= 0x300C and cp <= 0x300F)
+        or cp == 0xFF08 or cp == 0xFF09
+end
+
+local function cp_is_cjk_content(cp)
+    return (cp >= 0x3041 and cp <= 0x30FF)
+        or (cp >= 0x3400 and cp <= 0x4DBF)
+        or (cp >= 0x4E00 and cp <= 0x9FFF)
+        or (cp >= 0xF900 and cp <= 0xFAFF)
+        or (cp >= 0xFF66 and cp <= 0xFF9D)
+end
+
+-- One highlight unit for Japanese text at byte position i: the character
+-- plus any trailing small kana / long-vowel mark.
+-- Returns unit_end_byte (index of the last byte of the unit).
+local function jp_unit_end(s, i, n)
+    local cp, w = utf8_cp_at(s, i)
+    if not cp or w == 0 then return i end
+    local ue = i + w - 1
+    local j = i + w
+    while j <= n do
+        local c2, w2 = utf8_cp_at(s, j)
+        if c2 and (cp_is_small_kana(c2) or cp_is_prolong(c2)) then
+            ue = j + w2 - 1
+            j = j + w2
+        else
+            break
+        end
+    end
+    return ue
+end
+
 function TextParser:parseWords(text)
     local words = {}
     local word_index = 1
@@ -561,6 +642,46 @@ function TextParser:parseWords(text)
         
         if pos > #text then
             break
+        end
+        
+        -- CJK highlight units: one word per character (small kana and the
+        -- long-vowel mark merge into the preceding unit), skipping CJK
+        -- punctuation.  Mirrors the sanoTTS-jp server's timing units so the
+        -- sidecar spans map one to one.
+        local cp0 = utf8_cp_at(text, pos)
+        if cp0 and cp_is_cjk_content(cp0) then
+            local ue = jp_unit_end(text, pos, #text)
+            local word_text = text:sub(pos, ue)
+            table.insert(words, {
+                index = word_index,
+                text = word_text,
+                clean_text = word_text,
+                start_pos = pos,
+                end_pos = ue,
+                sentence_index = nil,
+                duration = nil,
+                start_time = nil,
+                end_time = nil,
+            })
+            word_index = word_index + 1
+            pos = ue + 1
+            -- Skip CJK punctuation and whitespace after the unit
+            while pos <= #text do
+                local c1, w1 = utf8_cp_at(text, pos)
+                if c1 and cp_is_jp_skip(c1) then
+                    pos = pos + w1
+                else
+                    break
+                end
+            end
+            -- Merge trailing small kana / prolong that follow punctuation
+            if pos <= #text then
+                local c2 = utf8_cp_at(text, pos)
+                if c2 and (cp_is_small_kana(c2) or cp_is_prolong(c2)) then
+                    pos = pos  -- handled as the next unit's base
+                end
+            end
+            goto continue
         end
         
         -- Find word start
@@ -590,6 +711,7 @@ function TextParser:parseWords(text)
             })
             word_index = word_index + 1
         end
+        ::continue::
     end
     
     return words
