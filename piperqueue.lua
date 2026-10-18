@@ -49,6 +49,18 @@ local BATCH_SIZE    = _cpu_cores == 1 and 3 or 1  -- batch more on single-core
 -- overlap work).  On multi-core, depth=2 keeps the server fed while we
 -- process the previous result.
 local MAX_PIPELINE_DEPTH = _cpu_cores == 1 and 1 or 2
+-- The sanoTTS server is internally threaded (SNT_THREADS=2, arm-neon port
+-- patch 0004): on multi-core devices it runs as ONE process covering both
+-- cores, so a second server process would only oversubscribe.  Piper keeps
+-- the one-process-per-core pool.  Resolved per active backend; cleanup
+-- sweeps always cover the larger legacy pool so stale slots from a backend
+-- switch are still reaped.
+local function _pool_count(engine)
+    if engine and engine.backend == engine.BACKENDS.SANOTTS then
+        return 1
+    end
+    return SERVER_COUNT
+end
 
 -- ── PiperQueue class ─────────────────────────────────────────────────
 
@@ -388,9 +400,15 @@ function PiperQueue:buildBaseCommand()
         local espeak_voice_flag = string.format(' --voice "%s"', vcfg.espeak_voice or "en-us")
         local phoneme_flag = vcfg.phonemes and vcfg.phonemes ~= "en"
             and string.format(" --phonemes %s", vcfg.phonemes) or ""
+        -- Thread the sanoTTS server across both cores on multi-core devices
+        -- (arm-neon port, patch 0004).  Older server binaries ignore the
+        -- variable, so setting it unconditionally is safe.  Single-core
+        -- devices keep the serial path: a second thread would only fight
+        -- for the one core.
+        local threads_prefix = _cpu_cores > 1 and "SNT_THREADS=2 " or ""
         return string.format(
-            'nice -n 19 %s%s --model "%s" --espeak-bin "%s" --espeak-data "%s"%s%s%s%s',
-            exec_prefix, engine.sanotts_server, engine.sanotts_voice_dir,
+            '%snice -n 19 %s%s --model "%s" --espeak-bin "%s" --espeak-data "%s"%s%s%s%s',
+            threads_prefix, exec_prefix, engine.sanotts_server, engine.sanotts_voice_dir,
             espeak_bin, espeak_data, loader_flag, engine_args,
             espeak_voice_flag, phoneme_flag)
     end
@@ -502,7 +520,8 @@ Pick the next server (round-robin).
 @return number  1-based server id
 --]]
 function PiperQueue:_pickServer()
-    self._server_rr = (self._server_rr or 0) % SERVER_COUNT + 1
+    local count = _pool_count(self.engine)
+    self._server_rr = (self._server_rr or 0) % count + 1
     return self._server_rr
 end
 
@@ -582,8 +601,9 @@ function PiperQueue:startServers()
         return
     end
 
+    local pool = _pool_count(engine)
     logger.warn("PiperQueue: CPU cores:", _cpu_cores,
-                "→ SERVER_COUNT:", SERVER_COUNT,
+                "→ SERVER_COUNT:", pool,
                 "BATCH_SIZE:", self:_batchSize())
 
     self._servers_starting = true
@@ -595,7 +615,7 @@ function PiperQueue:startServers()
     os.execute("killall -9 piper snt_server snt_jp_server 2>/dev/null")
     -- Also kill orphan server shell wrappers from a previous crash.
     -- These are /bin/sh processes not caught by killall piper.
-    for i = 1, SERVER_COUNT do
+    for i = 1, math.max(SERVER_COUNT, pool) do
         local fifo = SERVER_PREFIX .. i
         local pid_file = fifo .. ".pid"
         local piper_pid_file = fifo .. ".piper_pid"
@@ -622,7 +642,7 @@ function PiperQueue:startServers()
 
     local base_cmd = self:buildBaseCommand()
 
-    for i = 1, SERVER_COUNT do
+    for i = 1, pool do
         local fifo = SERVER_PREFIX .. i
         local script_path = fifo .. ".sh"
         local pid_file = fifo .. ".pid"
@@ -690,7 +710,7 @@ rm -f "$FIFO" "${FIFO}.pid" "${FIFO}.piper_pid"
     local start_time = UIManager:getTime()
     local function checkServersReady()
         local all_ready = true
-        for i = 1, SERVER_COUNT do
+        for i = 1, pool do
             if not pq._servers[i] then
                 local pid_file = SERVER_PREFIX .. i .. ".pid"
                 local pf = io.open(pid_file, "r")
@@ -740,7 +760,7 @@ rm -f "$FIFO" "${FIFO}.pid" "${FIFO}.piper_pid"
             -- latched would drop the session into slow per-process mode after
             -- any deliberate restart (for example a speed change).
             pq._server_start_attempts = 0
-            logger.warn("PiperQueue: All", SERVER_COUNT,
+            logger.warn("PiperQueue: All", pool,
                 "servers ready in",
                 time.to_ms(UIManager:getTime() - start_time), "ms")
             pq:launchNext()
@@ -766,8 +786,9 @@ Stop persistent Piper servers.
 function PiperQueue:stopServers()
     -- No early return: even if we think servers aren't running, there may
     -- be orphan processes from a previous crash.  Always kill by PID file
-    -- and killall to be safe.
-    for i = 1, SERVER_COUNT do
+    -- and killall to be safe.  Sweep the larger legacy pool so slots from a
+    -- backend switch are reaped too.
+    for i = 1, math.max(SERVER_COUNT, _pool_count(self.engine)) do
         local server = self._servers and self._servers[i]
         if server and server.pid then
             os.execute(string.format("kill %d 2>/dev/null", server.pid))
@@ -1174,7 +1195,7 @@ function PiperQueue:launchNext()
     end
 
     local max_concurrent = self._servers_running
-        and (SERVER_COUNT * MAX_PIPELINE_DEPTH) or 2
+        and (_pool_count(engine) * MAX_PIPELINE_DEPTH) or 2
     self._slots_busy = self._slots_busy or 0
     if self._slots_busy >= max_concurrent then return end
 
@@ -1209,7 +1230,7 @@ function PiperQueue:launchNext()
         local ok = self:_writeToPiperFifo(server_id, json_line)
         if not ok then
             logger.warn("PiperQueue: Server", server_id, "FIFO dead, trying alternate")
-            for alt = 1, SERVER_COUNT do
+            for alt = 1, _pool_count(engine) do
                 if alt ~= server_id then
                     ok = self:_writeToPiperFifo(alt, json_line)
                     if ok then
