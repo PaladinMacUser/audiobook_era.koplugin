@@ -109,7 +109,7 @@ old lock's error band).
 | M1 | `audioout` daemon (MTK, WAV/raw PCM clips, queue, pause via feed-stop + silence, real position, deterministic completion) + `audioout.lua` client + TTS path wired | TTS read-along on MTK with a real clock |
 | M2 | MediaEngine wired (ffmpeg decodes to raw PCM piped into the daemon), seek support | audiobook playback on MTK |
 | M3 | Orphan sweep knows the daemon; bugreport/generate-report audioout sections. Pipeline deletion REVISED: the wrapper paths stay as the session fallback (daemon missing, BT disconnected, start failure all route there); deletion is deferred until v0.3.0 has soaked | diagnostics + lifecycle |
-| M4 | BlueZ Kobo (ALSA/BlueALSA output inside the same daemon, reusing `wav-play.c`'s ALSA block) | second platform |
+| M4 | BlueZ Kobo (ALSA/BlueALSA output inside the same daemon, reusing `wav-play.c`'s ALSA block) | second platform. DEFERRED past v0.3.0 (user decision 2026-10-18): no BlueZ unit available to validate; v0.3.0 ships MTK-only, and the setting stays off on non-MTK devices |
 | later | Kindle (mixersink via dlopen), PocketBook, Android | - |
 
 ## Release
