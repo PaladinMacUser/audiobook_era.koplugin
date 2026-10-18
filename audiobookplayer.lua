@@ -1795,6 +1795,11 @@ function AudiobookPlayer:_ttsInfoLines()
         -- Single bring-your-own-weights voice: there is no espeak label to
         -- show, and printing one would be wrong.
         voice = nil
+    elseif backend == "espeak" and p:getSetting("tts_mbrola_voice", "") ~= "" then
+        -- MBROLA rides on the espeak backend, but tts_voice_label names the
+        -- last plain espeak voice (stale and unrelated here); the MBROLA
+        -- picker stores its own label.
+        voice = p:getSetting("tts_mbrola_voice_label", "")
     else
         voice = p:getSetting("tts_voice_label", "")
     end

@@ -372,8 +372,10 @@ MBROLA_DATA_DEST="$ESPEAK_DEST/share/mbrola"
 mkdir -p "$MBROLA_DATA_DEST"
 MBROLA_BASE_URL="https://raw.githubusercontent.com/numediart/MBROLA-voices/master/data"
 
-# Default bundled voices: 2 US English, 1 French, 1 German, 1 Spanish, 1 Chinese, 1 Portuguese
-DEFAULT_MBROLA_VOICES="us1 us2 fr1 de1 es1 cn1 pt1"
+# Default bundled voices: UK English (en1: the recommended MTK voice and the
+# only one the MTK menu offers), 2 US English, 1 French, 1 German, 1 Spanish,
+# 1 Chinese, 1 Portuguese
+DEFAULT_MBROLA_VOICES="en1 us1 us2 fr1 de1 es1 cn1 pt1"
 for voice in $DEFAULT_MBROLA_VOICES; do
     voice_dir="$MBROLA_DATA_DEST/$voice"
     mkdir -p "$voice_dir"
