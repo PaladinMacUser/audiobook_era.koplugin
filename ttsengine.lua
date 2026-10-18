@@ -4386,6 +4386,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
             local engine = self
             local stall_since_ms = nil
             local last_seen_pos = nil
+            local status_failures = 0
             local function pollAudiooutCompletion()
                 if (engine.play_generation or 0) ~= my_gen then return end
                 if not engine.is_speaking then return end
@@ -4401,9 +4402,28 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                     if on_fail then on_fail() end
                     return
                 end
+                -- Short timeout + failure cap: a wedged daemon must cost
+                -- the UI a bounded number of half-second stalls, never an
+                -- unresponsive device.
                 local st = engine._audioout_client
-                    and engine._audioout_client:status()
-                if st and st.unpaced then
+                    and engine._audioout_client:status(500)
+                if not st then
+                    status_failures = status_failures + 1
+                    if status_failures >= 8 then
+                        logger.warn("TTSEngine: audioout status unreachable x8; failing")
+                        engine._audioout_client:stopDaemon()
+                        engine.is_speaking = false
+                        if on_fail then on_fail() end
+                        return
+                    end
+                    UIManager:scheduleIn(0.25, pollAudiooutCompletion)
+                    return
+                end
+                status_failures = 0
+                -- unpaced arrives as a number (0/1) and 0 is truthy in
+                -- Lua: compare explicitly or every play "fails".
+                local unpaced = st and (tonumber(st.unpaced) or 0) or 0
+                if unpaced ~= 0 then
                     -- The sink is swallowing buffers without pacing (dead
                     -- A2DP peer the connection manager still lists).  Fail
                     -- into the legacy path, whose premature-exit detection

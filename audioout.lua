@@ -140,6 +140,20 @@ function AudioOut:start()
         end
         ffi.C.usleep(100 * 1000)
     end
+    -- A wedged daemon process answers nothing and blocks the socket: kill
+    -- it, clear the path, spawn once more.
+    logger.warn("AudioOut: daemon not up; killing stale instance and retrying")
+    os.execute("killall -9 audioout 2>/dev/null; rm -f " .. self.socket_path)
+    os.execute(cmd)
+    attempts = math.ceil(self.STARTUP_WAIT_MS / 100)
+    while attempts > 0 do
+        attempts = attempts - 1
+        if self:isRunning() then
+            logger.warn("AudioOut: daemon up after stale kill")
+            return true
+        end
+        ffi.C.usleep(100 * 1000)
+    end
     return nil, "daemon did not come up"
 end
 
@@ -188,7 +202,9 @@ end
 function AudioOut:setVolume(v)
     return self:_command({ cmd = "volume", value_x1000 = math.floor(v * 1000 + 0.5) })
 end
-function AudioOut:status() return self:_command({ cmd = "status" }) end
+function AudioOut:status(timeout_ms)
+    return self:_command({ cmd = "status" }, timeout_ms)
+end
 function AudioOut:takeEvent()
     local e = self._last_event
     self._last_event = nil
