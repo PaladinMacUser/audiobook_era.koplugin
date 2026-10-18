@@ -109,14 +109,44 @@ old lock's error band).
 | M1 | `audioout` daemon (MTK, WAV/raw PCM clips, queue, pause via feed-stop + silence, real position, deterministic completion) + `audioout.lua` client + TTS path wired | TTS read-along on MTK with a real clock |
 | M2 | MediaEngine wired (ffmpeg decodes to raw PCM piped into the daemon), seek support | audiobook playback on MTK |
 | M3 | Orphan sweep knows the daemon; bugreport/generate-report audioout sections. Pipeline deletion REVISED: the wrapper paths stay as the session fallback (daemon missing, BT disconnected, start failure all route there); deletion is deferred until v0.3.0 has soaked | diagnostics + lifecycle |
-| M4 | BlueZ Kobo (ALSA/BlueALSA output inside the same daemon, reusing `wav-play.c`'s ALSA block) | second platform. DEFERRED past v0.3.0 (user decision 2026-10-18): no BlueZ unit available to validate; v0.3.0 ships MTK-only, and the setting stays off on non-MTK devices |
+| M4 | BlueZ Kobo (ALSA/BlueALSA output inside the same daemon) | implemented post-v0.3.0 (commit `22c8d81`): output auto-detects, bluealsa PCM via dlopen'd libasound, hardware-delay clock; TTS read-along and media path wired. BlueZ hardware validation still pending (needs a Libra 2, Io or Sage) |
 | later | Kindle (mixersink via dlopen), PocketBook, Android | - |
 
 ## Release
 
-Tier 2 ships as **v0.3.0** (user decision, 2026-10-15): bump `_meta.lua`,
-tag `v0.3.0`, push GitHub + Forgejo in one operation once CI on the
-previous release is green.
+**v0.3.0 shipped 2026-10-18**: tag `3d39689`, CI green (2h03m). Contains
+the daemon, the TTS and media wiring, the sync clock, the diagnostics and
+the live-testing hardening through `5f811ae`. Post-release master carries:
+M4 BlueZ (`22c8d81`), int8 word timing (`a99e63c`), the BlueZ media path
+(`c5db6f6`), the external per-play device fix (`1fbaaa2`), the wrapper
+deletion with the daemon as default (`f2b97a0`), the MBROLA en1 bundling
+and bar label fix (`2cc7a8e`), and the jp per-character timing (`96e6dc5`)
+— queued for v0.3.1 after the soak.
+
+## sanoTTS-jp per-character timing (2026-10-18)
+
+Japanese has no whitespace words, so the highlight unit is the character.
+The jp core already returned per-token durations in `saan_output.d_hat`;
+no core changes were needed. The server (`snt_jp_server.c`) now writes the
+same sidecar as the other engines:
+
+- Kana chunks: per-unit token counts from per-unit `saan_g2p` calls, summed
+  against the whole-chunk `d_hat` stream — exact.
+- Kanji chunks: NJD chaining merges word boundaries (`は`+`い` becomes one
+  node whose surface no longer exists in the text), so exact per-character
+  attribution is not derivable; the chunk's duration is distributed evenly
+  across its units.
+- Unit rule (identical in the server's C and the plugin's Lua): every
+  character except whitespace and CJK punctuation, with small kana and the
+  long-vowel mark merged into the preceding unit.
+- Client: `TextParser:parseWords` emits the same units as words for CJK
+  runs, and the timing build accepts either the whitespace word count or
+  the jp unit count.
+
+Verified on device with Japanese text (18 units for a 19-character
+sentence, `しょ` merged). Kanji-heavy mixed text is evenly distributed per
+unit rather than mora-weighted; refining that would need per-node readings,
+which NJD chaining does not expose.
 
 ## M2/M3 status (2026-10-16)
 
