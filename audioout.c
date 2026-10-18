@@ -980,8 +980,19 @@ handle_command(char *line) {
     } else if (!strcmp(cmd, "external")) {
         long long rate = json_num(line, "rate", g_rate);
         long long channels = json_num(line, "channels", g_channels);
+        char alsa_dev[MAX_PATH] = "";
+        json_find(line, "alsa_device", alsa_dev, sizeof alsa_dev);
         drop_queue();
-        if (!S.pipe || (int)rate != S.pipe_rate ||
+        if (S.out_alsa) {
+            const char *dev = (alsa_dev[0] || S.alsa_device[0])
+                ? (alsa_dev[0] ? alsa_dev : S.alsa_device) : "default";
+            if (fifo_open() != 0 || alsa_open(dev, (int)rate, (int)channels) != 0) {
+                respond("{\"ok\":false,\"error\":\"alsa open failed\"}");
+                return;
+            }
+            g_rate = (int)rate;
+            g_channels = (int)channels;
+        } else if (!S.pipe || (int)rate != S.pipe_rate ||
                 (int)channels != S.pipe_channels) {
             pipeline_teardown();
             g_rate = (int)rate;
