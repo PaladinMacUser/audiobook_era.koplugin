@@ -2366,73 +2366,6 @@ local PIPELINE_RETRY_COOLDOWN_S = 30  -- minimum seconds between retry attempts
 -- On Kobo MTK devices these errors occur when the stock OS (Nickel) has
 -- not initialized the Bluetooth firmware, leaving required configuration
 -- files missing or kernel FIFO channels uninitialized.
-local MTK_FATAL_ERRORS = {
-    "init mtx error",
-    "bt_fw_fatures",
-    "bt_fw_features",
-    "FifoManager:initMtx",
-    "init mtx error No such file or directory",
-}
-
--- === Persistent BT Pipeline Constants ===
--- Instead of launching a new gst-launch for each sentence (which crashes
--- when BT A2DP disconnects during gaps), maintain a single persistent
--- pipeline.  A feeder script writes silence (keeping BT alive) and
--- switches to real audio on demand.  gst-launch never stops.
-local PIPE_BUFFER_DELAY_64KB = 1500 -- 64KB pipe buffer at 44100 B/s ≈ 1.45s
-local PIPE_BUFFER_DELAY_16KB = 370  -- 16KB pipe buffer at 44100 B/s ≈ 370ms
---- Compute pipe buffer delay for a given sample rate and buffer size.
--- @param sample_rate number  Audio sample rate (default 22050)
--- @param buf_kb number  Pipe buffer size in KB (16 or 64)
--- @return number  Delay in milliseconds
-local function pipeBufferDelay(sample_rate, buf_kb)
-    local byte_rate = (sample_rate or 22050) * 2  -- 16-bit mono
-    return math.floor((buf_kb * 1024) / byte_rate * 1000)
-end
-local PIPELINE_CTRL_DIR = "/tmp/audiobook_ctrl"
-local PIPELINE_FIFO = "/tmp/audiobook_fifo"
-local PIPELINE_SCRIPT = "/tmp/audiobook_pipeline.sh"
-
---- Show a modal error informing the user that the MTK Bluetooth firmware
--- file is missing and they need to boot into Nickel to initialize it.
--- This is shown when the pipeline fails with a fatal firmware error so
--- the user has a clear, actionable message instead of a silent failure.
-function TTSEngine:_showMtkFirmwareError()
-    local InfoMessage = require("ui/widget/infomessage")
-    local UIManager = require("ui/uimanager")
-    UIManager:show(InfoMessage:new{
-        text = _(
-            "Bluetooth audio pipeline failed.\n\n"
-            .. "Your Kobo's Bluetooth firmware is not initialized. "
-            .. "This happens when KOReader is used without first "
-            .. "running the stock Kobo OS (Nickel).\n\n"
-            .. "To fix this:\n"
-            .. "1. Fully power off your Kobo\n"
-            .. "2. Turn it on and boot normally into Nickel\n"
-            .. "3. Go to Settings → Bluetooth and turn it ON\n"
-            .. "4. If you have Bluetooth headphones, pair them now\n"
-            .. "5. Once Bluetooth is working in Nickel, reboot into "
-            .. "KOReader\n\n"
-            .. "Read-along audio playback has been stopped."
-        ),
-        timeout = 15,
-    })
-    -- Also flag player_error so the sync controller / playback bar
-    -- can show a persistent status indicator.
-    self.player_error = "bt_firmware_missing"
-end
-
---- Play a sentence served from the Android background prefetch slot.
---- The WAV was synthesized by synthesizeToFile while the previous sentence
---- played; no pipeline was dispatched for this sentence, so the Java-side
---- pipeline status is stale from the last one and cannot be polled.  Play
---- the file via MediaPlayer (playFile) and poll isPlaybackDone instead.
---- Launch failures remove the file and return false: the sentence controller
---- routes a false play() return through its Android retry path
---- (_onAndroidSynthFailed), which resynthesizes on demand.
---- @param atts table AndroidTts instance
---- @param my_gen number play_generation captured by the caller
---- @return boolean true when playback was launched
 function TTSEngine:_playAndroidSlotClip(atts, my_gen)
     local engine = self
     local file_path = self.current_audio_file
@@ -2580,9 +2513,8 @@ end
 function TTSEngine:_useAudioOut()
     -- Session-only degradation: once the daemon path failed this session,
     -- stay on the legacy path until the next session (fallback policy).
-    if self.use_audioout_fallback then return false end
     if not (self.plugin and self.plugin.getSetting
-            and self.plugin:getSetting("audioout_enabled", false)) then
+            and self.plugin:getSetting("audioout_enabled", true)) then
         return false
     end
     if self.audio_player_type ~= "gst-bt" then return false end
@@ -4330,8 +4262,9 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         end
         local ao = self:_getAudioOut()
         if not ao then
-            logger.warn("TTSEngine: audioout unavailable; falling back for this session")
-            self.use_audioout_fallback = true   -- session-only degradation
+            logger.warn("TTSEngine: audioout unavailable")
+            if on_fail then on_fail() end
+            return false
         else
             if self._completion_timer_fn then
                 UIManager:unschedule(self._completion_timer_fn)
@@ -4482,148 +4415,6 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         -- fall through to the legacy gst-bt path on session fallback
     end
 
-    if self.audio_player_type == "gst-bt" then
-        -- Handle WAV merge for concatenated sentences
-        if concat_files and #concat_files > 0 then
-            self:mergeWavFiles(concat_files)
-            self._concat_durations = { self._current_audio_duration_ms }
-            for _, cf in ipairs(concat_files) do
-                table.insert(self._concat_durations, cf.duration_ms)
-            end
-            logger.dbg("TTSEngine: Merged", 1 + #concat_files, "sentences, durations=",
-                table.concat(self._concat_durations, "+"))
-        else
-            self._concat_durations = nil
-        end
-        -- Calculate expected audio duration from actual WAV file.
-        -- After mergeWavFiles(), the main WAV includes all silence padding
-        -- (inter-sentence gaps, first-sentence padding, trailing gap).
-        -- Reading the WAV header gives the true total duration, avoiding
-        -- the bug where first-sentence padding was excluded from the sum.
-        self._expected_play_duration_ms = self:getAudioDurationMs()
-        -- Detect the actual sample rate of the audio file so the persistent
-        -- pipeline's rawaudioparse element uses the correct rate.
-        -- MBROLA voices typically output at 16000 Hz, not 22050 Hz.
-        if self.current_audio_file then
-            self._target_sample_rate = WavUtils.readSampleRateFromPath(self.current_audio_file)
-            if self._target_sample_rate <= 0 then
-                self._target_sample_rate = 22050
-            end
-        end
-        -- Cancel any pending callbacks from previous play()
-        if self._completion_timer_fn then
-            UIManager:unschedule(self._completion_timer_fn)
-            self._completion_timer_fn = nil
-        end
-        if self._pending_launch_fn then
-            UIManager:unschedule(self._pending_launch_fn)
-            self._pending_launch_fn = nil
-        end
-        -- Ensure the persistent pipeline is running
-        if not self:_ensurePersistentPipeline() then
-            logger.err("TTSEngine: Failed to start persistent pipeline")
-            self.is_speaking = false
-            if on_fail then on_fail() end
-            return false
-        end
-        -- Bump generation to invalidate stale callbacks
-        self.play_generation = (self.play_generation or 0) + 1
-        local my_gen = self.play_generation
-        -- BT latency: pipe buffer + ring buffer (~200ms)
-        self.playback_latency_ms = (self._pipe_buffer_delay_ms or PIPE_BUFFER_DELAY_64KB) + 200
-        logger.dbg("TTSEngine: play() pre-launch took", time.to_ms(UIManager:getTime() - t0), "ms")
-        -- Feed audio to the persistent pipeline
-        os.remove(PIPELINE_CTRL_DIR .. "/done")
-        local ctrl_f = io.open(PIPELINE_CTRL_DIR .. "/play", "w")
-        if ctrl_f then
-            ctrl_f:write(self.current_audio_file)
-            ctrl_f:close()
-        end
-        self._audio_launched_at = UIManager:getTime()
-        self._total_pause_ms = 0  -- reset accumulated pause time for this sentence
-        logger.warn("TTSEngine: play() fed to pipeline, dur=",
-            self._expected_play_duration_ms, "ms, gen=", my_gen,
-            "piper_q=", self:getPiperQueueSnapshot())
-        -- Poll for feeder 'done' file — logs when feeder finished writing
-        -- PCM to the FIFO.  This tells us the real latency from play() to
-        -- audio-data-in-pipeline.  Does NOT affect completion timing.
-        local feed_start = UIManager:getTime()
-        local feed_gen = my_gen
-        local feed_engine = self
-        local function pollFeederDone()
-            if (feed_engine.play_generation or 0) ~= feed_gen then return end
-            local df = io.open(PIPELINE_CTRL_DIR .. "/done", "r")
-            if df then
-                df:close()
-                local feed_ms = time.to_ms(UIManager:getTime() - feed_start)
-                logger.warn("TTSEngine: Feeder done in", feed_ms, "ms (gen=", feed_gen, ")")
-                return
-            end
-            UIManager:scheduleIn(0.05, pollFeederDone)
-        end
-        UIManager:scheduleIn(0.1, pollFeederDone)
-
-        -- Start timing loop for word highlighting
-        self:startTimingLoop()
-
-        -- Duration-based completion: fire onPlaybackComplete when the
-        -- SPEECH portion of the audio has finished playing through the
-        -- speaker.
-        --
-        -- The expected duration includes all silence padding (inter-sentence
-        -- gaps + trailing gap).  We SUBTRACT the trailing gap so that
-        -- readNextSentence can start preparing the next audio while the
-        -- trailing gap silence is still draining through the pipe buffer.
-        -- This eliminates ~700ms of extra dead silence that would otherwise
-        -- accumulate between concat groups: without the subtraction, the
-        -- feeder idles (writing silence) during the trailing gap + the
-        -- completion margin, and that idle silence fills the pipe buffer,
-        -- delaying the start of the next sentence's audio.
-        --
-        -- The pipe buffer adds ~512ms of latency.  Add it plus a small
-        -- margin so the speech audio has fully drained to the speaker.
-        local pipe_buf_ms = self._pipe_buffer_delay_ms or PIPE_BUFFER_DELAY_64KB
-        local trailing_gap_ms = self._trailing_gap_ms or 0
-        self._trailing_gap_ms = nil
-        local completion_delay_s = (self._expected_play_duration_ms / 1000)
-            - (trailing_gap_ms / 1000)
-            + (pipe_buf_ms / 1000) + 0.15
-        local engine = self
-        local needed_ms = engine._expected_play_duration_ms
-            - trailing_gap_ms + pipe_buf_ms + 150
-        local function fireCompletion()
-            if (engine.play_generation or 0) ~= my_gen then return end
-            if not engine.is_speaking then return end
-            if engine.is_paused then
-                UIManager:scheduleIn(0.5, fireCompletion)
-                return
-            end
-            -- Verify enough real playback time has elapsed (excluding
-            -- time spent paused via SIGSTOP).  Without this check,
-            -- resuming from pause fires completion immediately and
-            -- overlaps the next sentence with the current one.
-            if engine._audio_launched_at then
-                local wall_ms = time.to_ms(UIManager:getTime() - engine._audio_launched_at)
-                local real_ms = wall_ms - (engine._total_pause_ms or 0)
-                if real_ms < needed_ms then
-                    local wait_s = (needed_ms - real_ms) / 1000
-                    if wait_s < 0.2 then wait_s = 0.2 end
-                    UIManager:scheduleIn(wait_s, fireCompletion)
-                    return
-                end
-            end
-            logger.dbg("TTSEngine: Pipeline completion (duration-based,",
-                engine._expected_play_duration_ms, "ms - trailing_gap",
-                trailing_gap_ms, "ms + pipe_buf",
-                pipe_buf_ms, "ms)")
-            engine:onPlaybackComplete()
-        end
-        engine._completion_timer_fn = fireCompletion
-        UIManager:scheduleIn(completion_delay_s, fireCompletion)
-
-        return true
-    end
-
     -- === POCKETBOOK INKVIEW PLAYFILE PATH ===
     -- Routes audio through the PocketBook audio daemon (mpd.app) via the
     -- InkView PlayFile FFI call.  Uses duration-based completion with
@@ -4765,7 +4556,6 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     -- Stop BT keepalive (if running or scheduled).  If the keepalive was
     -- holding the socket, _socket_clean is already false and the normal
     -- kill+wait logic below will handle the socket release delay.
-    self:_stopBtKeepalive()
 
     -- Force-kill any lingering audio — SIGKILL + killall to release the
     -- @kobo:mtkbtmwrpc abstract socket held by stale gst-launch processes.
@@ -6437,8 +6227,6 @@ an abstract UNIX socket (@kobo:mtkbtmwrpc) that isn't released on graceful
 shutdown fast enough, causing "Address already in use" for the next launch.
 --]]
 function TTSEngine:_killAudioProcess()
-    -- Don't kill the persistent pipeline's gst-launch
-    if self._persistent_pipeline then return end
     local had_pid = self.audio_pid ~= nil
     if self.audio_pid then
         os.execute("kill -9 " .. self.audio_pid .. " 2>/dev/null")
@@ -6463,62 +6251,6 @@ connection alive.  Without this, the BT audio sink disconnects after
 ~1-2s of idle time, causing the next gst-launch to crash.
 Called from onPlaybackComplete via a short delay — if the next sentence
 is immediately ready, play() cancels this before it starts.
---]]
-function TTSEngine:_startBtKeepalive()
-    if self.audio_player_type ~= "gst-bt" then return end
-    -- Don't start if there's already a keepalive running
-    if self._bt_keepalive_pid then return end
-    -- Create a long silence WAV once (120 seconds, covers any Piper wait)
-    if not self._keepalive_wav then
-        self._keepalive_wav = self:generateSilenceWav(120000)
-    end
-    if not self._keepalive_wav then return end
-    local cmd = string.format(
-        'gst-launch-1.0 filesrc location="%s" ! wavparse ! audioconvert ! audioresample'
-        .. ' ! "audio/x-raw,format=S16LE,rate=48000,channels=2" ! mtkbtmwrpcaudiosink'
-        .. ' >/dev/null 2>/dev/null & echo $!',
-        self._keepalive_wav
-    )
-    local h = io.popen(cmd)
-    local pid_str = h and h:read("*a") or ""
-    if h then h:close() end
-    self._bt_keepalive_pid = tonumber(pid_str:match("(%d+)"))
-    -- Socket is now held by keepalive — NOT clean
-    self._socket_clean = false
-    logger.warn("TTSEngine: BT keepalive started, PID=", self._bt_keepalive_pid)
-end
-
---[[--%nStop the BT keepalive silence process.
---]]
-function TTSEngine:_stopBtKeepalive()
-    -- Cancel any pending scheduled start
-    if self._keepalive_scheduled_fn then
-        UIManager:unschedule(self._keepalive_scheduled_fn)
-        self._keepalive_scheduled_fn = nil
-    end
-    if self._bt_keepalive_pid then
-        os.execute("kill -9 " .. self._bt_keepalive_pid .. " 2>/dev/null")
-        self._bt_keepalive_pid = nil
-        self._last_audio_kill_time = UIManager:getTime()
-        logger.warn("TTSEngine: BT keepalive stopped")
-    end
-end
-
---[[--
-Write the persistent BT pipeline feeder script to /tmp.
-The script starts gst-launch reading from a named FIFO and feeds it
-raw PCM (silence when idle, real audio when playing).
---]]
---[[--
-GStreamer `volume` element fragment for the current speech level, or "" when
-the element is unavailable.  The element ships in gst-plugins-base, but a
-stripped firmware build may lack it: probe once and fall back to unity rather
-than risk a pipeline that refuses to start.
-
-Needed because speech_volume had no audible effect on the BT paths.  The
-espeak backend bakes the level into synthesis via `-a`, but Piper's WAV goes
-straight through the gst pipeline, where nothing applied it.
---]]
 function TTSEngine:_gstVolumeFragment()
     if self._gst_volume_available == nil then
         local h = io.popen("gst-inspect-1.0 volume 2>/dev/null | head -1")
@@ -6530,422 +6262,6 @@ function TTSEngine:_gstVolumeFragment()
     local v = math.max(0.0, math.min(1.0, self.volume or 1.0))
     return string.format(" ! volume volume=%.3f", v)
 end
-
-function TTSEngine:_writePipelineScript()
-    local sr = self._pipeline_sample_rate or 22050
-    -- Silence chunk: ~50ms at sample rate, 16-bit mono
-    -- MUST be even (multiple of block_align=2) to preserve PCM sample alignment!
-    local silence_samples = math.floor(sr * 0.05)
-    local silence_bytes = silence_samples * 2
-    -- Digital gain element (see _gstVolumeFragment).  Empty when the
-    -- device's GStreamer has no `volume` element, so a stripped build can
-    -- never stop playback.
-    local vol_frag = self:_gstVolumeFragment()
-    local vol_elem = vol_frag ~= "" and (vol_frag .. " \\\n") or ""
-    local script = string.format([=[
-#!/bin/sh
-CTRL="/tmp/audiobook_ctrl"
-FIFO="/tmp/audiobook_fifo"
-mkdir -p "$CTRL"
-rm -f "$CTRL/stop" "$CTRL/play" "$CTRL/pause" "$CTRL/done" "$CTRL/gst_pid"
-rm -f "$FIFO"
-mkfifo "$FIFO"
-# Silence chunk: ~50ms at %dHz 16-bit mono = %d samples × 2 bytes = %d bytes
-dd if=/dev/zero bs=%d count=1 of="$CTRL/s.raw" 2>/dev/null
-# Start gst-launch reading raw PCM from FIFO.
-# sync=false — let the BT A2DP hardware clock control the playback rate
-# via socket backpressure, instead of GStreamer's pipeline clock.
-# The Lua caller shrinks the pipe buffer to 16KB via
-# fcntl(F_SETPIPE_SZ) to reduce latency while keeping enough headroom
-# to absorb CPU stalls during Piper synthesis.
-#
-# Pause is handled by feeding silence, never by freezing gst-launch.
-# SIGSTOP freezes the whole process, so it stops writing to the MTK
-# Bluetooth sink, and the sink underruns and comes back latched with
-# garbled audio for the rest of the session (only a fresh session clears
-# it).  Instead this script keeps gst-launch running and, on pause, stops
-# feeding the clip and feeds silence chunks into the FIFO so the sink
-# stays fed.  Resume continues the clip where it stopped.
-gst-launch-1.0 filesrc location="$FIFO" \
-  ! rawaudioparse use-sink-caps=false format=pcm pcm-format=s16le sample-rate=%d num-channels=1 \
-  ! audioconvert ! audioresample \
-  ! "audio/x-raw,format=S16LE,rate=48000,channels=2" \
-%s  ! queue max-size-time=500000000 max-size-bytes=131072 \
-  ! mtkbtmwrpcaudiosink sync=false >/dev/null 2>"$CTRL/pipeline_stderr" &
-GST_PID=$!
-# Open FIFO write end — keeps it alive between individual writes.
-# This BLOCKS until gst-launch opens the read end (filesrc start).
-exec 3>"$FIFO"
-# Signal Lua AFTER the FIFO is fully set up (both ends open).
-# Lua uses the gst_pid file as a "ready" indicator before trying to
-# open(O_WRONLY|O_NONBLOCK) on the FIFO for pipe buffer resize.
-echo $GST_PID > "$CTRL/gst_pid"
-cleanup() { exec 3>&- 2>/dev/null; kill $GST_PID 2>/dev/null; rm -f "$FIFO" "$CTRL/s.raw" "$CTRL/gst_pid" "$CTRL/pipeline_stderr" "$CTRL/pause"; }
-trap cleanup EXIT TERM
-# Track total bytes written to detect/fix alignment
-TOTAL_BYTES=0
-# Feeder loop: continuous silence when idle, real audio when play file appears.
-# usleep 1000 (1ms) prevents CPU busy-spin during initial pipe fill.
-while kill -0 $GST_PID 2>/dev/null && [ ! -f "$CTRL/stop" ]; do
-  if [ -f "$CTRL/play" ]; then
-    FILE=$(cat "$CTRL/play")
-    rm -f "$CTRL/play" "$CTRL/done"
-    # If total bytes written so far is odd, write 1 zero byte to re-align
-    ODD=$((TOTAL_BYTES %% 2))
-    if [ "$ODD" -ne 0 ]; then
-      printf '\0' >&3
-      TOTAL_BYTES=$((TOTAL_BYTES + 1))
-    fi
-    # Get audio data size (file size minus 44-byte WAV header)
-    FSIZE=$(wc -c < "$FILE")
-    DSIZE=$((FSIZE - 44))
-    # Write the PCM in chunks instead of one tail, so a pause can stop
-    # feeding audio without freezing gst-launch.  4096 16-bit samples is
-    # ~186 ms at 22050 Hz: short enough that a pause lands quickly, long
-    # enough to keep the fork rate low on a single-core Kobo.
-    OFF=0
-    while [ "$OFF" -lt "$DSIZE" ]; do
-      # 44-byte header + OFF is even, so bs=2 skip counts whole samples.
-      dd if="$FILE" bs=2 skip=$(((44 + OFF) / 2)) count=4096 2>/dev/null >&3
-      OFF=$((OFF + 8192))
-      if [ -f "$CTRL/pause" ]; then
-        while [ -f "$CTRL/pause" ] && [ ! -f "$CTRL/stop" ]; do
-          cat "$CTRL/s.raw" >&3
-          usleep 20000
-        done
-      fi
-      [ -f "$CTRL/stop" ] && break
-    done
-    TOTAL_BYTES=$((TOTAL_BYTES + DSIZE))
-    touch "$CTRL/done"
-  else
-    cat "$CTRL/s.raw" >&3
-    TOTAL_BYTES=$((TOTAL_BYTES + %d))
-    usleep 1000
-  fi
-done
-]=], sr, silence_samples, silence_bytes, silence_bytes, sr, vol_elem, silence_bytes)
-    local f = io.open(PIPELINE_SCRIPT, "w")
-    if not f then return false end
-    f:write(script)
-    f:close()
-    os.execute("chmod +x " .. PIPELINE_SCRIPT)
-    return true
-end
-
---[[--
-Check stderr output from a failed MTK pipeline for fatal firmware errors
-that indicate a permanent (not transient) failure.  When a fatal error is
-detected, the retry count is set to MAX so no further attempts are made.
-@param stderr string  Stderr output from gst-launch or the pipeline script
---]]
-function TTSEngine:_checkMtkPipelineError(stderr)
-    if not stderr or stderr == "" then return false end
-    for _, pattern in ipairs(MTK_FATAL_ERRORS) do
-        if stderr:find(pattern, 1, true) then  -- plain string match (no regex)
-            logger.err("TTSEngine: FATAL MTK firmware error detected:", pattern)
-            self._pipeline_retry_count = MAX_PIPELINE_RETRIES  -- skip remaining retries
-            self.player_error = "bt_firmware_missing"
-            -- Also set a persistent flag so the sync controller can check it
-            -- and stop playback gracefully instead of re-triggering the error
-            -- on every page turn.
-            self._bt_fw_fatal_error = true
-            return true
-        end
-    end
-    return false
-end
-
---[[--
-Get a diagnostic time-based string for the pipeline stderr file.
-The pipeline script writes its stderr to a file; this method reads it.
-@return string  Stderr content, empty string on error
---]]
-function TTSEngine:_readPipelineStderr()
-    local log_file = PIPELINE_CTRL_DIR .. "/pipeline_stderr"
-    local f = io.open(log_file, "r")
-    if not f then return "" end
-    local content = f:read("*a") or ""
-    f:close()
-    return content
-end
-
---[[--
-Start the persistent BT audio pipeline.
-Creates the feeder script, launches it (piping silence/audio to gst-launch
-via a named FIFO), and waits for gst-launch to initialise.
-@return boolean true if pipeline started successfully
---]]
-function TTSEngine:_startPersistentPipeline()
-    -- ── Retry cooldown and limit check ─────────────────────────
-    -- Avoid rapid retry loops that can corrupt the flash filesystem
-    -- on Kobo MTK devices when the Bluetooth firmware is missing.
-    if self._bt_fw_fatal_error then
-        logger.err("TTSEngine: Persistent pipeline blocked — fatal MTK firmware error detected in a previous attempt")
-        self:_showMtkFirmwareError()
-        self.player_error = "bt_firmware_missing"
-        return false
-    end
-
-    if self._pipeline_last_fail_time then
-        local elapsed = os.time() - self._pipeline_last_fail_time
-        if elapsed < PIPELINE_RETRY_COOLDOWN_S then
-            logger.warn("TTSEngine: Pipeline retry cooldown active,",
-                        "wait", PIPELINE_RETRY_COOLDOWN_S - elapsed, "more seconds (elapsed=", elapsed, ")")
-            return false
-        end
-    end
-
-    if (self._pipeline_retry_count or 0) >= MAX_PIPELINE_RETRIES then
-        logger.err("TTSEngine: Max pipeline retries reached (",
-                    MAX_PIPELINE_RETRIES, "), giving up")
-        self.player_error = "bt_firmware_missing"
-        return false
-    end
-
-    self:_stopPersistentPipeline("restart")
-
-    -- Verify the mtkbtmwrpc socket is actually free before starting.
-    -- An orphan gst-launch from a crashed/previous session can hold it.
-    -- The killall in _stopPersistentPipeline should have freed it, but
-    -- the kernel needs a moment to tear down the abstract socket.
-    for attempt = 1, 5 do
-        local pf = io.open("/proc/net/unix", "r")
-        if pf then
-            local content = pf:read("*a")
-            pf:close()
-            if not content:find("@kobo:mtkbtmwrpc") then
-                break  -- socket is free
-            end
-            logger.warn("TTSEngine: mtkbtmwrpc socket still held, attempt",
-                attempt, "— waiting 200ms")
-            os.execute("killall -9 gst-launch-1.0 2>/dev/null")
-            os.execute("usleep 200000")
-        else
-            break  -- can't check, proceed anyway
-        end
-    end
-
-    -- Configure pipeline for the actual sample rate of the audio we'll play.
-    -- MBROLA voices (e.g. 16000 Hz) differ from espeak-ng default (22050 Hz).
-    -- Using the wrong rate causes audio to play at wrong speed and breaks
-    -- word-highlighting sync.
-    self._pipeline_sample_rate = self._target_sample_rate or 22050
-    logger.dbg("TTSEngine: Starting persistent pipeline at",
-        self._pipeline_sample_rate, "Hz")
-    if not self:_writePipelineScript() then
-        logger.err("TTSEngine: Cannot write pipeline script")
-        return false
-    end
-    -- Clean control files
-    os.execute("rm -f " .. PIPELINE_CTRL_DIR .. "/stop " .. PIPELINE_CTRL_DIR .. "/play " .. PIPELINE_CTRL_DIR .. "/pause " .. PIPELINE_CTRL_DIR .. "/done")
-    -- Launch pipeline in background
-    local h = io.popen(PIPELINE_SCRIPT .. " >/dev/null 2>/dev/null & echo $!")
-    local pid_str = h and h:read("*a") or ""
-    if h then h:close() end
-    self._pipeline_wrapper_pid = tonumber(pid_str:match("(%d+)"))
-    -- Wait for gst-launch PID file to appear (up to 3s)
-    local gst_pid = nil
-    for iter = 1, 60 do  -- 60 × 50ms = 3s
-        local pf = io.open(PIPELINE_CTRL_DIR .. "/gst_pid", "r")
-        if pf then
-            local pid = pf:read("*a")
-            pf:close()
-            gst_pid = tonumber((pid or ""):match("(%d+)"))
-            if gst_pid then break end
-        end
-        os.execute("usleep 50000")
-    end
-    self._pipeline_gst_pid = gst_pid
-    self.audio_pid = gst_pid  -- for pause/resume compatibility
-    self._socket_clean = false
-    self._persistent_pipeline = true
-    -- Remember the gain baked into this pipeline's `volume` element so
-    -- _ensurePersistentPipeline can tell when the user changed it.
-    self._pipeline_volume = self.volume or 1.0
-
-    -- Shrink the FIFO pipe buffer from 64KB to 16KB.
-    -- At 22050Hz mono 16-bit (44100 B/s): 16KB ≈ 370ms.
-    -- At 16000Hz mono 16-bit (32000 B/s): 16KB ≈ 512ms.
-    -- Balances low latency with headroom for Piper CPU stalls.
-    local sr = self._pipeline_sample_rate or 22050
-    self._pipe_buffer_delay_ms = pipeBufferDelay(sr, 64)  -- default: assume 64KB
-    if gst_pid then
-        local O_WRONLY    = 1
-        local O_NONBLOCK  = 2048  -- 0x800
-        local F_SETPIPE_SZ = 1031
-        local fd = ffi.C.open(PIPELINE_FIFO, bit.bor(O_WRONLY, O_NONBLOCK))
-        if fd >= 0 then
-            -- Pass size as cdata int — required for variadic fcntl on ARM EABI.
-            local ret = ffi.C.fcntl(fd, F_SETPIPE_SZ, ffi.new("int", 16384))
-            if ret >= 0 then
-                self._pipe_buffer_delay_ms = pipeBufferDelay(sr, 16)
-                logger.warn("TTSEngine: Pipe buffer shrunk to 16KB, ret=", ret,
-                    "delay=", self._pipe_buffer_delay_ms, "ms at", sr, "Hz")
-            else
-                logger.warn("TTSEngine: fcntl F_SETPIPE_SZ failed, ret=", ret,
-                    "errno=", ffi.errno(), ", trying shell fallback")
-                ffi.C.close(fd)
-                -- Shell fallback: python3 or direct /proc write
-                local rc = os.execute(string.format(
-                    'python3 -c "import fcntl,os; fd=os.open(\'%s\',os.O_WRONLY|os.O_NONBLOCK); fcntl.fcntl(fd,1031,16384); os.close(fd)" 2>/dev/null',
-                    PIPELINE_FIFO))
-                if rc == 0 then
-                    self._pipe_buffer_delay_ms = pipeBufferDelay(sr, 16)
-                    logger.warn("TTSEngine: Pipe buffer shrunk to 16KB via python3")
-                else
-                    logger.warn("TTSEngine: All pipe resize methods failed, using 64KB delay")
-                end
-                fd = -1  -- already closed
-            end
-            if fd >= 0 then ffi.C.close(fd) end
-        else
-            logger.warn("TTSEngine: Could not open FIFO for pipe resize, errno=",
-                ffi.errno(), ", using 64KB delay")
-        end
-    end
-
-    if gst_pid then
-        logger.warn("TTSEngine: Persistent pipeline started, wrapper=",
-            self._pipeline_wrapper_pid, "gst=", self._pipeline_gst_pid)
-        -- Pipeline started successfully — reset retry count
-        self._pipeline_retry_count = 0
-        self._pipeline_last_fail_time = nil
-        return true
-    end
-
-    -- Pipeline failed to start — increment retry count and check for
-    -- fatal MTK firmware errors in the pipeline stderr log.
-    self._pipeline_retry_count = (self._pipeline_retry_count or 0) + 1
-    self._pipeline_last_fail_time = os.time()
-    logger.warn("TTSEngine: Pipeline failed to start (retry",
-                self._pipeline_retry_count, "/", MAX_PIPELINE_RETRIES, ")")
-
-    -- Check stderr for fatal MTK firmware errors
-    local stderr = self:_readPipelineStderr()
-    if stderr ~= "" then
-        logger.warn("TTSEngine: Pipeline stderr:", stderr:sub(1, 500))
-        self:_checkMtkPipelineError(stderr)
-    end
-
-    if self._bt_fw_fatal_error then
-        self:_showMtkFirmwareError()
-    end
-
-    return false
-end
-
---[[--
-Stop the persistent BT audio pipeline.
-Kills the feeder script and gst-launch, cleans up the FIFO.
-@param reason string  Caller identification for diagnostic logging
---]]
-function TTSEngine:_stopPersistentPipeline(reason)
-    reason = reason or "unknown"
-    logger.warn("TTSEngine: _stopPersistentPipeline, reason=", reason,
-        "gst_pid=", self._pipeline_gst_pid)
-    -- Signal feeder to stop (harmless if no feeder is running)
-    local sf = io.open(PIPELINE_CTRL_DIR .. "/stop", "w")
-    if sf then sf:write("1"); sf:close() end
-    -- Clear any pause flag so a stopped-then-restarted pipeline is not
-    -- created already paused.
-    os.execute("rm -f " .. PIPELINE_CTRL_DIR .. "/pause")
-    -- Kill tracked processes
-    if self._pipeline_gst_pid then
-        os.execute("kill -9 " .. self._pipeline_gst_pid .. " 2>/dev/null")
-    end
-    if self._pipeline_wrapper_pid then
-        os.execute("kill -9 " .. self._pipeline_wrapper_pid .. " 2>/dev/null")
-    end
-    -- Also read gst PID from file in case Lua state was lost (crash/restart).
-    -- This catches orphans whose PIDs we no longer track in memory.
-    local gst_pf = io.open(PIPELINE_CTRL_DIR .. "/gst_pid", "r")
-    if gst_pf then
-        local file_pid = gst_pf:read("*a"):gsub("%s+", "")
-        gst_pf:close()
-        if file_pid ~= "" and tonumber(file_pid) ~= self._pipeline_gst_pid then
-            os.execute(string.format("kill -9 %s 2>/dev/null", file_pid))
-            logger.warn("TTSEngine: Killed orphan gst from PID file:", file_pid)
-        end
-    end
-    -- Kill orphan feeder wrapper shells that Lua state doesn't track.
-    -- These are /bin/sh processes not caught by killall gst-launch-1.0.
-    os.execute("pkill -9 -f 'audiobook_pipeline\\.sh' 2>/dev/null")
-    -- ALWAYS kill orphan gst-launch processes.  On Kobo, the
-    -- mtkbtmwrpcaudiosink binds an exclusive abstract socket
-    -- (@kobo:mtkbtmwrpc).  If ANY gst-launch holds it — even an
-    -- orphan from a previous KOReader session or an SSH test — the
-    -- new pipeline fails with "Address already in use".
-    os.execute("killall -9 gst-launch-1.0 2>/dev/null")
-    -- Kill the feeder wrapper shell too — if Lua lost track of its PID
-    -- (crash / restart), it becomes orphaned under init (PID 1).
-    os.execute("pkill -9 -f 'audiobook_pipeline\\.sh' 2>/dev/null")
-    -- Brief wait for the kernel to release the abstract socket
-    -- after SIGKILL.  Without this, the bind() in the new pipeline
-    -- can race against socket teardown.
-    if self._persistent_pipeline then
-        os.execute("usleep 200000")
-    end
-    -- Clean up
-    os.execute("rm -f " .. PIPELINE_FIFO .. " " .. PIPELINE_CTRL_DIR .. "/gst_pid" .. " " .. PIPELINE_CTRL_DIR .. "/pipeline_stderr")
-    self._pipeline_gst_pid = nil
-    self._pipeline_wrapper_pid = nil
-    self._persistent_pipeline = false
-    self.audio_pid = nil
-    self._socket_clean = false
-    logger.warn("TTSEngine: Persistent pipeline stopped, reason=", reason)
-end
-
---[[--
-Check if the persistent BT pipeline is alive.
-@return boolean
---]]
-function TTSEngine:_isPipelineAlive()
-    if not self._persistent_pipeline or not self._pipeline_gst_pid then
-        return false
-    end
-    local ret = os.execute("kill -0 " .. self._pipeline_gst_pid .. " 2>/dev/null")
-    return ret == 0
-end
-
---[[--
-Ensure the persistent BT pipeline is running, (re)starting if needed.
-@return boolean true if pipeline is alive
---]]
-function TTSEngine:_ensurePersistentPipeline()
-    if self:_isPipelineAlive() then
-        -- If the audio sample rate changed (e.g. switching from espeak 22050Hz
-        -- to MBROLA 16000Hz), the pipeline must be restarted with the new rate
-        -- or rawaudioparse will play audio at the wrong speed.
-        local rate_changed = self._target_sample_rate and self._pipeline_sample_rate
-            and self._target_sample_rate ~= self._pipeline_sample_rate
-        -- The volume is a gst element baked into the pipeline command line, so
-        -- a change only takes effect by restarting it.  This runs from play()
-        -- at a sentence boundary, where the previous clip has finished, so the
-        -- restart never cuts audible speech.
-        local vol_changed = self._pipeline_volume ~= nil
-            and math.abs((self.volume or 1.0) - self._pipeline_volume) > 0.001
-        if rate_changed then
-            logger.warn("TTSEngine: Sample rate changed from",
-                self._pipeline_sample_rate, "to", self._target_sample_rate,
-                "Hz — restarting pipeline")
-            self:_stopPersistentPipeline("rate_change")
-        elseif vol_changed then
-            logger.warn("TTSEngine: Volume changed to",
-                self.volume, "— restarting pipeline")
-            self:_stopPersistentPipeline("volume_change")
-        else
-            return true
-        end
-    end
-    logger.warn("TTSEngine: Pipeline not alive, (re)starting...")
-    return self:_startPersistentPipeline()
-end
-
---[[--
-Check if the audio player process is still running.
-@return boolean true if process is alive
---]]
 function TTSEngine:_isAudioProcessRunning()
     if not self.audio_pid then return false end
     -- Use /proc test instead of spawning a shell on every poll.
@@ -7354,13 +6670,8 @@ function TTSEngine:onPlaybackComplete()
     -- The process watcher confirmed the process exited naturally, so the BT
     -- abstract socket is already released.  No need to killall — that would
     -- just waste ~200ms spawning a shell on the ARM CPU.
-    if self._persistent_pipeline then
-        -- Pipeline keeps running (playing silence) — audio_pid stays set
-        -- and socket stays held by the pipeline.  No keepalive needed.
-    else
-        self.audio_pid = nil
-        self._socket_clean = true
-    end
+    self.audio_pid = nil
+    self._socket_clean = true
     self:cleanup()
 
     if self.on_complete_callback then
@@ -7409,15 +6720,6 @@ function TTSEngine:pause()
         -- with garbled audio for the rest of the session (only a new session
         -- clears it).  With the feeder quiet, gst keeps consuming silence so
         -- the sink stays fed and resumes cleanly where it left off.
-        elseif self._persistent_pipeline then
-            local pf = io.open(PIPELINE_CTRL_DIR .. "/pause", "w")
-            if pf then
-                pf:write("1")
-                pf:close()
-                logger.warn("TTSEngine: Paused persistent pipeline (feeder silence)")
-            else
-                logger.warn("TTSEngine: Pause failed — cannot write pause flag")
-            end
         elseif self.audio_pid then
             os.execute("kill -STOP " .. self.audio_pid .. " 2>/dev/null")
         end
@@ -7455,8 +6757,6 @@ function TTSEngine:resume()
         -- Clear the pause flag: the feeder resumes the clip where it stopped
         -- and stops feeding silence.  gst-launch was never frozen, so the
         -- Bluetooth sink never underran.
-        elseif self._persistent_pipeline then
-            os.execute("rm -f " .. PIPELINE_CTRL_DIR .. "/pause")
             logger.warn("TTSEngine: Resumed persistent pipeline (feeder), pause was",
                 pause_ms, "ms, total_pause=", self._total_pause_ms, "ms")
         elseif self.audio_pid then
@@ -7474,8 +6774,7 @@ function TTSEngine:stop()
     -- Always bump generation and clear state, even if not speaking.
     -- This ensures stale scheduled callbacks (launchAndStart, checkProcess,
     -- updateTiming) exit immediately regardless of what state we were in.
-    logger.dbg("TTSEngine: stop(), is_speaking=", self.is_speaking,
-        "persistent=", self._persistent_pipeline)
+    logger.dbg("TTSEngine: stop(), is_speaking=", self.is_speaking)
     -- End of the reading session: stop streaming keepalive silence so the
     -- BT datapath can suspend and save battery.
     self:_stopKindleKeepalive()
@@ -7543,12 +6842,6 @@ function TTSEngine:stop()
         logger.warn("TTSEngine: audioout queue dropped, pipeline released")
     end
 
-    -- Stop persistent pipeline or legacy keepalive
-    if self._persistent_pipeline then
-        self:_stopPersistentPipeline("engine_stop")
-    else
-        self:_stopBtKeepalive()
-    end
     
     -- Only clear _socket_clean if there was a live audio process to kill.
     -- If the process already exited naturally (onPlaybackComplete set
@@ -7581,8 +6874,6 @@ output.  Returns true once the pipeline is actually outputting audio.
 @return boolean
 --]]
 function TTSEngine:isGstPlaying()
-    -- Persistent pipeline is always in PLAYING state
-    if self._persistent_pipeline then return true end
     if not self._gst_status_file then return false end
     local f = io.open(self._gst_status_file, "r")
     if not f then return false end
@@ -7638,12 +6929,7 @@ function TTSEngine:forceKillAll()
         self._audioout_active = nil
     end
 
-    -- Stop persistent pipeline or legacy keepalive
-    if self._persistent_pipeline then
-        self:_stopPersistentPipeline("force_kill_all")
-    else
-        self:_stopBtKeepalive()
-    end
+
     if self.audio_pid then
         os.execute("kill -9 " .. self.audio_pid .. " 2>/dev/null")
         self.audio_pid = nil
@@ -7672,13 +6958,7 @@ function TTSEngine:cleanup()
         self.current_audio_file = nil
     end
     -- Only clear audio_pid for the legacy (non-persistent) path.
-    -- For the persistent pipeline, audio_pid points to the gst-launch
-    -- process which keeps running between sentences.  Clearing it here
-    -- breaks pause/resume and causes _isAudioProcessRunning to return
-    -- false spuriously.
-    if not self._persistent_pipeline then
-        self.audio_pid = nil
-    end
+    self.audio_pid = nil
 end
 
 --[[--

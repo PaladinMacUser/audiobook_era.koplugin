@@ -231,10 +231,10 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
         table.insert(menu, {
             text = _("Use audio output daemon (experimental)"),
             checked_func = function()
-                return plugin:getSetting("audioout_enabled", false)
+                return plugin:getSetting("audioout_enabled", true)
             end,
             callback = function()
-                plugin:toggleSetting("audioout_enabled", false)
+                plugin:toggleSetting("audioout_enabled", true)
             end,
             help_text = _(
                 "Routes read-aloud audio through a background daemon that "
@@ -2275,10 +2275,10 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
         table.insert(items, {
             text = _("Use audio output daemon (experimental)"),
             checked_func = function()
-                return plugin:getSetting("audioout_enabled", false)
+                return plugin:getSetting("audioout_enabled", true)
             end,
             callback = function()
-                plugin:toggleSetting("audioout_enabled", false)
+                plugin:toggleSetting("audioout_enabled", true)
             end,
             help_text = _(
                 "Routes read-aloud audio through a background daemon that " ..
