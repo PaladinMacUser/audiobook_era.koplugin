@@ -41,7 +41,7 @@ export GST_PLUGIN_SYSTEM_PATH_1_0=$GST_OUT/lib/gstreamer-1.0:$BASE_OUT/lib/gstre
 export GST_PLUGIN_SYSTEM_PATH=\$GST_PLUGIN_SYSTEM_PATH_1_0
 export LD_LIBRARY_PATH=$GST_OUT/lib:$GLIB_OUT/lib:$BASE_OUT/lib:\${LD_LIBRARY_PATH:-}
 $HERE/out/audioout-host --socket $SOCK --fifo /tmp/test_audioout_fifo \
-    --rate 22050 --channels 1 --sink fakesink > /tmp/audioout-host.log 2>&1 &
+    --rate 22050 --channels 1 --output mtk --sink fakesink > /tmp/audioout-host.log 2>&1 &
 DPID=\$!
 sleep 2
 luajit $HERE/daemon_test.lua $SOCK $WAV 30000

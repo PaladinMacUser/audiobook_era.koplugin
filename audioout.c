@@ -102,11 +102,35 @@ typedef struct {
                                 gpointer, GDestroyNotify);
     gsize (*gst_buffer_get_size)(GstBuffer *);
     gboolean (*gst_element_query_position)(GstElement *, GstFormat, gint64 *);
+    GstStateChangeReturn (*gst_element_get_state)(GstElement *, GstState *,
+                                                  GstState *, GstClockTime);
     gboolean (*gst_element_factory_find)(const gchar *);
     void (*g_object_set)(gpointer, const gchar *, ...);
 } GstApi;
 
 static GstApi G;
+
+/* ALSA via dlopen (BlueZ Kobos: the bluealsa PCM).  Bound lazily and only
+ * used when the output is ALSA, so the MTK build path never touches it. */
+typedef struct {
+    void *alsa;                 /* libasound.so.2 handle */
+    int (*snd_pcm_open)(void **, const char *, int, int);
+    int (*snd_pcm_close)(void *);
+    int (*snd_pcm_set_params)(void *, int, int, unsigned int, unsigned int,
+                              int, unsigned int);
+    long (*snd_pcm_writei)(void *, const void *, unsigned long);
+    int (*snd_pcm_nonblock)(void *, int);
+    int (*snd_pcm_recover)(void *, int, int);
+    int (*snd_pcm_delay)(void *, long *);
+    int (*snd_pcm_prepare)(void *);
+    int (*snd_pcm_drop)(void *);
+} AlsaApi;
+
+static AlsaApi A;
+
+#define SND_PCM_STREAM_PLAYBACK 0
+#define SND_PCM_FORMAT_S16_LE   2
+#define SND_PCM_ACCESS_RW_INTERLEAVED 3
 
 typedef struct {
     char path[MAX_PATH];
@@ -160,6 +184,15 @@ static struct {
     long long pace_last_acc_ms;
     long long pace_last_wall_ms;
     int pace_fast_ticks;
+    long long pace_arm_ms;              /* grace: sink warm-up after play */
+
+    /* ALSA output (BlueZ Kobos).  No GStreamer pipeline: the daemon feeds
+     * the bluealsa PCM directly and the kernel driver paces acceptance. */
+    int out_alsa;
+    char alsa_device[MAX_PATH];
+    void *alsa_pcm;
+    int alsa_rate, alsa_channels;
+    unsigned long long alsa_written_frames;
 
     int listen_fd;
     int client_fd;
@@ -223,9 +256,27 @@ refresh_clock(void) {
     }
 }
 
+/* ALSA position: hardware delay tells exactly how many frames are still
+ * between written and played. */
+static long long alsa_pos_ms(void);
+
+static long long
+alsa_pos_ms(void) {
+    if (!S.alsa_pcm) return 0;
+    long d = 0;
+    if (A.snd_pcm_delay && A.snd_pcm_delay(S.alsa_pcm, &d) != 0) d = 0;
+    if (d < 0) d = 0;
+    long long written = (long long)S.alsa_written_frames;
+    long long pos = written - d;
+    int r = S.alsa_rate > 0 ? S.alsa_rate : 44100;
+    if (pos < 0) pos = 0;
+    return pos * 1000LL / r;
+}
+
 /* Rendered stream position in ms (M0 model), capped at accepted. */
 static long long
 rendered_ms(void) {
+    if (S.out_alsa) return alsa_pos_ms();
     if (!probe_seen || acc_bytes == 0) return 0;
     long long est = acc_boundary_ms + (wall_now - acc_arrival_ms);
     long long acc = (long long)(acc_bytes / OUT_BYTES_PER_MS);
@@ -240,6 +291,7 @@ rendered_ms(void) {
 
 static const char *g_socket_path = SOCKET_PATH_DEFAULT;
 static const char *g_sink_name = "mtkbtmwrpcaudiosink";
+static const char *g_output = "auto";   /* auto | mtk | alsa */
 static int g_rate = 22050, g_channels = 1;
 static long long g_started_ms;
 
@@ -427,10 +479,131 @@ pipeline_build(int rate, int channels) {
     return 0;
 }
 
+/* ── ALSA output ─────────────────────────────────────────────────── */
+
+static int
+alsa_bind(void) {
+    if (A.alsa) return 0;
+    const char *names[] = { "libasound.so.2", "/lib/libasound.so.2", NULL };
+    for (int i = 0; names[i] && !A.alsa; i++) {
+        A.alsa = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
+        if (A.alsa) log_line("dlopened %s", names[i]);
+    }
+    if (!A.alsa) {
+        log_line("ALSA output requested but libasound is unavailable");
+        return -1;
+    }
+#define ABIND(field, name) \
+    A.field = dlsym(A.alsa, name); \
+    if (!A.field) { log_line("FATAL: alsa %s not exported", name); return -1; }
+    ABIND(snd_pcm_open, "snd_pcm_open")
+    ABIND(snd_pcm_close, "snd_pcm_close")
+    ABIND(snd_pcm_set_params, "snd_pcm_set_params")
+    ABIND(snd_pcm_writei, "snd_pcm_writei")
+    ABIND(snd_pcm_nonblock, "snd_pcm_nonblock")
+    ABIND(snd_pcm_recover, "snd_pcm_recover")
+    ABIND(snd_pcm_delay, "snd_pcm_delay")
+    ABIND(snd_pcm_prepare, "snd_pcm_prepare")
+    ABIND(snd_pcm_drop, "snd_pcm_drop")
+#undef ABIND
+    return 0;
+}
+
+/* Open (or reopen after a device/rate change) the bluealsa PCM.  The
+ * "plug:" prefix makes libasound convert rate and channels, so clips can
+ * stay at their native rate. */
+static int
+alsa_open(const char *device, int rate, int channels) {
+    if (alsa_bind() != 0) return -1;
+    if (S.alsa_pcm) {
+        if (S.out_alsa && !strcmp(S.alsa_device, device)
+                && S.alsa_rate == rate && S.alsa_channels == channels) {
+            return 0;
+        }
+        A.snd_pcm_drop(S.alsa_pcm);
+        A.snd_pcm_close(S.alsa_pcm);
+        S.alsa_pcm = NULL;
+    }
+    void *pcm = NULL;
+    int rc = A.snd_pcm_open(&pcm, device, SND_PCM_STREAM_PLAYBACK, 0);
+    if (rc < 0) {
+        log_line("alsa open %s failed: rc %d", device, rc);
+        if (pcm) A.snd_pcm_close(pcm);
+        return -1;
+    }
+    rc = A.snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16_LE,
+                              SND_PCM_ACCESS_RW_INTERLEAVED,
+                              (unsigned)channels, (unsigned)rate,
+                              1 /* allow libasound resampling */,
+                              250000 /* 250 ms latency target */);
+    if (rc < 0) {
+        log_line("alsa set_params %s failed: %d", device, rc);
+        A.snd_pcm_close(pcm);
+        return -1;
+    }
+    A.snd_pcm_nonblock(pcm, 1);
+    snprintf(S.alsa_device, sizeof S.alsa_device, "%s", device);
+    S.alsa_rate = rate;
+    S.alsa_channels = channels;
+    S.alsa_pcm = pcm;
+    S.alsa_written_frames = 0;
+    log_line("alsa open ok: %s (%d Hz x %d ch)", device, rate, channels);
+    return 0;
+}
+
+static void
+alsa_teardown(void) {
+    if (S.alsa_pcm) {
+        A.snd_pcm_drop(S.alsa_pcm);
+        A.snd_pcm_close(S.alsa_pcm);
+        S.alsa_pcm = NULL;
+    }
+}
+
+/* Non-blocking write; returns bytes accepted.  -EPIPE (underrun, happens
+ * after pause starvation) recovers and retries once. */
+static unsigned long long
+alsa_write(const unsigned char *buf, unsigned long long len) {
+    unsigned long long total = 0;
+    int frames_per_byte = S.alsa_channels * 2;
+    while (total < len) {
+        unsigned long long rem = len - total;
+        long frames = (long)(rem / (unsigned long long)frames_per_byte);
+        if (frames <= 0) break;
+        long n = A.snd_pcm_writei(S.alsa_pcm, buf + total, (unsigned long)frames);
+        if (n > 0) {
+            total += (unsigned long long)n * (unsigned long long)frames_per_byte;
+            S.alsa_written_frames += (unsigned long long)n;
+            continue;
+        }
+        if (n == -EAGAIN) break;
+        if (n == -EPIPE) {
+            if (A.snd_pcm_prepare(S.alsa_pcm) == 0) continue;
+        }
+        log_line("alsa write error: %ld", n);
+        break;
+    }
+    return total;
+}
+
 static void
 pipeline_teardown(void) {
     if (S.pipe) {
         G.gst_element_set_state(S.pipe, GST_STATE_NULL);
+        if (G.gst_element_get_state) {
+            GstState cur = GST_STATE_VOID_PENDING, pend = GST_STATE_VOID_PENDING;
+            /* Closing the MTK sink waits on the BT stack, which a wedged
+             * peer can block forever.  Bound the wait; if the sink will
+             * not close, exit so the client respawns a fresh daemon
+             * instead of every later command timing out. */
+            G.gst_element_get_state(S.pipe, &cur, &pend, 3 * GST_SECOND);
+            if (cur != GST_STATE_NULL) {
+                log_line("teardown wedged (state %d after 3s); exiting",
+                         (int)cur);
+                fflush(stderr);
+                _exit(1);
+            }
+        }
         if (S.bus) G.gst_object_unref(S.bus);
         G.gst_object_unref(S.pipe);
         S.pipe = NULL;
@@ -527,6 +700,7 @@ queue_clip(const char *path, long long gap_ms) {
     S.announce_idle = 0;
     S.unpaced = 0;
     S.pace_fast_ticks = 0;
+    S.pace_arm_ms = wall_now;
     S.queue[S.queue_len++] = c;
     log_line("queued %s dur=%lldms gap=%lldms span=[%lld..%lld]ms",
              path, c.duration_ms, gap_ms, c.start_ms, c.end_ms);
@@ -535,6 +709,11 @@ queue_clip(const char *path, long long gap_ms) {
 
 static unsigned long long
 fifo_write(const unsigned char *buf, unsigned long long len) {
+    if (S.out_alsa) {
+        unsigned long long w = alsa_write(buf, len);
+        S.fifo_written += w;
+        return w;
+    }
     unsigned long long total = 0;
     while (total < len) {
         ssize_t n = write(S.fifo_fd, buf + total, len - total);
@@ -554,7 +733,23 @@ fifo_write(const unsigned char *buf, unsigned long long len) {
 /* One feed tick: active clip, then inter-clip gap, then keepalive. */
 static void
 feed_tick(void) {
-    if (S.external_active) return;   /* the outside writer owns the stream */
+    if (S.external_active) {
+        /* ALSA external mode: the daemon READS the fifo (ffmpeg writes it)
+         * and writes the PCM; gst external mode leaves the fifo to filesrc.
+         * While paused, feed keepalive silence so the link stays up. */
+        if (!S.out_alsa) return;
+        if (S.paused || S.fifo_fd < 0) {
+            fifo_write(silence_chunk, SILENCE_CHUNK);
+            return;
+        }
+        unsigned char buf[FEED_CHUNK];
+        ssize_t n = read(S.fifo_fd, buf, sizeof buf);
+        if (n > 0) alsa_write(buf, (unsigned long long)n);
+        else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+            log_line("fifo read error: %s", strerror(errno));
+        }
+        return;
+    }
     if (S.paused || S.fifo_fd < 0) return;
     if (S.feed_idx < 0 && S.queue_len == 0) {
         fifo_write(silence_chunk, SILENCE_CHUNK);   /* idle keepalive */
@@ -685,26 +880,50 @@ handle_command(char *line) {
         }
         long long rate = json_num(line, "rate", g_rate);
         long long channels = json_num(line, "channels", g_channels);
-        /* Lazy pipeline build: the vendor sink can stall tens of seconds
-         * at init when no A2DP peer is connected (M0/M1 measured ~26 s),
-         * and a stalled build at daemon start would hang the client. */
-        if (!S.pipe) {
+        /* Lazy output build: the MTK vendor sink can stall tens of
+         * seconds at init when no A2DP peer is connected (M0/M1 measured
+         * ~26 s), and a stalled build at daemon start would hang the
+         * client.  ALSA opens fail fast instead. */
+        char alsa_dev[MAX_PATH] = "";
+        json_find(line, "alsa_device", alsa_dev, sizeof alsa_dev);
+        if (S.out_alsa) {
+            const char *dev = (alsa_dev[0] || S.alsa_device[0])
+                ? (alsa_dev[0] ? alsa_dev : S.alsa_device) : "default";
+            if (fifo_open() != 0 || alsa_open(dev, (int)rate, (int)channels) != 0) {
+                respond("{\"ok\":false,\"error\":\"alsa open failed\"}");
+                return;
+            }
+        } else if (!S.pipe) {
             if (fifo_open() != 0 || pipeline_build((int)rate, (int)channels) != 0) {
                 respond("{\"ok\":false,\"error\":\"pipeline build failed\"}");
                 return;
             }
         }
-        if ((int)rate != S.pipe_rate || (int)channels != S.pipe_channels) {
+        if (!S.out_alsa &&
+                ((int)rate != S.pipe_rate || (int)channels != S.pipe_channels)) {
             log_line("rate change %dx%d -> %ldx%ld; rebuilding (queue dropped)",
                      S.pipe_rate, S.pipe_channels, rate, channels);
             drop_queue();
-            pipeline_teardown();
-            g_rate = (int)rate;
-            g_channels = (int)channels;
-            reset_stream();
-            if (fifo_open() != 0 || pipeline_build(g_rate, g_channels) != 0) {
-                respond("{\"ok\":false,\"error\":\"pipeline rebuild failed\"}");
-                return;
+            if (S.out_alsa) {
+                /* Reopen at the new rate; the device string is unchanged. */
+                alsa_teardown();
+                g_rate = (int)rate;
+                g_channels = (int)channels;
+                reset_stream();
+                if (fifo_open() != 0 || alsa_open(S.alsa_device, g_rate,
+                                                  g_channels) != 0) {
+                    respond("{\"ok\":false,\"error\":\"alsa reopen failed\"}");
+                    return;
+                }
+            } else {
+                pipeline_teardown();
+                g_rate = (int)rate;
+                g_channels = (int)channels;
+                reset_stream();
+                if (fifo_open() != 0 || pipeline_build(g_rate, g_channels) != 0) {
+                    respond("{\"ok\":false,\"error\":\"pipeline rebuild failed\"}");
+                    return;
+                }
             }
         }
         if (fifo_open() != 0) {
@@ -743,6 +962,12 @@ handle_command(char *line) {
     } else if (!strcmp(cmd, "flush")) {
         drop_queue();
         S.external_active = 0;
+        if (S.out_alsa && S.alsa_pcm) {
+            A.snd_pcm_drop(S.alsa_pcm);
+            A.snd_pcm_prepare(S.alsa_pcm);
+            respond("{\"ok\":true,\"state\":\"idle\"}");
+            return;
+        }
         if (S.pipe) {
             pipeline_teardown();
             reset_stream();
@@ -773,12 +998,18 @@ handle_command(char *line) {
         S.external_frozen_ms = 0;
         S.unpaced = 0;
         S.pace_fast_ticks = 0;
+        S.pace_arm_ms = wall_now;
         log_line("external stream mode (%d x %d)", g_rate, g_channels);
         respond("{\"ok\":true,\"mode\":\"external\",\"fifo\":\"%s\"}",
                 S.fifo_path);
     } else if (!strcmp(cmd, "release")) {
         drop_queue();
         S.external_active = 0;
+        if (S.out_alsa) {
+            alsa_teardown();
+            respond("{\"ok\":true,\"state\":\"released\"}");
+            return;
+        }
         if (S.pipe) {
             pipeline_teardown();
             reset_stream();
@@ -804,11 +1035,12 @@ handle_command(char *line) {
         respond("{\"ok\":true,\"state\":\"%s\",\"pos_ms\":%lld,"
                 "\"accepted_ms\":%lld,\"fed_ms\":%lld,\"fed_end_ms\":%lld,"
                 "\"done_count\":%llu,\"queue\":%d,\"rate\":%d,\"channels\":%d,"
-                "\"volume\":%.2f,\"unpaced\":%d,\"uptime_ms\":%lld}",
+                "\"volume\":%.2f,\"unpaced\":%d,\"out\":\"%s\",\"uptime_ms\":%lld}",
                 state_str(), rend, (long long)(acc_bytes / OUT_BYTES_PER_MS),
                 fed, S.fed_end_ms, S.done_count, S.queue_len,
                 S.pipe_rate, S.pipe_channels, S.volume,
-                S.unpaced, mono_ms() - g_started_ms);
+                S.unpaced, S.out_alsa ? "alsa" : "mtk",
+                mono_ms() - g_started_ms);
     } else if (!strcmp(cmd, "volume")) {
         long long v = json_num(line, "value_x1000", 1000);
         double vol = (double)v / 1000.0;
@@ -850,7 +1082,15 @@ tick_bookkeeping(void) {
      * (M0: ~1.5 s accepted in one tick) rides out on the reset below. */
     if (!S.paused && probe_seen && (S.queue_len > 0 || !S.all_fed)) {
         long long acc = (long long)(acc_bytes / OUT_BYTES_PER_MS);
-        if (S.pace_last_wall_ms > 0) {
+        if (wall_now - S.pace_arm_ms < 3000) {
+            /* Sink warm-up: the initial buffer burst plus the auto-pause
+             * the sync flow issues right after play both look like
+             * swallowing.  M0 measured the first accept at ~250 ms and
+             * full init at ~1.4 s; 3 s covers both with margin. */
+            S.pace_last_acc_ms = 0;
+            S.pace_last_wall_ms = 0;
+            S.pace_fast_ticks = 0;
+        } else if (S.pace_last_wall_ms > 0) {
             long long dw = wall_now - S.pace_last_wall_ms;
             long long da = acc - S.pace_last_acc_ms;
             if (dw > 0 && da > dw * 2 + 250) {
@@ -947,10 +1187,15 @@ main(int argc, char **argv) {
             S.volume = atof(argv[++i]);
         else if (!strcmp(argv[i], "--sink") && i + 1 < argc)
             g_sink_name = argv[++i];
+        else if (!strcmp(argv[i], "--output") && i + 1 < argc)
+            g_output = argv[++i];
+        else if (!strcmp(argv[i], "--alsa-device") && i + 1 < argc)
+            snprintf(S.alsa_device, sizeof S.alsa_device, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             printf("usage: audioout [--socket PATH] [--fifo PATH]"
                    " [--rate HZ] [--channels N] [--volume 0-4]"
-                   " [--sink ELEMENT]\n");
+                   " [--sink ELEMENT] [--output auto|mtk|alsa]"
+                   " [--alsa-device STR]\n");
             return 0;
         }
     }
@@ -1002,6 +1247,7 @@ main(int argc, char **argv) {
     BIND(gst_buffer_get_size, "gst_buffer_get_size");
 #undef BIND
     G.gst_element_query_position = dlsym(G.gst, "gst_element_query_position");
+    G.gst_element_get_state = dlsym(G.gst, "gst_element_get_state");
     G.gst_element_factory_find = dlsym(G.gst, "gst_element_factory_find");
     if (G.gobj)
         G.g_object_set = dlsym(G.gobj, "g_object_set");
@@ -1011,6 +1257,41 @@ main(int argc, char **argv) {
         log_line("note: g_object_set unavailable; volume applies on rebuild");
 
     G.gst_init(NULL, NULL);
+
+    /* Output selection.  auto: the MTK vendor sink when present, else the
+     * bluealsa ALSA PCM. */
+    if (!strcmp(g_output, "alsa")) S.out_alsa = 1;
+    else if (!strcmp(g_output, "auto")) {
+        S.out_alsa = !(G.gst_element_factory_find
+                       && G.gst_element_factory_find("mtkbtmwrpcaudiosink"));
+    }
+    if (S.out_alsa) {
+        /* The bluealsa PCM type is defined by an ALSA plugin .so.  The
+         * firmware ships one in /lib/alsa-lib on the generations that run
+         * bluealsa natively; otherwise the bundled bluealsa dir has one
+         * built for the device glibc.  ALSA_PLUGIN_DIR must be set before
+         * the first snd_pcm_open resolves the PCM type. */
+        if (access("/lib/alsa-lib/libasound_module_pcm_bluealsa.so", F_OK) != 0) {
+            char exe[MAX_PATH], dir[MAX_PATH], plugdir[MAX_PATH];
+            ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+            if (n > 0) {
+                exe[n] = 0;
+                snprintf(dir, sizeof dir, "%s", exe);
+                char *slash = strrchr(dir, '/');
+                if (slash) *slash = 0;          /* .../audioout */
+                slash = strrchr(dir, '/');
+                if (slash) *slash = 0;          /* plugin dir root */
+                snprintf(plugdir, sizeof plugdir,
+                         "%s/bluealsa/lib/alsa-lib", dir);
+                if (access(plugdir, F_OK) == 0)
+                    setenv("ALSA_PLUGIN_DIR", plugdir, 1);
+            }
+        }
+        log_line("output: alsa (device %s)",
+                 S.alsa_device[0] ? S.alsa_device : "(set per play)");
+    } else {
+        log_line("output: mtk (%s)", g_sink_name);
+    }
 
     unlink(g_socket_path);
     S.listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1031,7 +1312,7 @@ main(int argc, char **argv) {
     log_line("listening on %s (fifo %s, %d Hz x %d ch)", g_socket_path,
              S.fifo_path, g_rate, g_channels);
 
-    claim_exclusive_socket();
+    if (!S.out_alsa) claim_exclusive_socket();
     /* The pipeline builds lazily on the first play command: the vendor
      * sink's init can block for many seconds with no A2DP peer. */
     log_line("ready (pipeline builds on first play)");

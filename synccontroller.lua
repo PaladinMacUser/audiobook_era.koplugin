@@ -2393,7 +2393,9 @@ function SyncController:startSentenceSyncLoop(sentence)
         local adjusted
         if self.tts_engine._audioout_active and self.tts_engine._audioout_client then
             self._latency_locked = true
-            local st = self.tts_engine._audioout_client:status()
+            -- 400 ms: the sync tick runs at 20 Hz on the UI thread; a
+            -- wedged daemon must never hold it for seconds.
+            local st = self.tts_engine._audioout_client:status(400)
             if not st or not st.pos_ms then
                 UIManager:scheduleIn(0.05, syncUpdate)
                 return

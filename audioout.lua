@@ -173,6 +173,7 @@ function AudioOut:play(path, opts)
         gap_ms = opts.gap_ms or 0,
         rate = opts.rate or self.rate,
         channels = opts.channels or self.channels,
+        alsa_device = opts.alsa_device,
     }, 8000)
 end
 

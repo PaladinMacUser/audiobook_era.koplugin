@@ -4352,14 +4352,22 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                     return false
                 end
             end
-            local resp = ao:play(self.current_audio_file,
-                { rate = self._target_sample_rate or 22050, channels = 1 })
+            local play_opts = { rate = self._target_sample_rate or 22050, channels = 1 }
+            if self.audio_player_type == "bluealsa" then
+                -- plug: makes libasound convert the clip rate to whatever
+                -- the headset negotiated.
+                local addr = self.plugin and self.plugin:getSetting("bt_device_addr", nil)
+                local bt = self.plugin and self.plugin.bt_manager
+                if bt and bt.getBluealsaDevice and addr then
+                    play_opts.alsa_device = "plug:" .. bt:getBluealsaDevice(addr)
+                end
+            end
+            local resp = ao:play(self.current_audio_file, play_opts)
             if resp and not resp.ok and resp.error == "queue full" then
                 -- Stale clips from a dead previous group: drop and retry once.
                 logger.warn("TTSEngine: audioout queue full; flushing and retrying")
                 ao:flush()
-                resp = ao:play(self.current_audio_file,
-                    { rate = self._target_sample_rate or 22050, channels = 1 })
+                resp = ao:play(self.current_audio_file, play_opts)
             end
             if not resp or not resp.ok then
                 logger.warn("TTSEngine: audioout play refused:",
