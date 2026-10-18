@@ -1696,8 +1696,31 @@ function MediaEngine:_playFfmpegPipe(gen)
         -- exposes no ALSA card under KOReader (issue #93).
         if Device.isKobo and Device:isKobo()
                 and self.plugin and self.plugin.bt_manager then
+            local bt = self.plugin.bt_manager
             local bt_cmd = self:_bluealsaSinkCommand()
-            if bt_cmd then
+            -- audioout daemon (Tier 2): ffmpeg feeds the daemon's fifo and
+            -- the daemon owns the bluealsa PCM (real hardware-delay clock,
+            -- keepalive on pause).  Falls back to aplay on any refusal.
+            if bt_cmd and not self._audioout_session_fallback
+                    and self.plugin.getSetting
+                    and self.plugin:getSetting("audioout_enabled", false) then
+                local ao = self:_getAudioOut()
+                local addr = self.plugin:getSetting("bt_device_addr", nil)
+                local dev = (ao and addr)
+                    and ("plug:" .. bt:getBluealsaDevice(addr)) or nil
+                local r = dev and ao:externalStart(44100, 2, dev) or nil
+                if r and r.ok then
+                    self._audioout_external = true
+                    self._audioout_client = ao
+                    player_cmd = string.format('cat > "%s"', ao:fifoPath())
+                    self._used_bluealsa_sink = true
+                    logger.warn("MediaEngine: bluealsa via audioout daemon")
+                else
+                    logger.warn("MediaEngine: audioout external refused;",
+                        "falling back to aplay")
+                end
+            end
+            if bt_cmd and not self._audioout_external then
                 -- Capture the sink's stderr: a PCM open failure is how a
                 -- missing A2DP transport shows up, and the completion
                 -- watcher reads it to trigger the recovery (issue #93).
