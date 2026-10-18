@@ -92,6 +92,8 @@
  * symbol that maps there, so id 3 marks a word boundary in the token
  * stream. */
 #define WORD_SEP_ID 3
+/* The int8 (R7) engine's frame hop: FSD_HOP in the mcu core. */
+#define INT8_HOP 256
 /* A clause can hold at most MAX_IDS/2 phones, so at most that many words. */
 #define MAX_WORDS 512
 /* Per-word span, in frames while the ids are being walked and converted to
@@ -858,9 +860,26 @@ int main(int argc, char **argv) {
                                               words + n_words, &nspans, MAX_WORDS - n_words, cl_sstart[ci]);
                         spoke = emitted > 0;
                     } else {
-                        snt_config cfg = {front, dec, arena, sizeof arena, NULL};
+                        /* The int8 (R7) engine computes per-token durations
+                         * internally; read them back and derive the same
+                         * word spans the pq8/f32 engines publish. */
+                        static int32_t int8_durs[MAX_IDS];
+                        snt_config cfg = {front, dec, arena, sizeof arena,
+                                          NULL, int8_durs, n_ids};
                         snt_stats st;
+                        long base = sink.n;
                         rc = snt_synthesize(&cfg, ids, n_ids, wav_cb, &sink, &st);
+                        if (rc == 0) {
+                            SntWordSpan *sp = words + n_words;
+                            int ns = word_spans_from_ids(ids, int8_durs,
+                                                         n_ids, sp,
+                                                         MAX_WORDS - n_words);
+                            for (int g = 0; g < ns; g++) {
+                                sp[g].start = base + sp[g].start * INT8_HOP;
+                                sp[g].end = base + sp[g].end * INT8_HOP;
+                            }
+                            nspans = ns;
+                        }
                         spoke = 1;
                     }
                 }
@@ -893,9 +912,11 @@ int main(int argc, char **argv) {
          * that line) gates both files. Absence is the plugin's "no real
          * timing" signal, so the int8 and nano engines and every failed run
          * write nothing. See the format note at the top of this file. */
-        if (rc_all == 0 && n_words > 0 && (g_engine_pq8 || g_engine_f32)) {
+        if (rc_all == 0 && n_words > 0) {
             char tpath[1100];
-            int hop = g_engine_pq8 ? SNT_PIPERLITE_Q8_HOP : SNT_PIPERLITE_HOP;
+            int hop = g_engine_pq8 ? SNT_PIPERLITE_Q8_HOP
+                    : g_engine_f32 ? SNT_PIPERLITE_HOP
+                    : INT8_HOP;
             snprintf(tpath, sizeof tpath, "%s.timing", output);
             FILE *tf = fopen(tpath, "w");
             if (tf) {

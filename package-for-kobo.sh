@@ -270,6 +270,14 @@ if [ "$WITH_SANOTTS" = true ]; then
         ( cd "$SANO_CORE_DIR" && patch -p1 < "$SANO_PATCH" )
     fi
 
+    # Read the int8 engine's per-token durations back out so the kristin
+    # voice publishes real word timing like the pq8/f32 engines.
+    SANO_PATCH2="$SCRIPT_DIR/sanotts/patches/0002-int8-duration-readout.patch"
+    if [ -f "$SANO_PATCH2" ] && ! grep -q "dur_out" "$SANO_CORE_DIR/include/snt_tts.h"; then
+        echo "Applying sanoTTS core patch: int8 duration read-out..."
+        ( cd "$SANO_CORE_DIR" && patch -p1 < "$SANO_PATCH2" )
+    fi
+
     echo "Cross-compiling snt_server (static musl, armv7hf)..."
     SANO_OUT=$(nix-build "$SCRIPT_DIR/cross-build-snt-server.nix" --no-out-link)
     if [ -f "$SANO_OUT/bin/snt_server" ]; then
