@@ -84,7 +84,39 @@ extra instruction, robust under every codegen tested.  The gate ladder now
 shakes codegen with three -frandom-seed values.  Worth an upstream GCC bug
 report.
 
-## Device baseline (scalar binary, SNT_THREADS unset)
+## Device results (2026-10-19, .142 single-core MTK MT8110, Cortex-A9)
+
+Real-hardware gates: kernel byte test 400 cases ALL PASS; pq8 driver A/B
+byte-identical; the int8 determinism hash is IDENTICAL across the scalar and
+NEON server builds (13c5f527e6a21e00) - byte-identical audio on hardware.
+
+12-text corpus, 3 passes, includes one model load per pass:
+
+| engine | binary | RTF min | RTF med | RTF max |
+|---|---|---|---|---|
+| int8 | scalar (deployed 0.2.x) | 0.1708 | 0.1708 | 0.1708 |
+| int8 | NEON | 0.0793 | 0.0793 | 0.0797 |
+| pq8 | scalar (deployed 0.2.x) | 5.8183 | 5.8183 | 5.8308 |
+| pq8 | NEON | 3.4907 | 3.4907 | 3.5175 |
+
+Speedups on hardware: int8 **2.15x**, pq8 **1.67x** (pq8 is partly
+memory-bound at the 16-bit planes, hence less than int8's ratio). The
+determinism hash per corpus is IDENTICAL between the scalar and NEON builds
+for both engines: byte-identical audio on real hardware, not just under
+qemu. SNT_THREADS=2 on this single-core device: int8 RTF 0.0795 vs 0.0793
+serial, no regression (worker never wins the one core).
+
+## Strategic finding: amy (pq8) is not real-time on ARMv7 Kobos
+
+Scalar pq8 is RTF 5.82 on a single-core A9 and 3.49 with NEON. Even at a
+perfect 2x parallel split on dual-core devices, amy stays around RTF 1.7 -
+slower than real time everywhere in the Kobo fleet. The kernel work makes
+amy ~40% less bad and keeps audio byte-identical, but no amount of this
+optimization makes amy real-time on these SoCs. kristin (int8) at RTF 0.079
+NEON single-core is 44x faster than amy NEON. The realistic product paths
+are (a) flip the default voice to kristin, (b) ship a lighter pq8 export
+(smaller width) for ARMv7, or (c) accept amy only on much faster hardware.
+This is a product decision, not a kernel one.
 
 Pending: needs device access (`.142` single-core MTK documented; Libra Color
 dual-core access pattern to be confirmed). Matrix to fill:

@@ -35,6 +35,7 @@ ESPEAK_DATA=${ESPEAK_DATA:-}
 ESPEAK_VOICE=
 LEN_SCALE=
 OUT=
+EXTRA=
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -50,6 +51,9 @@ while [ $# -gt 0 ]; do
         --voice) ESPEAK_VOICE=$2; shift 2 ;;
         --length-scale) LEN_SCALE=$2; shift 2 ;;
         --out) OUT=$2; shift 2 ;;
+        # Appended verbatim to the server command line (e.g. the Kobo
+        # --loader/--loader-libdir flags for the bundled glibc espeak-ng).
+        --extra) EXTRA="$EXTRA $2"; shift 2 ;;
         *) echo "unknown flag: $1" >&2; exit 2 ;;
     esac
 done
@@ -106,6 +110,7 @@ case "$ENGINE" in
     pq8|f32) FLAGS="$FLAGS --pause-scale 2.5" ;;
 esac
 [ -n "$LEN_SCALE" ] && FLAGS="$FLAGS --length-scale $LEN_SCALE"
+[ -n "$EXTRA" ] && FLAGS="$FLAGS $EXTRA"
 if [ "$ENGINE" != nano ]; then
     FLAGS="$FLAGS --espeak-bin $ESPEAK_BIN --espeak-data $ESPEAK_DATA --voice $ESPEAK_VOICE"
     case "$ENGINE" in f32) FLAGS="$FLAGS --phonemes fr" ;; esac
