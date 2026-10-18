@@ -202,8 +202,8 @@ Two Bluetooth stacks are supported, auto-detected at runtime:
 
 | Stack | Devices | Audio path |
 |-------|---------|------------|
-| **MTK** (mtkbtmwrpc) | Clara 2E, Sage (fw < 4.38), Libra Colour | GStreamer persistent pipeline |
-| **BlueZ** (bluetoothd) | Libra 2 / Io, Sage (fw >= 4.38) | aplay via ALSA |
+| **MTK** (mtkbtmwrpc) | Clara 2E, Sage (fw < 4.38), Libra Colour | `audioout` daemon (GStreamer vendor sink, persistent) |
+| **BlueZ** (bluetoothd) | Libra 2 / Io, Sage (fw >= 4.38) | `audioout` daemon (bluealsa PCM) when enabled; aplay via ALSA otherwise |
 
 On MTK devices the BT audio pipeline uses an exclusive abstract socket. If audio stops working after a crash, restart KOReader -- the plugin kills orphan processes on startup.
 
@@ -211,6 +211,8 @@ On BlueZ devices, KOReader's startup script kills `bluetoothd` and `bluealsa` wh
 
 > On MTK Kobo devices, the mtkbtmwrpc daemon binds a single abstract socket. Only one GStreamer pipeline can hold it at a time. The plugin keeps one persistent pipeline alive across sentences to avoid reconnection gaps. On BlueZ devices, the plugin starts `bluetoothd` and resets the HCI adapter automatically when you power on Bluetooth.
 > **Known issue on MTK devices:** MBROLA voices other than `mb-en1` (UK English Male 1) may produce mid-sentence audio repeats due to a firmware bug in the MTK Bluetooth SBC encoder. This affects all MBROLA voices except `mb-en1`. See [docs/MBROLA_MTK_REPEAT_BUG.md](docs/MBROLA_MTK_REPEAT_BUG.md) for the full diagnostic report.
+
+**The `audioout` daemon (Kobo MTK, experimental on BlueZ).** On MTK devices the plugin now routes all read-aloud and audiobook audio through a small background daemon (`audioout`) that owns the Bluetooth pipeline for the whole session: sentences play without reconnection gaps, pause keeps the link alive with silence, position comes from the sink itself (so the highlight tracks the real audio), and volume changes apply without a pipeline rebuild. It is on by default on MTK; the toggle lives in **Voice settings** (and in the read-along bar's TTS settings). If the daemon cannot start or the Bluetooth link dies mid-read, playback fails with the usual Bluetooth message -- there is no second implementation behind it anymore. On BlueZ devices the same daemon drives the bluealsa PCM when enabled; audiobook file playback on BlueZ still uses the direct aplay path.
 
 For the full platform audio and Bluetooth architecture (Kobo generations, Kindle, Android), see [docs/PLATFORM_AUDIO.md](docs/PLATFORM_AUDIO.md). AirPods Pro 3 on Kindle Paperwhite 11 (what works, pause/resume keepalive, stem Play/Pause limitation): [docs/AIRPODS_PRO3_KINDLE.md](docs/AIRPODS_PRO3_KINDLE.md).
 
@@ -650,10 +652,11 @@ If you don't want to use the packaging script, you can assemble the Piper runtim
 
 ## To Do
 
-- Real word-level timing ships for the sanoTTS pq8 and f32 engines, which read
-  the duration student's own per-phoneme counts back out of the synthesizer
-  (see [sanotts/README.md](sanotts/README.md)). The espeak, Piper, Android,
-  int8 and nano paths still estimate timing from character counts
+- Real word-level timing ships for the sanoTTS pq8, f32 and int8 engines,
+  which read the duration student's own per-phoneme counts back out of the
+  synthesizer (see [sanotts/README.md](sanotts/README.md)), and per-character
+  timing ships for sanoTTS-jp. The espeak, Piper, Android and nano paths
+  still estimate timing from character counts
 - Add PDF/DjVu highlight support (currently EPUB only)
 - Integrate more TTS backends
 - Improve accessibility
