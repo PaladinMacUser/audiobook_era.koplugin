@@ -6248,11 +6248,11 @@ function TTSEngine:_killAudioProcess()
     end
 end
 
---[[--%nStart a BT keepalive process that plays silence to hold the A2DP
-connection alive.  Without this, the BT audio sink disconnects after
-~1-2s of idle time, causing the next gst-launch to crash.
-Called from onPlaybackComplete via a short delay — if the next sentence
-is immediately ready, play() cancels this before it starts.
+--[[--
+Digital volume fragment for the gst-launch pipelines: a ` ! volume v=…`
+element when the device's GStreamer has the volume element, else empty so
+a stripped build can never stop playback.  Result cached per session.
+--]]
 function TTSEngine:_gstVolumeFragment()
     if self._gst_volume_available == nil then
         local h = io.popen("gst-inspect-1.0 volume 2>/dev/null | head -1")
