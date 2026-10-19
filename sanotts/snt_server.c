@@ -40,7 +40,7 @@
  * the bundled armhf espeak-ng through the bundled glibc loader on stock Kobo
  * rootfs); the gap args size the silence inserted after comma/period clauses
  * (defaults 150/350 ms; colon 220, semicolon 250).
- * Timing sidecar (pq8 and f32 only). Alongside each WAV, "<wav>.timing" is
+ * Timing sidecar (pq8, f32 and int8). Alongside each WAV, "<wav>.timing" is
  * written with the word boundaries the duration student already produced,
  * then immediately discarded by the old code. Line-oriented ASCII integers:
  *
@@ -910,8 +910,9 @@ int main(int argc, char **argv) {
          * stdout protocol stays one path per line. Written and closed BEFORE
          * the path is printed, so the wrapper's "<wav>.done" marker (made from
          * that line) gates both files. Absence is the plugin's "no real
-         * timing" signal, so the int8 and nano engines and every failed run
-         * write nothing. See the format note at the top of this file. */
+         * timing" signal: int8/pq8/f32 fill word spans (int8 since the
+         * duration-readout patch), while the nano engine and every failed
+         * run write nothing. See the format note at the top of this file. */
         if (rc_all == 0 && n_words > 0) {
             char tpath[1100];
             int hop = g_engine_pq8 ? SNT_PIPERLITE_Q8_HOP

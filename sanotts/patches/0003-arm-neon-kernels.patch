@@ -161,7 +161,7 @@ diff -ruN a/ports/arm-neon/README.md b/ports/arm-neon/README.md
 diff -ruN a/ports/arm-neon/snt_port_arm.c b/ports/arm-neon/snt_port_arm.c
 --- a/ports/arm-neon/snt_port_arm.c	1970-01-01 01:00:00.000000000 +0100
 +++ b/ports/arm-neon/snt_port_arm.c	2026-10-18 23:28:24.888559889 +0200
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,326 @@
 +/* snt_port_arm.c -- ARMv7 NEON kernels + pthread par port for Kobo
 + * (Cortex-A7/A9, NEON-VFPv3, hard-float).  One TU replacing both
 + * snt_kernels_ref.c and ports/host/snt_port_host.c on the link line.
@@ -170,9 +170,9 @@ diff -ruN a/ports/arm-neon/snt_port_arm.c b/ports/arm-neon/snt_port_arm.c
 + * every optimized kernel reproduces snt_kernels_ref.c exactly):
 + *   - snt_dot_s8 / snt_matvec_s8: products widen int8*int8 -> int16
 + *     (vmull_s8), pairwise-add at extended precision into int32
-+ *     (vpadalq_s16; the pairwise sum never truncates to int16).  Integer
++ *     (vpaddlq_s16 + vaddq_s32; never truncates to int16).  Integer
 + *     addition is associative and commutative, so no lane grouping or
-+ *     ordering can change the result.  Final horizontal add is int32.
++ *     ordering can change the result; the final horizontal add is int32.
 + *   - snt_dot_s16s8 / snt_matvec_s16s8: vmovl widens int8 -> int16, then
 + *     vmlal_s16 accumulates int16*int16 -> int32 per disjoint lane.
 + *   - Rounding-sensitive code (lrintf requant epilogues, fp32 mixing,

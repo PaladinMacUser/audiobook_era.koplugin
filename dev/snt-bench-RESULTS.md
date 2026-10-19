@@ -128,8 +128,8 @@ dual-core access pattern to be confirmed). Matrix to fill:
 | Libra Color | f32 | 1 | pending | |
 | Libra Color | int8 | 2 | pending | after M3 |
 | Libra Color | pq8 | 2 | pending | after M4 |
-| .142 (MTK) | int8 | 1 | pending | |
-| .142 (MTK) | pq8 | 1 | pending | |
+| .142 (MTK) | int8 | 1 | 0.0793 (NEON; scalar 0.1708) | 2026-10-19 table above |
+| .142 (MTK) | pq8 | 1 | 3.4907 (NEON; scalar 5.8183) | 2026-10-19 table above |
 
 ## pq8 profile ranking (host, callgrind, 2 sentences, -O2)
 

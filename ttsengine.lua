@@ -1177,7 +1177,8 @@ function TTSEngine:synthesizeCommand(text, callback)
         end
     end
     if self.backend == self.BACKENDS.ESPEAK then
-        -- espeak-ng supports word timing output
+        -- espeak-ng gives no word timing back; the sync controller falls
+        -- back to per-word duration estimates for this backend
         local speed = math.floor(175 * self.rate) -- Default is 175 wpm
         local pitch = self.pitch or 50
         local amplitude = math.floor((self.volume or 1.0) * 100)
@@ -2459,9 +2460,9 @@ Play the synthesized audio.
 @return boolean Success
 --]]
 --[[--
-Client for the audioout daemon (Tier 2, default off via the
-`audioout_enabled` setting). The daemon owns the audio pipeline across
-sentences: no restart churn on volume/rate changes, a real
+Client for the audioout daemon (Tier 2, on by default; the
+`audioout_enabled` setting opts out). The daemon owns the audio pipeline
+across sentences: no restart churn on volume/rate changes, a real
 rendered-position clock from a sink-pad probe, and deterministic
 completion via status polling. See dev/audioout/PLAN.md.
 --]]
@@ -4247,7 +4248,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     -- For Bluetooth: use a single persistent gst-launch that never stops.
     -- A feeder script writes silence between sentences to keep BT A2DP alive,
     -- and switches to real audio on demand via a control file.
-    -- === AUDIOOUT DAEMON PATH (Tier 2, default off) ===
+    -- === AUDIOOUT DAEMON PATH (Tier 2, default on; opt-out in settings) ===
     -- Replaces the shell-wrapper persistent pipeline for TTS read-along:
     -- the daemon keeps the pipeline up across sentences, feeds silence
     -- between groups (no 120 s keepalive WAV), and reports a real clock.
@@ -6948,8 +6949,9 @@ function TTSEngine:forceKillAll()
     -- Stop platform-native helper daemon if it is running.
     self:_stopNativeDaemon()
     -- SIGKILL to guarantee hung gst-launch processes die (e.g. stuck in
-    -- BT audio driver).  _stopPersistentPipeline already used SIGKILL for
-    -- the pipeline; this catches any legacy-path or newly spawned strays.
+    -- BT audio driver).  This catches any legacy-path or newly spawned
+    -- strays; the audioout daemon's pipeline is torn down by the daemon
+    -- itself.
     os.execute("killall -9 gst-launch-1.0 2>/dev/null")
     -- Full Piper shutdown: stop persistent servers AND kill per-process instances
     self._piper:shutdown()

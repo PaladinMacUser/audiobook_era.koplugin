@@ -225,11 +225,12 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
     end
 
     -- Tier 2 audio output daemon (Kobo MTK Bluetooth only), also reachable
-    -- from the read-along overlay's TTS settings picker.  Default off;
-    -- failures fall back to the legacy pipeline for the session.
+    -- from the read-along overlay's TTS settings picker.  Default on: it
+    -- is the only MTK pipeline since the wrapper removal; a failure
+    -- degrades the session to the legacy path.
     if plugin.bt_manager and plugin.bt_manager:isMtkKobo() then
         table.insert(menu, {
-            text = _("Use audio output daemon (experimental)"),
+            text = _("Use audio output daemon"),
             checked_func = function()
                 return plugin:getSetting("audioout_enabled", true)
             end,
@@ -239,7 +240,8 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
             help_text = _(
                 "Routes read-aloud audio through a background daemon that "
                 .. "keeps the Bluetooth pipeline open between sentences and "
-                .. "tracks real playback position. Experimental."
+                .. "tracks real playback position. On by default; turning "
+                .. "it off uses the legacy per-play pipeline."
             ),
         })
     end
@@ -2269,11 +2271,12 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
     })
     -- Tier 2 audio output daemon (Kobo MTK Bluetooth only).  Owns the
     -- pipeline across sentences: no restart churn, real playback clock,
-    -- deterministic completion.  Default off; failures fall back to the
-    -- legacy pipeline for the rest of the session.
+    -- deterministic completion.  Default on (the only MTK pipeline since
+    -- the wrapper removal); a failure degrades the session to the legacy
+    -- path.
     if plugin.bt_manager and plugin.bt_manager:isMtkKobo() then
         table.insert(items, {
-            text = _("Use audio output daemon (experimental)"),
+            text = _("Use audio output daemon"),
             checked_func = function()
                 return plugin:getSetting("audioout_enabled", true)
             end,
@@ -2283,7 +2286,8 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
             help_text = _(
                 "Routes read-aloud audio through a background daemon that " ..
                 "keeps the Bluetooth pipeline open between sentences and " ..
-                "tracks real playback position. Experimental.")
+                "tracks real playback position. On by default; turning " ..
+                "it off uses the legacy per-play pipeline.")
         })
     end
     if backend == plugin.tts_engine.BACKENDS.PIPER then
