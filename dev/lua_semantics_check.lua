@@ -46,8 +46,12 @@ need("ttsengine.lua", "play", "function")
 need("ttsengine.lua", "_gstVolumeFragment", "function")
 need("ttsengine.lua", "_isAudioProcessRunning", "function")
 need("ttsengine.lua", "listSanottsVoices", "function")
+need("ttsengine.lua", "_releaseAudioout", "function")
 need("menubuilder.lua", "buildSanottsVoiceMenu", "function")
 need("piperqueue.lua", "startServers", "function")
+need("audioout.lua", "externalStart", "function")
+need("audioout.lua", "seek", "function")
+need("audioout.lua", "resume", "function")
 
 if fails > 0 then
     print("SEMANTIC CHECK FAILED: " .. fails .. " missing")
