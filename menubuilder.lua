@@ -424,7 +424,7 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
     elseif plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.SANOTTS then
         table.insert(menu, {
             text_func = function()
-                local name = plugin.tts_engine.sanotts_voice_name or "amy"
+                local name = plugin.tts_engine.sanotts_voice_name or "kristin"
                 return T(_("sanoTTS voice: %1"), name)
             end,
             sub_item_table_func = function()
@@ -1120,7 +1120,7 @@ function MenuBuilder.buildSanottsVoiceMenu(plugin)
         table.insert(menu, {
             text = voice.label,
             checked_func = function()
-                return (plugin.tts_engine.sanotts_voice_name or "amy") == voice.name
+                return (plugin.tts_engine.sanotts_voice_name or "kristin") == voice.name
             end,
             callback = function()
                 plugin.tts_engine:setSanottsVoice(voice.name)
@@ -2036,7 +2036,7 @@ function MenuBuilder._sanottsVoicePickerItems(plugin)
         and plugin.tts_engine:listSanottsVoices() or {}
     local selected = plugin:getSetting("sanotts_voice", nil)
         or (plugin.tts_engine and plugin.tts_engine.sanotts_voice_name)
-        or "amy"
+        or "kristin"
     for _, voice in ipairs(voices) do
         local name, label = voice.name, voice.label
         table.insert(items, {
@@ -2211,7 +2211,7 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
     elseif backend == plugin.tts_engine.BACKENDS.SANOTTS then
         -- Name the sanoTTS voice actually selected, not an espeak language.
         local name = plugin:getSetting("sanotts_voice", nil)
-            or plugin.tts_engine.sanotts_voice_name or "amy"
+            or plugin.tts_engine.sanotts_voice_name or "kristin"
         voice_label = name
         if plugin.tts_engine.listSanottsVoices then
             for _, v in ipairs(plugin.tts_engine:listSanottsVoices()) do

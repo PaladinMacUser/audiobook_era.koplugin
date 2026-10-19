@@ -374,14 +374,16 @@ function TTSEngine:detectBackend()
         local sanotts_server = sanotts_dir .. "/snt_server"
         local found_sanotts = false
         if ensureBinary(sanotts_server) and binaryRunsOnHost(sanotts_server) then
-            -- Voice inventory with per-voice engine config.  amy (piperlite
-            -- int8, ~1.5 MB across four blob files, the English quality
-            -- voice), kristin (R7 int8, ~700 KB, the light voice, noticeably
-            -- less accurate) and fr (fp32 piperlite pair, ~6.3 MB, French,
+            -- Voice inventory with per-voice engine config.  kristin (R7
+            -- int8, ~700 KB, the fast default: the ARM NEON kernels make it
+            -- comfortably real-time even on single-core Kobos), amy
+            -- (piperlite int8, ~1.5 MB across four blob files, the English
+            -- quality voice, opt-in: its pq8 stack is heavier than real
+            -- time on ARMv7) and fr (fp32 piperlite pair, ~6.3 MB, French,
             -- converted from upstream's fp16 package).  Either voice alone
             -- is enough to offer the backend; the active one is the
-            -- persisted setting when its blobs exist, else amy, else the
-            -- next best available.
+            -- persisted setting when its blobs exist, else kristin, else
+            -- the next best available.
             self.sanotts_voices = {}
             self.sanotts_voice_defs = {
                 amy = { engine = "pq8", espeak_voice = "en-us", phonemes = "en" },
@@ -410,11 +412,11 @@ function TTSEngine:detectBackend()
                 ff:close(); fw:close(); df:close(); dwf:close()
                 self.sanotts_voices.fr = sanotts_dir .. "/voice-fr"
             end
-            local voice_name = self.sanotts_voice_name or "amy"
+            local voice_name = self.sanotts_voice_name or "kristin"
             if not self.sanotts_voices[voice_name] then
-                voice_name = self.sanotts_voices.amy and "amy"
-                    or (self.sanotts_voices.fr and "fr"
-                    or (self.sanotts_voices.kristin and "kristin" or nil))
+                voice_name = self.sanotts_voices.kristin and "kristin"
+                    or (self.sanotts_voices.amy and "amy"
+                    or (self.sanotts_voices.fr and "fr" or nil))
             end
             if voice_name then
                 found_sanotts = true
@@ -6996,14 +6998,14 @@ function TTSEngine:setPiperSpeaker(id)  self._piper:setSpeaker(id) end
 function TTSEngine:listSanottsVoices()
     local out = {}
     local v = self.sanotts_voices or {}
+    if v.kristin then
+        table.insert(out, { name = "kristin", label = "kristin (English, 700 KB, fast)", dir = v.kristin })
+    end
     if v.amy then
-        table.insert(out, { name = "amy", label = "amy (English, 1.5 MB)", dir = v.amy })
+        table.insert(out, { name = "amy", label = "amy (English quality, 1.5 MB, slow on device)", dir = v.amy })
     end
     if v.fr then
         table.insert(out, { name = "fr", label = "fr-siwis (French, 6.3 MB)", dir = v.fr })
-    end
-    if v.kristin then
-        table.insert(out, { name = "kristin", label = "kristin (English light, less accurate)", dir = v.kristin })
     end
     return out
 end
