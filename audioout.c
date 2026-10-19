@@ -76,6 +76,12 @@
 #define LINE_MAX_LEN 2048
 /* Bounded writes keep the poll loop responsive to commands. */
 #define FEED_CHUNK (32 * 1024)
+/* Pacing: keep the pipeline at most this many ms ahead of the audible
+ * position.  The mtk sink accepts without backpressure, so an unbounded
+ * feed lets the pipeline swallow the whole queue in seconds and the
+ * firmware/ring then drops or delays it unpredictably (see
+ * dev/audioout/FINDING-2026-10-19-instant-completion.md). */
+#define FEED_LEAD_MS 3000
 #define SILENCE_CHUNK (8 * 1024)
 #define F_SETPIPE_SZ 1031
 /* Output caps: S16LE stereo 48 kHz. */
@@ -176,6 +182,11 @@ static struct {
     int external_wait_first;            /* rebaseline base at first movement */
     long long external_base_ms;
     long long external_frozen_ms;       /* position while paused */
+    long long external_anchor_wall_ms;  /* wall time the stream's first
+                                           buffer reached the sink */
+    int anchor_wait;                    /* set on a fresh pipeline or
+                                           resume: anchor the audible clock
+                                           at the next sink acceptance */
 
     /* Acceptance pacing: a healthy A2DP sink accepts at real time.  A sink
      * with a dead peer (D-Bus still lists it) swallows buffers at decode
@@ -253,6 +264,12 @@ refresh_clock(void) {
                 (long long)(acc_bytes / OUT_BYTES_PER_MS) - acc_boundary_ms;
             S.external_wait_first = 0;
         }
+        if (S.anchor_wait) {
+            S.external_base_ms =
+                (long long)(acc_bytes / OUT_BYTES_PER_MS) - acc_boundary_ms;
+            S.external_anchor_wall_ms = acc_arrival_ms;
+            S.anchor_wait = 0;
+        }
     }
 }
 
@@ -282,6 +299,26 @@ rendered_ms(void) {
     long long acc = (long long)(acc_bytes / OUT_BYTES_PER_MS);
     if (est < 0) est = 0;
     if (est > acc) est = acc;
+    return est;
+}
+
+/* Audible stream position in external mode.  The mtk sink accepts buffers
+ * without backpressure (they drain into the Bluetooth firmware), so no
+ * acceptance-derived clock represents what the listener hears: a firehose
+ * acceptance sweeps any intake-based model past clips that are still
+ * playing, which made every clip "complete" within a second of queueing.
+ * Instead, anchor once when the stream's first buffer reaches the sink and
+ * advance at audio rate from that anchor; underruns hold at the last
+ * delivered sample (min with the intake position); pauses freeze at the
+ * frozen value until the client rebaselines on resume. */
+static long long
+audible_ms(void) {
+    if (S.paused) return S.external_frozen_ms;
+    if (S.anchor_wait || acc_bytes == 0) return S.external_frozen_ms;
+    long long est = S.external_base_ms + (wall_now - S.external_anchor_wall_ms);
+    long long acc = (long long)(acc_bytes / OUT_BYTES_PER_MS);
+    if (est > acc) est = acc;
+    if (est < S.external_base_ms) est = S.external_base_ms;
     return est;
 }
 
@@ -421,6 +458,8 @@ fail:
 
 static int
 pipeline_build(int rate, int channels) {
+    S.anchor_wait = 1;
+    S.external_frozen_ms = 0;
     char launch[1600];
     char vol[64] = "";
     if (G.gst_element_factory_find && G.gst_element_factory_find("volume"))
@@ -751,6 +790,20 @@ feed_tick(void) {
         return;
     }
     if (S.paused || S.fifo_fd < 0) return;
+    /* Pace EVERY feed (clips, gaps and idle keepalive alike) against the
+     * audible position: the listener has heard up to audible_ms(), the FIFO
+     * head is at fifo_written; never let the lead exceed the window.  The
+     * fifo's own EAGAIN backpressure only kicks in once every downstream
+     * buffer is full, which on the firehose mtk sink is far too late.
+     * Before the anchor fires there is nothing to pace against: feed. */
+    if (!S.anchor_wait) {
+        long long fed_head_ms =
+            (long long)((S.fifo_written * 1000ull) /
+                        (unsigned long long)(g_rate * g_channels * 2));
+        if (fed_head_ms - audible_ms() > FEED_LEAD_MS) {
+            return;   /* enough buffered ahead; next tick */
+        }
+    }
     if (S.feed_idx < 0 && S.queue_len == 0) {
         fifo_write(silence_chunk, SILENCE_CHUNK);   /* idle keepalive */
         return;
@@ -941,9 +994,7 @@ handle_command(char *line) {
                 S.queue[S.queue_len - 1].duration_ms);
     } else if (!strcmp(cmd, "pause")) {
         if (S.external_active && !S.paused) {
-            S.external_frozen_ms = (long long)(acc_bytes / OUT_BYTES_PER_MS)
-                                   - S.external_base_ms;
-            if (S.external_frozen_ms < 0) S.external_frozen_ms = 0;
+            S.external_frozen_ms = audible_ms();
         }
         S.paused = 1;
         respond("{\"ok\":true,\"state\":\"paused\"}");
@@ -954,6 +1005,7 @@ handle_command(char *line) {
             S.external_wait_first = 1;
             S.external_base_ms = 0;
         }
+        if (S.paused) S.anchor_wait = 1;
         S.paused = 0;
         respond("{\"ok\":true,\"state\":\"%s\"}", state_str());
     } else if (!strcmp(cmd, "stop")) {
@@ -1007,6 +1059,9 @@ handle_command(char *line) {
         S.external_wait_first = 1;
         S.external_base_ms = 0;
         S.external_frozen_ms = 0;
+        S.external_anchor_wall_ms = 0;
+        S.anchor_wait = 1; /* new stream epoch: re-anchor even when the
+                              pipeline was not rebuilt */
         S.unpaced = 0;
         S.pace_fast_ticks = 0;
         S.pace_arm_ms = wall_now;
@@ -1033,16 +1088,14 @@ handle_command(char *line) {
         long long rend = rendered_ms();
         long long fed = (long long)((S.fifo_written * 1000ull) /
                                     (unsigned long long)(g_rate * g_channels * 2));
-        if (rend > S.fed_end_ms) rend = S.fed_end_ms;
-        if (S.external_active) {
-            /* External mode: position is stream-relative from the probe,
-             * frozen while paused (keepalive silence would otherwise run
-             * the clock away from the media position). */
-            rend = S.paused ? S.external_frozen_ms
-                            : (long long)(acc_bytes / OUT_BYTES_PER_MS)
-                                  - S.external_base_ms;
+        if (!S.out_alsa) {
+            /* The audible clock (see audible_ms), so the client's sync math
+             * tracks what the listener hears instead of an intake clock the
+             * firehose mtk sink sweeps ahead. */
+            rend = audible_ms();
             if (rend < 0) rend = 0;
         }
+        if (rend > S.fed_end_ms) rend = S.fed_end_ms;
         respond("{\"ok\":true,\"state\":\"%s\",\"pos_ms\":%lld,"
                 "\"accepted_ms\":%lld,\"fed_ms\":%lld,\"fed_end_ms\":%lld,"
                 "\"done_count\":%llu,\"queue\":%d,\"rate\":%d,\"channels\":%d,"
@@ -1124,8 +1177,12 @@ tick_bookkeeping(void) {
         S.pace_fast_ticks = 0;
     }
 
-    /* Clip completion: the rendered estimate crossed the clip's end. */
-    long long rend = rendered_ms();
+    /* Clip completion: the rendered estimate crossed the clip's end.  In
+     * external mode that estimate is the audible clock: the intake-based
+     * rendered_ms() sweeps past every clip end at queue time on a sink
+     * that accepts without pacing, completing clips that are still
+     * playing (see dev/audioout/FINDING-2026-10-19-instant-completion.md). */
+    long long rend = S.out_alsa ? alsa_pos_ms() : audible_ms();
     while (S.queue_len > 0 && rend >= S.queue[0].end_ms) {
         log_line("clip done: %s (end_ms=%lld)", S.queue[0].path,
                  S.queue[0].end_ms);

@@ -43,3 +43,27 @@ The TTS settings toggle "Use audio output daemon (experimental)" OFF returns
 playback to the legacy gst-bt path (whose _gstVolumeFragment/_isAudioProcessRunning
 definitions an earlier unterminated comment had swallowed; restored in 65f9853),
 whose duration-based completion paces the highlight correctly on MTK.
+
+## Resolved (same day, commit after this note)
+
+Root cause was twofold, both in the daemon:
+
+1. The completion and status clocks were acceptance-intake based.  The mtk
+   sink's firehose intake swept them across every queued clip end at queue
+   time.  Fix: an anchor-based audible clock (`audible_ms()`) - anchored once
+   when the stream's first buffer reaches the sink, advancing at audio rate,
+   clamped to the intake position on underrun, frozen while paused, re-armed
+   on resume/rebuild/flush.  It now drives clip completion AND the status
+   pos_ms (which the client's highlight sync consumes directly) in every mtk
+   mode; alsa keeps its hardware delay clock.
+2. The FIFO feed was unbounded, so the pipeline ingested 123 s of stream in
+   19 s of wall time on the test device (the gst ring + firmware absorbed it,
+   causing downstream drops/delays - the audible skips).  Fix: feed pacing -
+   the daemon holds the FIFO at most FEED_LEAD_MS (3 s) ahead of the audible
+   position, for clips, inter-clip gaps and idle keepalive alike.
+
+Verified on the single-core MTK test Kobo with BT audio: a 32.0 s clip
+completed 34.1 s after queue (pipeline + sink startup included), a 27.2 s
+clip 28.0 s after queue, spans chaining continuously, no UNPACED events, no
+pipeline errors, and the read-along highlight tracking the voice.
+dev/audioout/clock_test.lua automates the on-device check.
