@@ -400,6 +400,17 @@ function PiperQueue:buildBaseCommand()
         local espeak_voice_flag = string.format(' --voice "%s"', vcfg.espeak_voice or "en-us")
         local phoneme_flag = vcfg.phonemes and vcfg.phonemes ~= "en"
             and string.format(" --phonemes %s", vcfg.phonemes) or ""
+        -- Phonemizer: the in-process lexicon G2P (--g2p nano) replaces the
+        -- per-clause espeak fork+exec for English voices. The per-voice def
+        -- wins over the sanotts_g2p setting; absent flag = espeak path,
+        -- byte-identical to the legacy command line. French stays on espeak
+        -- until it has its own lexicon (the server rejects the combination).
+        local g2p = vcfg.g2p
+            or (engine.plugin and engine.plugin.getSetting
+                and engine.plugin:getSetting("sanotts_g2p", "espeak"))
+            or "espeak"
+        local g2p_flag = (g2p == "nano" and vcfg.phonemes ~= "fr")
+            and " --g2p nano" or ""
         -- Thread the sanoTTS server across both cores on multi-core devices
         -- (arm-neon port, patch 0004).  Older server binaries ignore the
         -- variable, so setting it unconditionally is safe.  Single-core
@@ -407,10 +418,10 @@ function PiperQueue:buildBaseCommand()
         -- for the one core.
         local threads_prefix = _cpu_cores > 1 and "SNT_THREADS=2 " or ""
         return string.format(
-            '%snice -n 19 %s%s --model "%s" --espeak-bin "%s" --espeak-data "%s"%s%s%s%s',
+            '%snice -n 19 %s%s --model "%s" --espeak-bin "%s" --espeak-data "%s"%s%s%s%s%s',
             threads_prefix, exec_prefix, engine.sanotts_server, engine.sanotts_voice_dir,
             espeak_bin, espeak_data, loader_flag, engine_args,
-            espeak_voice_flag, phoneme_flag)
+            g2p_flag, espeak_voice_flag, phoneme_flag)
     end
     local piper_bin = engine.piper_cmd or engine.backend_cmd or "piper"
     local model_flag = ""

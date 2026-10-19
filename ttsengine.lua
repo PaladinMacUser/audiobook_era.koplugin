@@ -386,9 +386,9 @@ function TTSEngine:detectBackend()
             -- the next best available.
             self.sanotts_voices = {}
             self.sanotts_voice_defs = {
-                amy = { engine = "pq8", espeak_voice = "en-us", phonemes = "en" },
-                fr = { engine = "f32", espeak_voice = "fr", phonemes = "fr" },
-                kristin = { engine = "int8", espeak_voice = "en-us", phonemes = "en" },
+                amy = { engine = "pq8", espeak_voice = "en-us", phonemes = "en", g2p = "espeak" },
+                fr = { engine = "f32", espeak_voice = "fr", phonemes = "fr", g2p = "espeak" },
+                kristin = { engine = "int8", espeak_voice = "en-us", phonemes = "en", g2p = "espeak" },
             }
             local af = io.open(sanotts_dir .. "/voice-amy/front_meta_q8.bin", "r")
             local aw = io.open(sanotts_dir .. "/voice-amy/front_weights_q8.bin", "r")

@@ -1130,6 +1130,28 @@ function MenuBuilder.buildSanottsVoiceMenu(plugin)
             end,
         })
     end
+
+    -- Phonemizer for English sanoTTS voices: the in-process lexicon G2P
+    -- (no espeak process per clause) vs the espeak path. Applies from the
+    -- next server spawn, so a change restarts the servers; French voices
+    -- keep espeak until they have their own lexicon.
+    table.insert(menu, {
+        text = _("Word phonemization: dictionary (no espeak)"),
+        checked_func = function()
+            return plugin:getSetting("sanotts_g2p", "espeak") == "nano"
+        end,
+        callback = function()
+            plugin:toggleSetting("sanotts_g2p", "espeak")
+            local pq = plugin.tts_engine and plugin.tts_engine._piper
+            if pq and pq.stopServers then pq:stopServers() end
+        end,
+        help_text = _(
+            "Reads the pronunciation dictionary directly instead of running "
+            .. "the espeak helper for every clause: faster and it keeps word "
+            .. "boundaries exact. Hard-to-read words (names) still fall back "
+            .. "to espeak per clause. French voices always use espeak."
+        ),
+    })
     return menu
 end
 
