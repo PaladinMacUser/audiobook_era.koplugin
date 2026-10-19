@@ -416,14 +416,6 @@ function Audiobook:_initSubmodules()
         end
     end)
 
-    -- ── Clean old transcoded files ──
-    pcall(function()
-        local Transcoder = dofile(pp .. "transcoder.lua")
-        if Transcoder then
-            Transcoder:new{plugin_dir = pp}:clearOldTranscodes(30)
-        end
-    end)
-
     -- ── Media playback modules (always load; works without a document) ──
     local ok_media, err_media = pcall(function()
         local function dofile_v25(name)
@@ -439,9 +431,7 @@ function Audiobook:_initSubmodules()
         end
         local MediaEngine = dofile_v25("mediaengine")
         local MediaSync = dofile_v25("mediasync")
-        local Transcoder = dofile(pp .. "transcoder.lua")
         self.media_engine = MediaEngine:new{plugin = self, plugin_dir = pp:sub(1, -2)}
-        self.transcoder = Transcoder:new{plugin_dir = pp}
         self.media_sync = MediaSync:new{
             plugin = self,
             media_engine = self.media_engine,
@@ -453,7 +443,6 @@ function Audiobook:_initSubmodules()
         self._media_modules_error = tostring(err_media)
         self.media_engine = nil
         self.media_sync = nil
-        self.transcoder = nil
     end
 
     -- ── Audiobookshelf modules (always load; works without a document) ──
@@ -2290,45 +2279,7 @@ function Audiobook:_doPlayAudioFile(file_path, playlist_files, start_position, a
     if not file_path or not self.media_sync then return end
     local playable_path = file_path
 
-    -- Transcode unsupported formats (M4B, OGG, FLAC, etc.) to MP3.
-    -- The transcoded MP3 preserves chapters and cover art.
-    if self.transcoder and not self.transcoder:isPlayable(file_path) then
-        local cached = self.transcoder:getPlayablePath(file_path)
-        if cached then
-            playable_path = cached
-            logger.warn("Audiobook: using cached transcode", cached)
-        else
-            local InfoMessage = require("ui/widget/infomessage")
-            local busy = InfoMessage:new{
-                text = _("Transcoding to MP3...\nThis may take a minute."),
-                timeout = 0,
-            }
-            UIManager:show(busy)
-            UIManager:forceRePaint()
-
-            local ok_trans, trans_path_or_err = pcall(function()
-                return self.transcoder:transcode(file_path)
-            end)
-
-            UIManager:close(busy)
-            UIManager:forceRePaint()
-
-            if ok_trans and trans_path_or_err then
-                playable_path = trans_path_or_err
-                logger.warn("Audiobook: transcoded to", playable_path)
-            else
-                local err_msg = type(trans_path_or_err) == "string" and trans_path_or_err or "unknown error"
-                logger.err("Audiobook: transcoding failed:", err_msg)
-                UIManager:show(InfoMessage:new{
-                    text = _("Transcoding failed: ") .. err_msg,
-                    timeout = 3,
-                })
-                return
-            end
-        end
-    end
-
-    -- Probe duration and chapters from the playable file (original MP3 or transcoded)
+    -- Probe duration and chapters from the audio file
     local duration = self.media_engine:probeDuration(playable_path)
     local chapters = {}
     local cover_path = nil
