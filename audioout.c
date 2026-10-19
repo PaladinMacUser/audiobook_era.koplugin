@@ -28,19 +28,27 @@
  * cross-check only.
  *
  * Protocol: one JSON object per line in, one JSON line per response.
- * Events are not pushed in M1; the client polls "status" and compares
- * done_count. Commands:
+ * Events are pushed best-effort to whichever client is connected at push
+ * time (a client that polls per command will miss pushes, so any fact the
+ * client must not miss is ALSO latched in status). Commands:
  *   {"cmd":"play","path":"...","gap_ms":300,"rate":22050,"channels":1}
  *       Queue a WAV clip (append). A rate/channels change vs the running
  *       pipeline rebuilds it internally and drops any queued clips.
  *   {"cmd":"pause"}    stop feeding clips, feed silence (in-flight buffered
  *                      audio still plays out; same semantics as the old
  *                      feeder pause)
- *   {"cmd":"resume"}   resume feeding
+ *   {"cmd":"resume","pos_ms":N}   resume feeding; with pos_ms (external
+ *                      mode only) the stream re-epochs at that position
  *   {"cmd":"stop"}     drop the queue, keep the A2DP link with silence
  *   {"cmd":"flush"}    drop the queue AND restart the pipeline (instant
  *                      silence, drops buffered audio too)
+ *   {"cmd":"seek","pos_ms":N,"total_ms":N}   external mode: drop the old
+ *                      stream's bytes, re-epoch the clock at pos_ms
+ *   {"cmd":"external","rate":R,"channels":C,"alsa_device":"...","pos_ms":N,
+ *    "total_ms":N}    external stream mode; pos_ms/total_ms place the
+ *                      clock on the client's timeline (book position)
  *   {"cmd":"status"}   state/pos_ms/accepted_ms/fed_ms/done_count/queue/...
+ *                      plus external_done (latched stream completion)
  *   {"cmd":"volume","value_x1000":800}
  *   {"cmd":"ping"} / {"cmd":"shutdown"}
  * Queue: 8 clips. When it runs dry the daemon feeds silence to hold the
@@ -177,9 +185,17 @@ static struct {
 
     /* External stream mode (media path): an outside writer (ffmpeg) feeds
      * the fifo; the daemon builds the pipeline, stays off the stream, and
-     * reports position from the probe clock. */
+     * reports position from the probe clock. Positions are on the CLIENT's
+     * timeline (book position), not since-pipeline-build: every fresh
+     * stream announces its start position and length (pos_ms/total_ms) and
+     * epoch_off_ms converts the since-build probe counters into that
+     * timeline. */
     int external_active;
-    int external_wait_first;            /* rebaseline base at first movement */
+    int external_wait_first;            /* rebaseline base at first movement
+                                           (legacy no-pos resume) */
+    long long epoch_off_ms;             /* client ms at since-build intake 0 */
+    long long external_total_ms;        /* stream length from the client */
+    int external_done;                  /* latched completion flag */
     long long external_base_ms;
     long long external_frozen_ms;       /* position while paused */
     long long external_anchor_wall_ms;  /* wall time the stream's first
@@ -274,7 +290,8 @@ refresh_clock(void) {
 }
 
 /* ALSA position: hardware delay tells exactly how many frames are still
- * between written and played. */
+ * between written and played. Shifted by the client-timeline epoch so an
+ * external stream started at a book offset reports book positions. */
 static long long alsa_pos_ms(void);
 
 static long long
@@ -287,7 +304,7 @@ alsa_pos_ms(void) {
     long long pos = written - d;
     int r = S.alsa_rate > 0 ? S.alsa_rate : 44100;
     if (pos < 0) pos = 0;
-    return pos * 1000LL / r;
+    return S.epoch_off_ms + pos * 1000LL / r;
 }
 
 /* Rendered stream position in ms (M0 model), capped at accepted. */
@@ -315,10 +332,13 @@ static long long
 audible_ms(void) {
     if (S.paused) return S.external_frozen_ms;
     if (S.anchor_wait || acc_bytes == 0) return S.external_frozen_ms;
-    long long est = S.external_base_ms + (wall_now - S.external_anchor_wall_ms);
-    long long acc = (long long)(acc_bytes / OUT_BYTES_PER_MS);
+    long long est = S.epoch_off_ms + S.external_base_ms
+                  + (wall_now - S.external_anchor_wall_ms);
+    long long acc = S.epoch_off_ms
+                  + (long long)(acc_bytes / OUT_BYTES_PER_MS);
     if (est > acc) est = acc;
-    if (est < S.external_base_ms) est = S.external_base_ms;
+    long long lo = S.epoch_off_ms + S.external_base_ms;
+    if (est < lo) est = lo;
     return est;
 }
 
@@ -455,6 +475,8 @@ fail:
 /* ------------------------------------------------------------------ */
 /* Pipeline lifecycle                                                   */
 /* ------------------------------------------------------------------ */
+
+static const unsigned char silence_chunk[SILENCE_CHUNK];
 
 static int
 pipeline_build(int rate, int channels) {
@@ -602,7 +624,7 @@ alsa_teardown(void) {
 /* Non-blocking write; returns bytes accepted.  -EPIPE (underrun, happens
  * after pause starvation) recovers and retries once. */
 static unsigned long long
-alsa_write(const unsigned char *buf, unsigned long long len) {
+alsa_write_raw(const unsigned char *buf, unsigned long long len) {
     unsigned long long total = 0;
     int frames_per_byte = S.alsa_channels * 2;
     while (total < len) {
@@ -625,17 +647,65 @@ alsa_write(const unsigned char *buf, unsigned long long len) {
     return total;
 }
 
+/* Software s16 scaling for the ALSA path (the gst path has the volume
+ * element). Scaled into a staging buffer so const or aliased inputs are
+ * never mutated. Values above 1.0 clip; the gst element saturates the same
+ * way, so the knob keeps its range on both outputs. */
+static unsigned char alsa_stage[FEED_CHUNK];
+
+static unsigned long long
+alsa_write(const unsigned char *buf, unsigned long long len) {
+    if (S.volume > 0.999 && S.volume < 1.001)
+        return alsa_write_raw(buf, len);
+    unsigned long long total = 0;
+    while (total < len) {
+        unsigned long long chunk = len - total;
+        if (chunk > sizeof alsa_stage) chunk = sizeof alsa_stage;
+        const unsigned char *p = buf + total;
+        unsigned long long even = chunk & ~1ULL;   /* whole samples */
+        for (unsigned long long i = 0; i < even; i += 2) {
+            int16_t s = (int16_t)(p[i] | (p[i + 1] << 8));
+            int32_t v = (int32_t)((double)s * S.volume);
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            alsa_stage[i] = (unsigned char)(v & 0xff);
+            alsa_stage[i + 1] = (unsigned char)((v >> 8) & 0xff);
+        }
+        if (even < chunk) alsa_stage[even] = p[even];
+        unsigned long long w = alsa_write_raw(alsa_stage, chunk);
+        total += w;
+        if (w < chunk) break;
+    }
+    return total;
+}
+
 static void
 pipeline_teardown(void) {
     if (S.pipe) {
+        /* Unblock filesrc before stopping the pipeline. The fifo is held
+         * O_RDWR (no EOF across rebuilds by design), so a starved filesrc
+         * sits in a blocking read; gst_pad_stop_task then waits for that
+         * task inside set_state(NULL) and the whole daemon deadlocks (the
+         * 3 s wedge guard below never runs: set_state blocks first). One
+         * burst of silence satisfies the pending read; the flushing check
+         * after each fill ends the task. Writes are nonblocking, so a
+         * fifo that is already full just returns EAGAIN. */
+        if (S.fifo_fd >= 0) {
+            for (int i = 0; i < 8; i++) {
+                if (write(S.fifo_fd, silence_chunk, SILENCE_CHUNK) <= 0) break;
+            }
+        }
         G.gst_element_set_state(S.pipe, GST_STATE_NULL);
         if (G.gst_element_get_state) {
             GstState cur = GST_STATE_VOID_PENDING, pend = GST_STATE_VOID_PENDING;
             /* Closing the MTK sink waits on the BT stack, which a wedged
              * peer can block forever.  Bound the wait; if the sink will
              * not close, exit so the client respawns a fresh daemon
-             * instead of every later command timing out. */
-            G.gst_element_get_state(S.pipe, &cur, &pend, 3 * GST_SECOND);
+             * instead of every later command timing out.  The cast matters
+             * on armhf: GST_SECOND is 10^9, which overflows a 32-bit long
+             * when multiplied and silently turns the bound into ~forever. */
+            G.gst_element_get_state(S.pipe, &cur, &pend,
+                                    3 * (GstClockTime)GST_SECOND);
             if (cur != GST_STATE_NULL) {
                 log_line("teardown wedged (state %d after 3s); exiting",
                          (int)cur);
@@ -720,8 +790,6 @@ claim_exclusive_socket(void) {
 /* Queue + feeding                                                      */
 /* ------------------------------------------------------------------ */
 
-static const unsigned char silence_chunk[SILENCE_CHUNK];
-
 static int
 queue_clip(const char *path, long long gap_ms) {
     Clip c;
@@ -790,20 +858,12 @@ feed_tick(void) {
         return;
     }
     if (S.paused || S.fifo_fd < 0) return;
-    /* Pace EVERY feed (clips, gaps and idle keepalive alike) against the
-     * audible position: the listener has heard up to audible_ms(), the FIFO
-     * head is at fifo_written; never let the lead exceed the window.  The
-     * fifo's own EAGAIN backpressure only kicks in once every downstream
-     * buffer is full, which on the firehose mtk sink is far too late.
-     * Before the anchor fires there is nothing to pace against: feed. */
-    if (!S.anchor_wait) {
-        long long fed_head_ms =
-            (long long)((S.fifo_written * 1000ull) /
-                        (unsigned long long)(g_rate * g_channels * 2));
-        if (fed_head_ms - audible_ms() > FEED_LEAD_MS) {
-            return;   /* enough buffered ahead; next tick */
-        }
-    }
+    /* Keepalive silence is NEVER paced: it exists to hold the A2DP link
+     * and to keep filesrc's blocking read unblocked. Gate it behind the
+     * lead window and a fast sink drains the fifo, filesrc parks in read(),
+     * and the next teardown deadlocks in gst_pad_stop_task (silence ahead
+     * of the listener is harmless: it never enters fed_end_ms, and the
+     * audible clock is anchor-based, not intake-based). */
     if (S.feed_idx < 0 && S.queue_len == 0) {
         fifo_write(silence_chunk, SILENCE_CHUNK);   /* idle keepalive */
         return;
@@ -812,6 +872,20 @@ feed_tick(void) {
         /* Queue fully written (possibly still rendering): keepalive. */
         fifo_write(silence_chunk, SILENCE_CHUNK);
         return;
+    }
+    /* Pace REAL audio (clips and gaps) against the audible position: the
+     * listener has heard up to audible_ms(), the FIFO head is at
+     * fifo_written; never let the lead exceed the window.  The fifo's own
+     * EAGAIN backpressure only kicks in once every downstream buffer is
+     * full, which on the firehose mtk sink is far too late.  Before the
+     * anchor fires there is nothing to pace against: feed. */
+    if (!S.anchor_wait) {
+        long long fed_head_ms =
+            (long long)((S.fifo_written * 1000ull) /
+                        (unsigned long long)(g_rate * g_channels * 2));
+        if (fed_head_ms - audible_ms() > FEED_LEAD_MS) {
+            return;   /* enough buffered ahead; next tick */
+        }
     }
     if (S.feed_idx < 0) S.feed_idx = 0;
 
@@ -912,6 +986,54 @@ drop_queue(void) {
     S.gap_left_ms = 0;
 }
 
+/* Empty the fifo (O_NONBLOCK, so read returns EAGAIN at empty). A writer
+ * must be dead: the client kills its feeder before re-epoching. */
+static void
+fifo_drain(void) {
+    if (S.fifo_fd < 0) return;
+    unsigned char tmp[4096];
+    while (read(S.fifo_fd, tmp, sizeof tmp) > 0) {}
+}
+
+/* Begin a fresh stream epoch at client position pos_ms: drop every byte of
+ * the old stream (queue, fifo backlog, pipeline) so none of it can leak
+ * into the new one, zero the clocks, and let the first buffer of the new
+ * stream re-anchor. S.paused is left untouched; the caller decides. Used by
+ * external, seek and resume-with-pos. Returns -1 when the gst rebuild
+ * failed. */
+static int
+stream_epoch(long long pos_ms, long long total_ms) {
+    drop_queue();
+    S.external_total_ms = total_ms;
+    S.external_done = 0;
+    S.announce_idle = 1;        /* the dead stream owes no idle event */
+    S.unpaced = 0;
+    S.pace_fast_ticks = 0;
+    S.pace_arm_ms = wall_now;   /* warm-up grace applies to the new stream */
+    if (S.out_alsa) {
+        if (S.alsa_pcm) {
+            A.snd_pcm_drop(S.alsa_pcm);
+            A.snd_pcm_prepare(S.alsa_pcm);
+        }
+        fifo_open();
+        fifo_drain();
+        S.alsa_written_frames = 0;
+    } else {
+        pipeline_teardown();
+        reset_stream();
+        if (fifo_open() != 0) return -1;
+        fifo_drain();
+        if (pipeline_build(g_rate, g_channels) != 0) return -1;
+    }
+    S.epoch_off_ms = pos_ms;
+    S.external_base_ms = 0;
+    S.external_anchor_wall_ms = 0;
+    S.external_frozen_ms = pos_ms;
+    S.external_wait_first = 0;
+    S.anchor_wait = 1;
+    return 0;
+}
+
 static void
 handle_command(char *line) {
     char cmd[32] = "";
@@ -999,9 +1121,18 @@ handle_command(char *line) {
         S.paused = 1;
         respond("{\"ok\":true,\"state\":\"paused\"}");
     } else if (!strcmp(cmd, "resume")) {
-        if (S.external_active && S.paused) {
-            /* New epoch: the writer restarts at an offset chosen by the
-             * client; rebaseline the stream position at first movement. */
+        long long pos_ms = json_num(line, "pos_ms", -1);
+        if (S.external_active && pos_ms >= 0) {
+            /* Explicit client position: a new epoch at pos. The writer
+             * restarts at pos after this command returns. */
+            if (stream_epoch(pos_ms, S.external_total_ms) != 0) {
+                respond("{\"ok\":false,\"error\":\"resume rebuild failed\"}");
+                return;
+            }
+        } else if (S.external_active && S.paused) {
+            /* Legacy resume without a position: the writer restarts at an
+             * offset only it knows; rebaseline the stream position at
+             * first movement (byte-derived, client timeline since-build). */
             S.external_wait_first = 1;
             S.external_base_ms = 0;
         }
@@ -1014,6 +1145,9 @@ handle_command(char *line) {
     } else if (!strcmp(cmd, "flush")) {
         drop_queue();
         S.external_active = 0;
+        S.epoch_off_ms = 0;
+        S.external_total_ms = 0;
+        S.external_done = 0;
         if (S.out_alsa && S.alsa_pcm) {
             A.snd_pcm_drop(S.alsa_pcm);
             A.snd_pcm_prepare(S.alsa_pcm);
@@ -1023,18 +1157,40 @@ handle_command(char *line) {
         if (S.pipe) {
             pipeline_teardown();
             reset_stream();
-            if (fifo_open() != 0 || pipeline_build(g_rate, g_channels) != 0) {
+            if (fifo_open() != 0) {
+                respond("{\"ok\":false,\"error\":\"flush fifo failed\"}");
+                return;
+            }
+            fifo_drain();
+            if (pipeline_build(g_rate, g_channels) != 0) {
                 respond("{\"ok\":false,\"error\":\"flush rebuild failed\"}");
                 return;
             }
         }
         respond("{\"ok\":true,\"state\":\"idle\"}");
+    } else if (!strcmp(cmd, "seek")) {
+        if (!S.external_active) {
+            respond("{\"ok\":false,\"error\":\"not in external mode\"}");
+            return;
+        }
+        long long pos_ms = json_num(line, "pos_ms", 0);
+        long long total_ms = json_num(line, "total_ms", S.external_total_ms);
+        if (stream_epoch(pos_ms, total_ms) != 0) {
+            respond("{\"ok\":false,\"error\":\"seek rebuild failed\"}");
+            return;
+        }
+        log_line("seek: epoch at %lldms (total %lldms)", pos_ms, total_ms);
+        respond("{\"ok\":true,\"state\":\"%s\",\"pos_ms\":%lld}",
+                state_str(), pos_ms);
     } else if (!strcmp(cmd, "external")) {
         long long rate = json_num(line, "rate", g_rate);
         long long channels = json_num(line, "channels", g_channels);
+        long long pos_ms = json_num(line, "pos_ms", 0);
+        long long total_ms = json_num(line, "total_ms", 0);
         char alsa_dev[MAX_PATH] = "";
         json_find(line, "alsa_device", alsa_dev, sizeof alsa_dev);
         drop_queue();
+        S.external_active = 0;
         if (S.out_alsa) {
             const char *dev = (alsa_dev[0] || S.alsa_device[0])
                 ? (alsa_dev[0] ? alsa_dev : S.alsa_device) : "default";
@@ -1044,33 +1200,34 @@ handle_command(char *line) {
             }
             g_rate = (int)rate;
             g_channels = (int)channels;
-        } else if (!S.pipe || (int)rate != S.pipe_rate ||
-                (int)channels != S.pipe_channels) {
-            pipeline_teardown();
+            /* New stream, new epoch: no byte of the previous track (fifo
+             * backlog included) may leak into this one. */
+            if (stream_epoch(pos_ms, total_ms) != 0) {
+                respond("{\"ok\":false,\"error\":\"alsa re-epoch failed\"}");
+                return;
+            }
+        } else {
+            /* Always flush-class: a new stream must not inherit the old
+             * pipeline's queued or fifo-buffered bytes. */
             g_rate = (int)rate;
             g_channels = (int)channels;
-            reset_stream();
-            if (fifo_open() != 0 || pipeline_build(g_rate, g_channels) != 0) {
+            if (stream_epoch(pos_ms, total_ms) != 0) {
                 respond("{\"ok\":false,\"error\":\"pipeline build failed\"}");
                 return;
             }
         }
         S.external_active = 1;
-        S.external_wait_first = 1;
-        S.external_base_ms = 0;
-        S.external_frozen_ms = 0;
-        S.external_anchor_wall_ms = 0;
-        S.anchor_wait = 1; /* new stream epoch: re-anchor even when the
-                              pipeline was not rebuilt */
-        S.unpaced = 0;
-        S.pace_fast_ticks = 0;
-        S.pace_arm_ms = wall_now;
-        log_line("external stream mode (%d x %d)", g_rate, g_channels);
+        S.paused = 0;
+        log_line("external stream mode (%d x %d) at %lldms/%lldms",
+                 g_rate, g_channels, pos_ms, total_ms);
         respond("{\"ok\":true,\"mode\":\"external\",\"fifo\":\"%s\"}",
                 S.fifo_path);
     } else if (!strcmp(cmd, "release")) {
         drop_queue();
         S.external_active = 0;
+        S.epoch_off_ms = 0;
+        S.external_total_ms = 0;
+        S.external_done = 0;
         if (S.out_alsa) {
             alsa_teardown();
             respond("{\"ok\":true,\"state\":\"released\"}");
@@ -1084,7 +1241,8 @@ handle_command(char *line) {
     } else if (!strcmp(cmd, "status")) {
         /* Cap at the end of REAL audio: idle keepalive silence advances
          * the probe clock but is not part of any clip, and the client's
-         * sync math must never see a position past the last word. */
+         * sync math must never see a position past the last word. In
+         * external mode the cap is the stream length the client announced. */
         long long rend = rendered_ms();
         long long fed = (long long)((S.fifo_written * 1000ull) /
                                     (unsigned long long)(g_rate * g_channels * 2));
@@ -1095,22 +1253,32 @@ handle_command(char *line) {
             rend = audible_ms();
             if (rend < 0) rend = 0;
         }
-        if (rend > S.fed_end_ms) rend = S.fed_end_ms;
+        long long cap = S.external_active ? S.external_total_ms : S.fed_end_ms;
+        if (cap > 0 && rend > cap) rend = cap;
         respond("{\"ok\":true,\"state\":\"%s\",\"pos_ms\":%lld,"
                 "\"accepted_ms\":%lld,\"fed_ms\":%lld,\"fed_end_ms\":%lld,"
                 "\"done_count\":%llu,\"queue\":%d,\"rate\":%d,\"channels\":%d,"
-                "\"volume\":%.2f,\"unpaced\":%d,\"out\":\"%s\",\"uptime_ms\":%lld}",
+                "\"volume\":%.2f,\"unpaced\":%d,\"out\":\"%s\",\"uptime_ms\":%lld,"
+                "\"external\":%d,\"external_done\":%d}",
                 state_str(), rend, (long long)(acc_bytes / OUT_BYTES_PER_MS),
                 fed, S.fed_end_ms, S.done_count, S.queue_len,
                 S.pipe_rate, S.pipe_channels, S.volume,
                 S.unpaced, S.out_alsa ? "alsa" : "mtk",
-                mono_ms() - g_started_ms);
+                mono_ms() - g_started_ms,
+                S.external_active, S.external_done);
     } else if (!strcmp(cmd, "volume")) {
         long long v = json_num(line, "value_x1000", 1000);
         double vol = (double)v / 1000.0;
         if (vol < 0) vol = 0;
         if (vol > 4) vol = 4;
         S.volume = vol;
+        if (S.out_alsa) {
+            /* Applied in software to every byte written after this point;
+             * only the fifo tail already handed to the driver is not
+             * retroactive. */
+            respond("{\"ok\":true,\"volume\":%.2f,\"live\":true}", vol);
+            return;
+        }
         if (G.g_object_set && S.pipe) {
             GstElement *el = G.gst_bin_get_by_name(GST_BIN(S.pipe), "vol");
             if (el) {
@@ -1202,6 +1370,18 @@ tick_bookkeeping(void) {
         log_line("queue drained; idle keepalive (pos=%lldms)", rend);
         respond("{\"event\":\"idle\",\"pos_ms\":%lld,\"done_count\":%llu}",
                 rend, S.done_count);
+    }
+
+    /* External stream completion, on the client's timeline. Latched: the
+     * push only reaches a client that happens to be connected, so status
+     * carries external_done until the next external/seek/resume-with-pos
+     * clears it. The 30 ms tolerance absorbs clock-vs-length rounding. */
+    if (S.external_active && !S.paused && !S.external_done &&
+        S.external_total_ms > 0 && rend >= S.external_total_ms - 30) {
+        S.external_done = 1;
+        log_line("external stream complete (pos=%lldms total=%lldms)",
+                 rend, S.external_total_ms);
+        respond("{\"event\":\"external_done\",\"pos_ms\":%lld}", rend);
     }
 
     /* Bus: errors only. Our O_RDWR fifo never produces a natural EOS. */
