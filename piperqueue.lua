@@ -204,7 +204,7 @@ function PiperQueue:setModel(model)
     if old_model and old_model ~= model then
         logger.warn("PiperQueue: Model changed, stopping servers + pipeline")
         self:stopServers()
-        engine:_stopPersistentPipeline("model_change")
+        if engine._releaseAudioout then engine:_releaseAudioout() end
         self:cleanQueue()
     end
 end

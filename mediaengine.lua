@@ -77,14 +77,9 @@ function MediaEngine:new(o)
     -- Kindle-specific state
     o._gst_play_cmd = nil
     o._lipc_fallback_tried = false
-    -- Persistent GStreamer pipeline state (MTK Bluetooth path)
+    -- True when playback routes through the audioout daemon instead of the
+    -- one-shot backend chain (the daemon owns its pipeline internally).
     o._use_persistent_pipeline = false
-    o._pipeline_gst_pid = nil
-    o._pipeline_wrapper_pid = nil
-    o._media_ctrl_dir = "/tmp/audiobook_media_ctrl"
-    o._media_fifo = "/tmp/audiobook_media_fifo"
-    o._media_script = "/tmp/audiobook_media_pipeline.sh"
-    o._current_pcm_file = nil
     -- Digital playback volume (0.0..1.0).  Applied as an ffmpeg `volume`
     -- filter in the decode pipeline, so it works without depending on
     -- Amazon's (model-specific) LIPC volume property.  1.0 = unchanged.
@@ -768,8 +763,7 @@ function MediaEngine:_detectKindleLipc()
         if not has_wavparse then
             -- No wavparse -- playermgr cannot decode WAV natively.
             -- Only use kindle-lipc if we can detect the bundled gst-play
-            -- as a fallback, since the file is already transcoded to WAV
-            -- by the plugin's transcoder before reaching MediaEngine.
+            -- as a fallback player for plain WAV files.
             -- If gst-play exists, we prefer KINDLE_GST_PLAY; if not,
             -- try kindle-lipc anyway (the file may be MP3 which playermgr
             -- handles natively via decodebin).
@@ -2456,8 +2450,6 @@ function MediaEngine:_playKindleLipc(gen)
     --
     -- Supported file formats: MP3, AAC, possibly WAV (depends on
     -- wavparse availability in the device's GStreamer installation).
-    -- The transcoder in main.lua already converts unsupported formats
-    -- to MP3 or WAV before reaching MediaEngine.
 
     local file_path = self.current_path
 

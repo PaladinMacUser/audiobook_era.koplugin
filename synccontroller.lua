@@ -1162,8 +1162,6 @@ function SyncController:beginSentencePlayback(sentence)
             self._bt_fw_error_shown = true
             if self.plugin and self.plugin.bt_manager then
                 self.plugin.bt_manager:_showFirmwareError()
-            elseif self.tts_engine._showMtkFirmwareError then
-                self.tts_engine:_showMtkFirmwareError()
             end
         end
         -- Emit stop event so the playback bar reflects the stopped state

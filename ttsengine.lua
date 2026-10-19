@@ -2510,8 +2510,8 @@ function TTSEngine:_getAudioOut()
     return self._audioout_client
 end
 
--- True when the experimental daemon path is enabled and usable on this
--- device (Kobo MTK BT output only, same gate as the persistent pipeline).
+-- True when the daemon path is enabled and usable on this device (Kobo BT
+-- output: the MTK vendor sink and the BlueZ/bluealsa PCM alike).
 function TTSEngine:_useAudioOut()
     -- Session-only degradation: once the daemon path failed this session,
     -- stay on the legacy path until the next session (fallback policy).
@@ -2519,7 +2519,9 @@ function TTSEngine:_useAudioOut()
             and self.plugin:getSetting("audioout_enabled", true)) then
         return false
     end
-    if self.audio_player_type ~= "gst-bt" then return false end
+    if self.audio_player_type ~= "gst-bt" and self.audio_player_type ~= "bluealsa" then
+        return false
+    end
     -- No connected peer: stand aside. The vendor sink stalls its init for
     -- tens of seconds without an A2DP peer, which would time out every
     -- play; the legacy pipeline handles the "Play anyway" flow instead.
@@ -2528,6 +2530,13 @@ function TTSEngine:_useAudioOut()
         return false
     end
     return true
+end
+
+-- Release the daemon's pipeline but keep the daemon running. Used when the
+-- Piper model (and possibly its sample rate) changes, so the next play
+-- rebuilds at the new rate. No-op when the daemon is not running.
+function TTSEngine:_releaseAudioout()
+    if self._audioout_client then self._audioout_client:release() end
 end
 
 function TTSEngine:play(on_word, on_complete, on_fail, concat_files)

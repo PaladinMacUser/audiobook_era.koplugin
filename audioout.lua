@@ -188,9 +188,9 @@ function AudioOut:release() return self:_command({ cmd = "release" }, 8000) end
 
 -- External stream mode (media path): an outside writer (ffmpeg) feeds the
 -- fifo; the daemon builds the pipeline and reports the probe clock.
-function AudioOut:externalStart(rate, channels)
+function AudioOut:externalStart(rate, channels, alsa_device)
     return self:_command({ cmd = "external", rate = rate or 44100,
-                           channels = channels or 2 }, 8000)
+                           channels = channels or 2, alsa_device = alsa_device }, 8000)
 end
 
 function AudioOut:fifoPath()
