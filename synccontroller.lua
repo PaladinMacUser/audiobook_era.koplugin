@@ -2542,8 +2542,9 @@ function SyncController:highlightCurrentWord(word)
 
     -- Android synthesizeToFile has no word timestamps, so estimated word
     -- boxes would drift off the spoken text on neural engines.  Keep the
-    -- sentence-level underline only (highlightWord draws nothing today,
-    -- but skipping keeps estimated word boxes from being treated as truth).
+    -- sentence-level underline only (skipping keeps estimated word boxes
+    -- from being treated as truth; rolling platforms paint the real word
+    -- box from the cached line map instead).
     local android_tts = self.tts_engine
         and self.tts_engine.backend == self.tts_engine.BACKENDS.ANDROID
     if not android_tts
