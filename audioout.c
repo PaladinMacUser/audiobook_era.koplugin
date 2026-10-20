@@ -542,7 +542,16 @@ rendered_ms(void) {
  * Instead, anchor once when the stream's first buffer reaches the sink and
  * advance at audio rate from that anchor; underruns hold at the last
  * delivered sample (min with the intake position); pauses freeze at the
- * frozen value until the client rebaselines on resume. */
+ * frozen value until the client rebaselines on resume.
+ *
+ * The intake clamp carries a tail allowance: on the real vendor sink the
+ * LAST partial transport batch (queue 500 ms + firmware, ~700-1000 ms) is
+ * committed to playback but never crosses the pad probe, so clamping
+ * strictly at intake froze completion ~750 ms short of every clip end.
+ * The allowance bounds the overshoot; real positions re-clamp once the
+ * keepalive pushes intake forward again. */
+#define AUDIBLE_TAIL_SLACK_MS 1000
+
 static long long
 audible_ms(void) {
     if (S.paused) return S.external_frozen_ms;
@@ -550,7 +559,8 @@ audible_ms(void) {
     long long est = S.epoch_off_ms + S.external_base_ms
                   + (wall_now - S.external_anchor_wall_ms);
     long long acc = S.epoch_off_ms
-                  + (long long)(acc_bytes / OUT_BYTES_PER_MS);
+                  + (long long)(acc_bytes / OUT_BYTES_PER_MS)
+                  + AUDIBLE_TAIL_SLACK_MS;
     if (est > acc) est = acc;
     long long lo = S.epoch_off_ms + S.external_base_ms;
     if (est < lo) est = lo;
