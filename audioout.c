@@ -232,6 +232,8 @@ static struct {
 /* Clock                                                                */
 /* ------------------------------------------------------------------ */
 
+static void log_line(const char *fmt, ...);
+
 static pthread_mutex_t probe_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned long long probe_bytes;      /* total accepted output bytes */
 static unsigned long long probe_last_buf;   /* size of the newest buffer */
@@ -287,6 +289,10 @@ refresh_clock(void) {
                 (long long)(acc_bytes / OUT_BYTES_PER_MS) - acc_boundary_ms;
             S.external_anchor_wall_ms = acc_arrival_ms;
             S.anchor_wait = 0;
+            log_line("ANCHOR base=%lld wall=%lld acc=%lld frozen=%lld paused=%d",
+                     S.external_base_ms, S.external_anchor_wall_ms,
+                     (long long)(acc_bytes / OUT_BYTES_PER_MS),
+                     S.external_frozen_ms, S.paused);
         }
     }
 }
@@ -1131,8 +1137,14 @@ handle_command(char *line) {
                 S.queue[S.queue_len - 1].start_ms,
                 S.queue[S.queue_len - 1].duration_ms);
     } else if (!strcmp(cmd, "pause")) {
-        if (S.external_active && !S.paused) {
+        /* Freeze the clock in EVERY mode: in clip mode the frozen value is
+         * what status reports while paused, and a collapse to 0 here sent
+         * the client's word tick (pos_ms - start_ms) far negative on every
+         * auto-pause, scrambling the read-along highlight. */
+        if (!S.paused) {
             S.external_frozen_ms = audible_ms();
+            log_line("PAUSE freeze=%lld acc=%lld", S.external_frozen_ms,
+                     (long long)(acc_bytes / OUT_BYTES_PER_MS));
         }
         S.paused = 1;
         respond("{\"ok\":true,\"state\":\"paused\"}");
@@ -1152,7 +1164,20 @@ handle_command(char *line) {
             S.external_wait_first = 1;
             S.external_base_ms = 0;
         }
-        if (S.paused) S.anchor_wait = 1;
+        if (S.paused && !S.external_active) {
+            /* Clip mode: continue the clock from the frozen value. The
+             * pipeline drains while paused, so re-anchoring from intake
+             * would read the DRAINED position and collapse the clock to
+             * (near) zero on every resume -- which scrambled the client's
+             * word tick each time the sync flow auto-paused. */
+            S.external_base_ms = S.external_frozen_ms;
+            S.epoch_off_ms = 0;
+            S.external_anchor_wall_ms = wall_now;
+            S.external_wait_first = 0;
+            S.anchor_wait = 0;
+        } else if (S.paused) {
+            S.anchor_wait = 1;
+        }
         S.paused = 0;
         respond("{\"ok\":true,\"state\":\"%s\"}", state_str());
     } else if (!strcmp(cmd, "stop")) {

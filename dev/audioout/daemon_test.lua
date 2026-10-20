@@ -244,4 +244,28 @@ do
     ao:flush()
 end
 
+-- 12. pause continuity: the position must hold while paused (a collapse to
+--     zero sent the client's word tick negative on every auto-pause) and
+--     continue from the same spot on resume.
+resp = ao:play(wav, { rate = 22050, channels = 1 })
+ok(resp and resp.ok, "pause-continuity: clip queued")
+os.execute("sleep 2")
+local pre = ao:status()
+os.execute("sleep 0.3")
+ao:pause()
+os.execute("sleep 0.4")
+local p1 = ao:status()
+os.execute("sleep 1")
+local p2 = ao:status()
+ok(p1.pos_ms > 500 and math.abs(p2.pos_ms - p1.pos_ms) < 250,
+   string.format("pause holds the position (%d -> %d)",
+                 p1.pos_ms or -1, p2.pos_ms or -1))
+ao:resume()
+os.execute("sleep 0.3")
+local p3 = ao:status()
+ok(p3.pos_ms >= p2.pos_ms - 250 and p3.pos_ms <= pre.pos_ms + 4000,
+   string.format("resume continues from the pause (%d)", p3.pos_ms or -1))
+ao:stop()
+ao:flush()
+
 print(string.format("PASS - %d checks", checks))
