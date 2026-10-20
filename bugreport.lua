@@ -229,7 +229,7 @@ local function collectPluginInfo(plugin)
         local f = io.open(ao_bin, "r")
         info.audioout_binary = f ~= nil
         if f then f:close() end
-        info.audioout_enabled = tostring(plugin:getSetting("audioout_enabled", false))
+        info.audioout_enabled = tostring(plugin:getSetting("audioout_enabled", true))
         local pg = io.popen("pgrep -c audioout 2>/dev/null")
         if pg then
             local n = tonumber(pg:read("*a"))
@@ -239,6 +239,30 @@ local function collectPluginInfo(plugin)
         local sock = io.open("/tmp/audiobook_audioout.sock", "r")
         info.audioout_socket = sock ~= nil
         if sock then sock:close() end
+        -- Deployed-build checksums: bug reports from devices running a
+        -- mix of release and hand-deployed binaries are otherwise
+        -- undiagnosable.
+        for name, path in pairs({ snt_server_md5 = ao_dir .. "../sanotts/snt_server",
+                                  audioout_md5 = ao_bin }) do
+            local mp = io.popen("md5sum '" .. path:gsub("'", "'\\''") .. "' 2>/dev/null")
+            if mp then
+                local sum = mp:read("*l")
+                mp:close()
+                info[name] = sum and sum:match("^(%x+)") or "unavailable"
+            end
+        end
+        -- sanoTTS server log tail: carries the per-request G2P counters
+        -- ({"g2p": "nano=N espeak_fb=N oov=X/Y"}) and synthesis errors.
+        local slog = io.open("/tmp/piper_server_1.log", "r")
+        if slog then
+            local lines = {}
+            for line in slog:lines() do
+                lines[#lines + 1] = line
+                if #lines > 15 then lines[#lines - 15] = nil end
+            end
+            slog:close()
+            info.snt_server_log_tail = table.concat(lines, " | ")
+        end
         local dlog = io.open("/tmp/audiobook_audioout.log", "r")
         if dlog then
             local tail_lines = {}
@@ -355,6 +379,13 @@ local function collectPluginInfo(plugin)
             smil_sync_offset_ms = tostring(plugin:getSetting("smil_sync_offset_ms", 0)),
             media_follow_page_turn = tostring(plugin:getSetting("media_follow_page_turn", false)),
             android_prefetch = tostring(plugin:getSetting("android_prefetch", false)),
+            sentence_pause = tostring(plugin:getSetting("sentence_pause", 0.1)),
+            paragraph_pause = tostring(plugin:getSetting("paragraph_pause", 0.8)),
+            piper_sentence_gap = tostring(plugin:getSetting("piper_sentence_gap", 0.3)),
+            piper_paragraph_gap = tostring(plugin:getSetting("piper_paragraph_gap", 1.0)),
+            sanotts_voice = tostring(plugin:getSetting("sanotts_voice", "kristin")),
+            -- nil means the per-voice default (dictionary G2P since v0.5.0)
+            sanotts_g2p = plugin:getSetting("sanotts_g2p", nil) or "voice default",
         }
     end
 
