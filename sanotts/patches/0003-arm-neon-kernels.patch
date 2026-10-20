@@ -161,7 +161,7 @@ diff -ruN a/ports/arm-neon/README.md b/ports/arm-neon/README.md
 diff -ruN a/ports/arm-neon/snt_port_arm.c b/ports/arm-neon/snt_port_arm.c
 --- a/ports/arm-neon/snt_port_arm.c	1970-01-01 01:00:00.000000000 +0100
 +++ b/ports/arm-neon/snt_port_arm.c	2026-10-18 23:28:24.888559889 +0200
-@@ -0,0 +1,326 @@
+@@ -0,0 +1,327 @@
 +/* snt_port_arm.c -- ARMv7 NEON kernels + pthread par port for Kobo
 + * (Cortex-A7/A9, NEON-VFPv3, hard-float).  One TU replacing both
 + * snt_kernels_ref.c and ports/host/snt_port_host.c on the link line.
