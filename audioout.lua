@@ -199,10 +199,21 @@ function AudioOut:release() return self:_command({ cmd = "release" }, 8000) end
 -- total_ms place the stream on the client's timeline (book position and
 -- length): the daemon's clock, status cap and completion latch all speak
 -- book positions from then on.
-function AudioOut:externalStart(rate, channels, alsa_device, pos_ms, total_ms)
+function AudioOut:externalStart(rate, channels, alsa_device, pos_ms, total_ms, path)
     return self:_command({ cmd = "external", rate = rate or 44100,
                            channels = channels or 2, alsa_device = alsa_device,
-                           pos_ms = pos_ms, total_ms = total_ms }, 8000)
+                           pos_ms = pos_ms, total_ms = total_ms,
+                           path = path }, 8000)
+end
+
+-- True when the running daemon was built with in-process decode (it then
+-- accepts compressed files directly in external mode). Cached.
+function AudioOut:hasDecoder()
+    if self._has_decoder == nil then
+        local st = self:status(400)
+        self._has_decoder = (st and st.decoder == 1) or false
+    end
+    return self._has_decoder
 end
 
 -- External mode: drop the old stream's bytes and re-epoch the clock at

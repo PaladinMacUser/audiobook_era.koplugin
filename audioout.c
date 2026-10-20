@@ -60,9 +60,33 @@
 
 #include <gst/gst.h>
 
+#ifdef AUDIOOUT_WITH_LIBAV
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libswresample/swresample.h>
+#include <libavutil/opt.h>
+#endif
+
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#ifdef AUDIOOUT_WITH_LIBAV
+/* ffmpeg builds with _FILE_OFFSET_BITS=64, which remaps fcntl to
+ * fcntl64; the Jessie glibc (2.19) stub library does not export that
+ * symbol for static linking. fcntl64 is fcntl with a pointer-wide third
+ * argument on this ABI, so forward it (ffmpeg only uses F_GETFL and
+ * FD_CLOEXEC-style commands). */
+#include <stdarg.h>
+#undef fcntl
+int fcntl64(int fd, int cmd, ...) {
+    va_list ap;
+    va_start(ap, cmd);
+    void *arg = va_arg(ap, void *);
+    va_end(ap);
+    return fcntl(fd, cmd, arg);
+}
+#define fcntl fcntl64
+#endif
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -146,6 +170,165 @@ static AlsaApi A;
 #define SND_PCM_FORMAT_S16_LE   2
 #define SND_PCM_ACCESS_RW_INTERLEAVED 3
 
+/* ------------------------------------------------------------------ */
+/* In-process decode (AUDIOOUT_WITH_LIBAV, Tier 5b)                     */
+/*                                                                      */
+/* A decoder-subset ffmpeg is linked statically (see                    */
+/* build-ffmpeg-libs.sh): any non-WAV clip or external stream is        */
+/* demuxed and decoded to s16 PCM in-process, which retires the         */
+/* per-track ffmpeg exec and the 30 MB bundled binary for compressed    */
+/* input. Clients keep their WAV path unchanged: clip_open sniffs the   */
+/* file. The client ffmpeg feeder stays for speed != 1.0 (atempo is     */
+/* client-side).                                                        */
+/* ------------------------------------------------------------------ */
+
+#ifdef AUDIOOUT_WITH_LIBAV
+
+typedef struct {
+    AVFormatContext *fmt;
+    const AVCodec *codec;
+    AVCodecContext *ctx;
+    AVPacket *pkt;
+    AVFrame *frame;
+    SwrContext *swr;
+    int stream;
+    int eof;
+    /* leftover converted PCM not yet consumed by the caller */
+    unsigned char obuf[16384];
+    size_t olen, opos;
+} DecState;
+
+static void dec_close(DecState *d) {
+    if (!d) return;
+    if (d->swr) swr_free(&d->swr);
+    if (d->frame) av_frame_free(&d->frame);
+    if (d->pkt) av_packet_free(&d->pkt);
+    if (d->ctx) avcodec_free_context(&d->ctx);
+    if (d->fmt) avformat_close_input(&d->fmt);
+    free(d);
+}
+
+/* Open path for in-process decode. Returns 0 and *out (caller frees via
+ * dec_close), negative on any failure (caller falls back to WAV-only or
+ * refuses). */
+static int dec_open(const char *path, DecState **out, long long *duration_ms,
+                    int *rate, int *channels) {
+    *out = NULL;
+    DecState *d = calloc(1, sizeof *d);
+    if (!d) return -1;
+    if (avformat_open_input(&d->fmt, path, NULL, NULL) != 0) goto fail;
+    if (avformat_find_stream_info(d->fmt, NULL) < 0) goto fail;
+    d->stream = av_find_best_stream(d->fmt, AVMEDIA_TYPE_AUDIO, -1, -1,
+                                    &d->codec, 0);
+    if (d->stream < 0 || !d->codec) goto fail;
+    AVStream *st = d->fmt->streams[d->stream];
+    d->ctx = avcodec_alloc_context3(d->codec);
+    if (!d->ctx) goto fail;
+    if (avcodec_parameters_to_context(d->ctx, st->codecpar) < 0) goto fail;
+    d->ctx->pkt_timebase = st->time_base;
+    if (avcodec_open2(d->ctx, d->codec, NULL) < 0) goto fail;
+    int orate = d->ctx->sample_rate > 0 ? d->ctx->sample_rate : 44100;
+    int och = d->ctx->ch_layout.nb_channels > 0
+        ? d->ctx->ch_layout.nb_channels : 2;
+    if (swr_alloc_set_opts2(&d->swr,
+                            &d->ctx->ch_layout, AV_SAMPLE_FMT_S16, orate,
+                            &d->ctx->ch_layout, d->ctx->sample_fmt,
+                            d->ctx->sample_rate, 0, NULL) < 0) goto fail;
+    if (swr_init(d->swr) < 0) goto fail;
+    d->pkt = av_packet_alloc();
+    d->frame = av_frame_alloc();
+    if (!d->pkt || !d->frame) goto fail;
+    long long dur = 0;
+    if (d->fmt->duration > 0)
+        dur = d->fmt->duration * 1000LL / AV_TIME_BASE;
+    else if (st->duration > 0 && st->time_base.den)
+        dur = st->duration * 1000LL * st->time_base.num / st->time_base.den;
+    if (dur <= 0 && d->fmt->bit_rate > 0)
+        dur = (long long)d->fmt->pb ? 0
+              : 0;  /* bitrate estimate needs the size; keep 0 = unknown */
+    if (dur <= 0) { goto fail; }
+    *duration_ms = dur;
+    *rate = orate;
+    *channels = och;
+    *out = d;
+    return 0;
+fail:
+    dec_close(d);
+    return -1;
+}
+
+/* Convert one received frame into the output buffer (appends). */
+static void dec_convert(DecState *d, AVFrame *f) {
+    int out_samples = swr_get_out_samples(d->swr, f->nb_samples);
+    if (out_samples <= 0) out_samples = f->nb_samples + 16;
+    size_t need = (size_t)out_samples * d->ctx->ch_layout.nb_channels * 2 + 64;
+    if (need > sizeof d->obuf - d->olen) {
+        /* compact first; a frame larger than the free space is clipped by
+         * swr to what fits */
+        if (d->opos > 0) {
+            memmove(d->obuf, d->obuf + d->opos, d->olen - d->opos);
+            d->olen -= d->opos;
+            d->opos = 0;
+        }
+        if (need > sizeof d->obuf - d->olen) out_samples =
+            (int)((sizeof d->obuf - d->olen - 64)
+                  / (size_t)(d->ctx->ch_layout.nb_channels * 2));
+        if (out_samples <= 0) return;
+    }
+    uint8_t *dstp = d->obuf + d->olen;
+    int got = swr_convert(d->swr, &dstp, out_samples,
+                          (const uint8_t **)f->extended_data, f->nb_samples);
+    if (got > 0) d->olen += (size_t)got * d->ctx->ch_layout.nb_channels * 2;
+}
+
+/* Pull up to `want` bytes of s16 PCM; returns bytes pulled (0 = EOF). */
+static size_t dec_pull(DecState *d, unsigned char *out, size_t want) {
+    size_t total = 0;
+    while (total < want) {
+        if (d->opos < d->olen) {
+            size_t take = d->olen - d->opos;
+            if (take > want - total) take = want - total;
+            memcpy(out + total, d->obuf + d->opos, take);
+            d->opos += take;
+            total += take;
+            continue;
+        }
+        d->olen = 0;
+        d->opos = 0;
+        if (d->eof) break;
+        /* drain the decoder first */
+        int r = avcodec_receive_frame(d->ctx, d->frame);
+        if (r == 0) { dec_convert(d, d->frame); av_frame_unref(d->frame); continue; }
+        if (r == AVERROR_EOF) { d->eof = 1; break; }
+        if (r != EAGAIN) {
+            /* decode error: skip the packet rather than spinning */
+        }
+        if (av_read_frame(d->fmt, d->pkt) < 0) {
+            avcodec_send_packet(d->ctx, NULL);   /* drain */
+            continue;
+        }
+        if (d->pkt->stream_index == d->stream)
+            avcodec_send_packet(d->ctx, d->pkt);
+        av_packet_unref(d->pkt);
+    }
+    return total;
+}
+
+/* Re-position the decoder (external file mode seek). */
+static int dec_seek(DecState *d, long long pos_ms) {
+    int64_t ts = (int64_t)(pos_ms / 1000.0 * AV_TIME_BASE);
+    int r = avformat_seek_file(d->fmt, -1, INT64_MIN, ts, ts, 0);
+    if (r < 0) return -1;
+    avcodec_flush_buffers(d->ctx);
+    swr_init(d->swr);
+    d->olen = 0;
+    d->opos = 0;
+    d->eof = 0;
+    return 0;
+}
+
+#endif /* AUDIOOUT_WITH_LIBAV */
+
 typedef struct {
     char path[MAX_PATH];
     int fd;
@@ -157,6 +340,9 @@ typedef struct {
     long long gap_ms_after;
     long long start_ms;             /* stream position of first PCM */
     long long end_ms;               /* start + duration + gap */
+#ifdef AUDIOOUT_WITH_LIBAV
+    void *dec;                      /* DecState* when the clip is decoded */
+#endif
 } Clip;
 
 static struct {
@@ -223,6 +409,9 @@ static struct {
 
     long long next_ka_ms;               /* wall time the next keepalive
                                            silence chunk may be written */
+#ifdef AUDIOOUT_WITH_LIBAV
+    void *ext_dec;                      /* DecState* for external file mode */
+#endif
     int listen_fd;
     int client_fd;
 } S;
@@ -439,6 +628,31 @@ clip_open(Clip *c, const char *path, int rate, int channels) {
         return -1;
     }
     unsigned char hdr[12];
+    if (pread(c->fd, hdr, 12, 0) == 12 &&
+        (memcmp(hdr, "RIFF", 4) != 0 || memcmp(hdr + 8, "WAVE", 4) != 0)) {
+        /* Not a WAV: in-process decode (Tier 5b). The pread check above
+         * also rejects short/garbage files the demuxer would reject. */
+#ifdef AUDIOOUT_WITH_LIBAV
+        long long dur = 0;
+        int drate = 0, dch = 0;
+        DecState *d = NULL;
+        if (dec_open(path, &d, &dur, &drate, &dch) == 0) {
+            c->dec = d;
+            c->in_bps = drate * dch * 2;
+            if (c->in_bps <= 0) c->in_bps = 44100;
+            c->duration_ms = dur;
+            /* nominal PCM size so remaining/end accounting works */
+            c->data_size = (unsigned long long)(dur * (long long)c->in_bps / 1000);
+            close(c->fd);
+            c->fd = -1;
+            log_line("clip decoded in-process: %s (%lld ms, %d Hz x %d ch)",
+                     path, dur, drate, dch);
+            return 0;
+        }
+        log_line("clip decode open failed, not RIFF either: %s", path);
+#endif
+        goto fail;
+    }
     if (pread(c->fd, hdr, 12, 0) != 12 ||
         memcmp(hdr, "RIFF", 4) != 0 || memcmp(hdr + 8, "WAVE", 4) != 0) {
         log_line("clip not RIFF/WAVE: %s", path);
@@ -853,6 +1067,21 @@ fifo_write(const unsigned char *buf, unsigned long long len) {
 static void
 feed_tick(void) {
     if (S.external_active) {
+        /* External file decode (Tier 5b): the daemon demuxes and decodes
+         * the announced file itself, no outside writer. */
+#ifdef AUDIOOUT_WITH_LIBAV
+        if (S.ext_dec) {
+            if (S.paused) {
+                if (S.out_alsa) fifo_write(silence_chunk, SILENCE_CHUNK);
+                return;
+            }
+            unsigned char buf[FEED_CHUNK];
+            size_t n = dec_pull((DecState *)S.ext_dec, buf, FEED_CHUNK);
+            if (n > 0) fifo_write(buf, n);
+            else if (S.out_alsa) fifo_write(silence_chunk, SILENCE_CHUNK);
+            return;
+        }
+#endif
         /* ALSA external mode: the daemon READS the fifo (ffmpeg writes it)
          * and writes the PCM; gst external mode leaves the fifo to filesrc.
          * While paused, feed keepalive silence so the link stays up. */
@@ -941,18 +1170,30 @@ feed_tick(void) {
                 close(c->fd);
                 c->fd = -1;
             }
+#ifdef AUDIOOUT_WITH_LIBAV
+            if (c->dec) { dec_close((DecState *)c->dec); c->dec = NULL; }
+#endif
             S.gap_left_ms = c->gap_ms_after;
             S.feed_idx++;
             continue;
         }
         unsigned long long want = remaining < budget ? remaining : budget;
-        ssize_t n = pread(c->fd, buf, want, c->file_pos);
+        ssize_t n;
+#ifdef AUDIOOUT_WITH_LIBAV
+        if (c->dec) {
+            n = (ssize_t)dec_pull((DecState *)c->dec, buf, want);
+        } else
+#endif
+        n = pread(c->fd, buf, want, c->file_pos);
         if (n <= 0) {
             log_line("clip read failed at %llu: %s", c->file_pos, c->path);
             if (c->fd >= 0) {
                 close(c->fd);
                 c->fd = -1;
             }
+#ifdef AUDIOOUT_WITH_LIBAV
+            if (c->dec) { dec_close((DecState *)c->dec); c->dec = NULL; }
+#endif
             S.gap_left_ms = c->gap_ms_after;
             S.feed_idx++;
             continue;
@@ -1000,8 +1241,12 @@ state_str(void) {
 
 static void
 drop_queue(void) {
-    for (int i = 0; i < S.queue_len; i++)
+    for (int i = 0; i < S.queue_len; i++) {
         if (S.queue[i].fd >= 0) close(S.queue[i].fd);
+#ifdef AUDIOOUT_WITH_LIBAV
+        if (S.queue[i].dec) { dec_close((DecState *)S.queue[i].dec); S.queue[i].dec = NULL; }
+#endif
+    }
     S.queue_len = 0;
     S.feed_idx = -1;
     S.all_fed = 1;
@@ -1062,7 +1307,11 @@ handle_command(char *line) {
     json_find(line, "cmd", cmd, sizeof cmd);
 
     if (!strcmp(cmd, "ping")) {
-        respond("{\"ok\":true,\"uptime_ms\":%lld,\"bufs\":%llu}",
+        respond("{\"ok\":true,\"uptime_ms\":%lld,\"bufs\":%llu"
+#ifdef AUDIOOUT_WITH_LIBAV
+                ",\"decoder\":1"
+#endif
+                "}",
                 mono_ms() - g_started_ms, acc_bytes / OUT_BYTES_PER_MS);
     } else if (!strcmp(cmd, "play")) {
         char path[MAX_PATH] = "";
@@ -1155,6 +1404,9 @@ handle_command(char *line) {
         if (S.external_active && pos_ms >= 0) {
             /* Explicit client position: a new epoch at pos. The writer
              * restarts at pos after this command returns. */
+#ifdef AUDIOOUT_WITH_LIBAV
+            if (S.ext_dec) dec_seek((DecState *)S.ext_dec, pos_ms);
+#endif
             if (stream_epoch(pos_ms, S.external_total_ms) != 0) {
                 respond("{\"ok\":false,\"error\":\"resume rebuild failed\"}");
                 return;
@@ -1188,6 +1440,9 @@ handle_command(char *line) {
     } else if (!strcmp(cmd, "flush")) {
         drop_queue();
         S.external_active = 0;
+#ifdef AUDIOOUT_WITH_LIBAV
+        if (S.ext_dec) { dec_close((DecState *)S.ext_dec); S.ext_dec = NULL; }
+#endif
         S.epoch_off_ms = 0;
         S.external_total_ms = 0;
         S.external_done = 0;
@@ -1218,6 +1473,12 @@ handle_command(char *line) {
         }
         long long pos_ms = json_num(line, "pos_ms", 0);
         long long total_ms = json_num(line, "total_ms", S.external_total_ms);
+#ifdef AUDIOOUT_WITH_LIBAV
+        if (S.ext_dec && dec_seek((DecState *)S.ext_dec, pos_ms) != 0) {
+            respond("{\"ok\":false,\"error\":\"seek failed\"}");
+            return;
+        }
+#endif
         if (stream_epoch(pos_ms, total_ms) != 0) {
             respond("{\"ok\":false,\"error\":\"seek rebuild failed\"}");
             return;
@@ -1231,9 +1492,25 @@ handle_command(char *line) {
         long long pos_ms = json_num(line, "pos_ms", 0);
         long long total_ms = json_num(line, "total_ms", 0);
         char alsa_dev[MAX_PATH] = "";
+        char dec_path[MAX_PATH] = "";
         json_find(line, "alsa_device", alsa_dev, sizeof alsa_dev);
+        json_find(line, "path", dec_path, sizeof dec_path);
         drop_queue();
         S.external_active = 0;
+#ifdef AUDIOOUT_WITH_LIBAV
+        if (S.ext_dec) { dec_close((DecState *)S.ext_dec); S.ext_dec = NULL; }
+        if (dec_path[0]) {
+            long long dur = 0;
+            int drate = 0, dch = 0;
+            DecState *d = NULL;
+            if (dec_open(dec_path, &d, &dur, &drate, &dch) != 0) {
+                respond("{\"ok\":false,\"error\":\"decode open failed\"}");
+                return;
+            }
+            (void)dur;
+            S.ext_dec = d;
+        }
+#endif
         if (S.out_alsa) {
             const char *dev = (alsa_dev[0] || S.alsa_device[0])
                 ? (alsa_dev[0] ? alsa_dev : S.alsa_device) : "default";
@@ -1268,6 +1545,9 @@ handle_command(char *line) {
     } else if (!strcmp(cmd, "release")) {
         drop_queue();
         S.external_active = 0;
+#ifdef AUDIOOUT_WITH_LIBAV
+        if (S.ext_dec) { dec_close((DecState *)S.ext_dec); S.ext_dec = NULL; }
+#endif
         S.epoch_off_ms = 0;
         S.external_total_ms = 0;
         S.external_done = 0;

@@ -2295,14 +2295,20 @@ function MediaEngine:_playAudiooutExternal(gen)
         logger.warn("MediaEngine: audioout daemon did not start")
         return false
     end
+    -- In-process decode (Tier 5b): at 1.0x speed the daemon demuxes and
+    -- decodes the file itself -- no ffmpeg feeder process at all. Speed
+    -- changes fall back to the feeder, whose filter chain carries atempo.
+    local use_dec = ao:hasDecoder() and (self._playback_speed or 1.0) == 1.0
     local resp = ao:externalStart(44100, 2, nil,
         (self._seek_offset or 0) * 1000,
-        (self.current_duration or 0) * 1000)
+        (self.current_duration or 0) * 1000,
+        use_dec and self.current_path or nil)
     if not resp or not resp.ok then
         logger.warn("MediaEngine: audioout external start refused:",
             resp and resp.error or "timeout")
         return false
     end
+    self._audioout_ext_dec = use_dec or nil
     self._audioout_external = true
     self._killAudiooutFeeder()
 
@@ -2969,7 +2975,9 @@ function MediaEngine:resume()
             self._pause_start_time = nil
         end
         self._audioout_client:resume((resume_pos or 0) * 1000)
-        self:_spawnAudiooutFeeder(resume_pos, self:_persistentFilterChain(), "")
+        if not self._audioout_ext_dec then
+            self:_spawnAudiooutFeeder(resume_pos, self:_persistentFilterChain(), "")
+        end
         logger.warn("MediaEngine: resumed audioout external stream at", resume_pos)
         return
     end
@@ -3361,9 +3369,9 @@ function MediaEngine:seek(seconds, mode)
             self:_killAudiooutFeeder()
             -- The daemon drops the old stream's bytes and re-epochs its
             -- clock; the pipeline and the A2DP link stay up and the
-            -- stop/play generation churn is gone. The ffmpeg exec itself
-            -- remains (a decoder process cannot switch input files);
-            -- removing it is the in-process-decode follow-up.
+            -- stop/play generation churn is gone. In decode mode there is
+            -- no feeder to respawn at all: the seek re-positions the
+            -- decoder in-place (the Tier 5b payoff).
             local ok_seek = self._audioout_client:seek(target * 1000,
                 (self.current_duration or 0) * 1000)
             if ok_seek and ok_seek.ok then
@@ -3374,7 +3382,10 @@ function MediaEngine:seek(seconds, mode)
                     self._pause_start_time = nil
                     self.is_playing = true
                     self.is_paused = false
-                    self:_spawnAudiooutFeeder(target, self:_persistentFilterChain(), "")
+                    if not self._audioout_ext_dec then
+                        self:_spawnAudiooutFeeder(target,
+                            self:_persistentFilterChain(), "")
+                    end
                 else
                     -- Seeking while paused must not start audio; the daemon
                     -- stays paused at the new position and resume() will
