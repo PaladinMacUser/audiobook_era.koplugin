@@ -21,15 +21,32 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nano_lex_g2p.h"
+#include "nano_lex_fr.h"
 
 /* Word-boundary chunking, mirroring g2p_nano_clause() in snt_server.c. */
 static long oov_total, lex_total, pieces, pieces_fallback;
 static float threshold = 0.25f;
 
+static int use_fr;
+static long spoken_words;   /* words that produced audio (en: total-oov) */
+
 static void run_piece(const char *chunk) {
     char ph[8192];
+    int rc;
+    if (use_fr) {
+        nano_lex_fr_stats_t st;
+        rc = nano_lex_fr_text_to_phonemes(chunk, ph, sizeof ph);
+        nano_lex_fr_get_stats(&st);
+        oov_total += st.oov_words;
+        lex_total += st.lexicon_words;
+        pieces++;
+        if (st.lexicon_words > 0 &&
+            (float)st.oov_words / (float)st.lexicon_words > threshold)
+            pieces_fallback++;
+        return;
+    }
     nano_lex_g2p_stats_t st;
-    int rc = nano_lex_g2p_text_to_phonemes(chunk, ph, sizeof ph);
+    rc = nano_lex_g2p_text_to_phonemes(chunk, ph, sizeof ph);
     nano_lex_g2p_get_stats(&st);
     oov_total += st.oov_words;
     lex_total += st.lexicon_words;
@@ -61,7 +78,9 @@ static void run_text(const char *text) {
 }
 
 int main(int argc, char **argv) {
-    if (argc > 1) threshold = (float)atof(argv[1]);
+    int argi = 1;
+    if (argi < argc && !strcmp(argv[argi], "--fr")) { use_fr = 1; argi++; }
+    if (argi < argc) threshold = (float)atof(argv[argi]);
     /* Slurp stdin (cap 64 MB). */
     size_t cap = 1 << 20, len = 0;
     char *buf = malloc(cap);

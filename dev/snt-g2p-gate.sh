@@ -21,6 +21,11 @@
 #   6. timing coverage on a fixed sentence sample: grouped word spans
 #      (espeak merges neighbouring words in ~25% of sentences; nano should
 #      land under 5%)
+#   7. French gates: the fr lexicon G2P (nano_lex_fr) against a held-out
+#      novel. French OOV words SPEAK through the rule layer (they are not
+#      silent like English OOV), so the numbers here are informational:
+#      the binding French quality gate is the listening A/B, and clauses
+#      above --g2p-oov-threshold still fall back to espeak.
 #
 # Flags: --skip-corpus (no network), --skip-rtf (skips the slow passes).
 # The corpus is fetched to $G2P_CORPUS_DIR (default /tmp/g2p-corpus);
@@ -42,7 +47,8 @@ SRCS="$REPO/sanotts/mcu/src/snt_tts.c $REPO/sanotts/mcu/src/snt_kernels_ref.c
   $REPO/sanotts/mcu/src/snt_nano.c $REPO/sanotts/mcu/src/snt_front_q8.c
   $REPO/sanotts/mcu/src/snt_piperlite_q8.c $REPO/sanotts/mcu/src/snt_front_f32.c
   $REPO/sanotts/mcu/src/snt_piperlite.c $REPO/sanotts/mcu/ports/host/snt_port_host.c
-  $REPO/sanotts/nano_lex_g2p.c $REPO/sanotts/nano_lex_tables.c"
+  $REPO/sanotts/nano_lex_g2p.c $REPO/sanotts/nano_lex_tables.c \
+  $REPO/sanotts/nano_lex_fr.c $REPO/sanotts/nano_lex_fr_tables.c"
 
 EB=$(command -v espeak-ng) || { echo "espeak-ng not on PATH" >&2; exit 1; }
 ED=$(dirname "$(dirname "$(readlink -f "$EB")")")/share/espeak-ng-data
@@ -80,8 +86,9 @@ else
 fi
 
 step "4. corpus OOV"
-cc -O2 -std=c99 -o "$OUT/corpus_oov" "$REPO/dev/g2p_corpus_oov.c" \
+cc -O2 -std=gnu99 -o "$OUT/corpus_oov" "$REPO/dev/g2p_corpus_oov.c" \
   "$REPO/sanotts/nano_lex_g2p.c" "$REPO/sanotts/nano_lex_tables.c" \
+  "$REPO/sanotts/nano_lex_fr.c" "$REPO/sanotts/nano_lex_fr_tables.c" \
   -I "$REPO/sanotts" -lm || exit 1
 if [ "$SKIP_CORPUS" = 1 ]; then
   echo "skip - corpus (--skip-corpus)"
@@ -175,6 +182,48 @@ rate=$(awk -v g=$g_nano -v t=$total 'BEGIN{printf "%.1f", 100*g/t}')
 awk -v r="$rate" 'BEGIN{exit !(r < 5.0)}' \
   && echo "ok - nano grouped spans < 5%" \
   || { echo "FAIL - nano grouped spans >= 5%"; fails=$((fails+1)); }
+
+step "7. French: lexicon G2P gates (held-out novel, f32 RTF)"
+cc -O2 -std=gnu99 -w -o "$OUT/test_snt_fr_l2s" "$REPO/dev/test_snt_fr_l2s.c" \
+  "$REPO/sanotts/nano_lex_fr.c" "$REPO/sanotts/nano_lex_fr_tables.c" \
+  -I "$REPO/sanotts" -lm || exit 1
+"$OUT/test_snt_fr_l2s" "$EB" | tail -1
+[ "${PIPESTATUS[0]}" = 0 ] || fails=$((fails+1))
+
+if [ "$SKIP_CORPUS" = 1 ]; then
+  echo "skip - French corpus (--skip-corpus)"
+else
+  FRCORPUS="${G2P_CORPUS_DIR:-/tmp/g2p-corpus}"
+  mkdir -p "$FRCORPUS"
+  [ -f "$FRCORPUS/miserables1.txt" ] || \
+    curl -fsSL "https://www.gutenberg.org/cache/epub/17489/pg17489.txt" \
+      -o "$FRCORPUS/miserables1.txt" \
+      || { echo "FAIL - miserables1 download"; fails=$((fails+1)); }
+  if [ -f "$FRCORPUS/miserables1.txt" ]; then
+    line=$(cat "$FRCORPUS/miserables1.txt" | "$OUT/corpus_oov" --fr 0.25)
+    echo "miserables1 (fr): $line"
+    echo "note - French OOV speaks via the rule layer; thresholds are informational"
+  fi
+fi
+
+if [ "$SKIP_RTF" = 1 ]; then
+  echo "skip - French RTF (--skip-rtf)"
+else
+  rt_fr() {
+    local out
+    out=$(sh "$REPO/dev/snt-bench.sh" --engine f32 --passes 3 --bin "$OUT/snt_server" \
+       --model "$REPO/sanotts/voice-fr" --espeak-bin "$EB" --espeak-data "$ED" \
+       --voice fr --extra "$1" 2>/dev/null | grep -oE "rtf=[0-9.]+" | grep -oE "[0-9.]+" | sort -n | sed -n 2p)
+    [ -n "$out" ] || { echo "FAIL - fr RTF run produced no rtf= lines" >&2; fails=$((fails+1)); echo 0; return; }
+    echo "$out"
+  }
+  r_fr_espeak=$(rt_fr "")
+  r_fr_nano=$(rt_fr "--g2p nano --phonemes fr")
+  echo "fr espeak RTF med=$r_fr_espeak  fr nano RTF med=$r_fr_nano"
+  awk -v n="$r_fr_nano" -v e="$r_fr_espeak" 'BEGIN{exit !(n <= 1.5 * e)}' \
+    && echo "ok - fr nano <= 1.5x espeak on host (device target: nano wins)" \
+    || { echo "FAIL - fr nano regressed on host beyond noise"; fails=$((fails+1)); }
+fi
 
 echo
 if [ "$fails" = 0 ]; then echo "G2P GATE PASS"; else echo "G2P GATE FAILED: $fails"; exit 1; fi

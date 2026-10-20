@@ -31,3 +31,20 @@ note rather than a failure because the listening A/B, not the rate, decides
 whether per-clause mixing is audible. Levers if it matters: a wider
 dictionary (the tables regenerate from misaki's gold/silver data) or a
 higher `--g2p-oov-threshold` for that kind of text.
+
+## French corpora (nano_lex_fr)
+
+| file | role | source | sha256 |
+|---|---|---|---|
+| `fr_full.txt` | lexicon vocabulary (top 100k alpha forms) | https://github.com/hermitdave/FrequencyWords/raw/master/content/2018/fr/fr_full.txt | `dda23c3025fc195b3a7996af26371dcf3abd1aa2cd7218dbbb7c92a49780ab0c` |
+| `meunier.txt` | lexicon supplement (literary) | https://www.gutenberg.org/cache/epub/13892/pg13892.txt (George Sand, Le meunier d'Angibault) | `ad7b1b2e7edf8687d209ecc33fed742eb165bc5939590c2344fc4f4b5c109049` |
+| `balzac1.txt` | lexicon supplement (literary) | https://www.gutenberg.org/cache/epub/41211/pg41211.txt (Balzac, La Comedie humaine v01) | `c192ed74d4ffd4000497033b8a512e9f5ca805531281d5395259f954c12e30d2` |
+| `miserables1.txt` | HELD-OUT eval corpus (never in the lexicon) | https://www.gutenberg.org/cache/epub/17489/pg17489.txt (Hugo, Les miserables T1: Fantine) | `a5de514ba7b9f2e1790e7e259c4e8b7a35ae1d29e4bf9a5f8767039c58b80503` |
+
+Fetched 2026-10-20. The lexicon values are espeak-ng `-q --ipa -v fr`
+output, so in-dictionary words are espeak-exact by construction; OOV words
+speak through the rule layer in nano_lex_fr.c (unlike English, French OOV
+is never silent), and clauses above the OOV threshold still fall back to
+espeak. Numbers on the held-out novel at the default threshold 0.25
+(2026-10-20, 107077-entry lexicon): token OOV 2.69%, clauses routed to
+espeak 2.03%.

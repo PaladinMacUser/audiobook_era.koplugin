@@ -401,15 +401,15 @@ function PiperQueue:buildBaseCommand()
         local phoneme_flag = vcfg.phonemes and vcfg.phonemes ~= "en"
             and string.format(" --phonemes %s", vcfg.phonemes) or ""
         -- Phonemizer: the in-process lexicon G2P (--g2p nano) replaces the
-        -- per-clause espeak fork+exec for English voices. The per-voice def
-        -- wins over the sanotts_g2p setting; absent flag = espeak path,
-        -- byte-identical to the legacy command line. French stays on espeak
-        -- until it has its own lexicon (the server rejects the combination).
+-- Phonemizer: the in-process lexicon G2P (--g2p nano) replaces the
+-- per-clause espeak fork+exec, English and French alike. The
+-- per-voice def wins over the sanotts_g2p setting; absent flag =
+-- espeak path, byte-identical to the legacy command line.
         local g2p = vcfg.g2p
             or (engine.plugin and engine.plugin.getSetting
                 and engine.plugin:getSetting("sanotts_g2p", "espeak"))
             or "espeak"
-        local g2p_flag = (g2p == "nano" and vcfg.phonemes ~= "fr")
+        local g2p_flag = g2p == "nano" and " --g2p nano" or ""
             and " --g2p nano" or ""
         -- Thread the sanoTTS server across both cores on multi-core devices
         -- (arm-neon port, patch 0004).  Older server binaries ignore the

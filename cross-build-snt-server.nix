@@ -25,7 +25,7 @@ crossPkgs.stdenv.mkDerivation {
     # live in ports/arm-neon/snt_port_arm.c (patch 0003); SNT_THREADS
     # selects threading at runtime, default serial.
     export NIX_CFLAGS_COMPILE="$NIX_CFLAGS_COMPILE -O2 -std=c99 -mfpu=neon -I${sanoDir}/mcu/include -I${sanoDir}/mcu/src -I${sanoDir}/voice-nano -DFSD_FAST_MATH"
-    $CC -static -o snt_server ${sanoDir}/snt_server.c ${sanoDir}/mcu/src/snt_tts.c ${sanoDir}/mcu/ports/arm-neon/snt_port_arm.c ${sanoDir}/mcu/src/snt_nano.c ${sanoDir}/mcu/src/snt_front_q8.c ${sanoDir}/mcu/src/snt_piperlite_q8.c ${sanoDir}/mcu/src/snt_front_f32.c ${sanoDir}/mcu/src/snt_piperlite.c ${sanoDir}/nano_lex_g2p.c ${sanoDir}/nano_lex_tables.c -lm
+    $CC -static -o snt_server ${sanoDir}/snt_server.c ${sanoDir}/mcu/src/snt_tts.c ${sanoDir}/mcu/ports/arm-neon/snt_port_arm.c ${sanoDir}/mcu/src/snt_nano.c ${sanoDir}/mcu/src/snt_front_q8.c ${sanoDir}/mcu/src/snt_piperlite_q8.c ${sanoDir}/mcu/src/snt_front_f32.c ${sanoDir}/mcu/src/snt_piperlite.c ${sanoDir}/nano_lex_g2p.c ${sanoDir}/nano_lex_tables.c ${sanoDir}/nano_lex_fr.c ${sanoDir}/nano_lex_fr_tables.c -lm
   '';
 
   installPhase = ''

@@ -78,6 +78,7 @@
 #include "phoneme_id_map.h"
 #include "phoneme_id_map_fr.h"
 #include "nano_lex_g2p.h"
+#include "nano_lex_fr.h"
 
 #include <unistd.h>
 #include <errno.h>
@@ -454,15 +455,33 @@ static int g2p_nano_clause(const char *text) {
         chunk[take] = 0;
         off += take;
 
-        nano_lex_g2p_stats_t st;
-        int rc = nano_lex_g2p_text_to_phonemes(chunk, g_nano_ph + len,
+        /* Two lexicons share this clause walk: misaki English
+         * (nano_lex_g2p) and the espeak-derived French one
+         * (nano_lex_fr). The phoneme map (--phonemes) picks the G2P;
+         * the fr tables store espeak fr IPA verbatim, so in-dictionary
+         * French words are espeak-exact. */
+        long oov_c, lex_c;
+        int rc;
+        if (g_map == PHONEME_MAP_FR) {
+            nano_lex_fr_stats_t st;
+            rc = nano_lex_fr_text_to_phonemes(chunk, g_nano_ph + len,
+                                              sizeof g_nano_ph - len);
+            nano_lex_fr_get_stats(&st);
+            oov_c = st.oov_words;
+            lex_c = st.lexicon_words;
+        } else {
+            nano_lex_g2p_stats_t st;
+            rc = nano_lex_g2p_text_to_phonemes(chunk, g_nano_ph + len,
                                                sizeof g_nano_ph - len);
-        nano_lex_g2p_get_stats(&st);
-        oov += st.oov_words;
-        lex += st.lexicon_words;
+            nano_lex_g2p_get_stats(&st);
+            oov_c = st.oov_words;
+            lex_c = st.lexicon_words;
+        }
+        oov += oov_c;
+        lex += lex_c;
         /* E_CAP leaves a truncated but speakable prefix in the buffer;
          * every other negative code writes nothing. */
-        if (rc < 0 && rc != NANO_LEX_E_CAP) continue;
+        if (rc < 0 && rc != NANO_LEX_E_CAP && rc != NFR_E_CAP) continue;
         len += strlen(g_nano_ph + len);
     }
     g_g2p_oov_words += oov;
@@ -875,10 +894,6 @@ int main(int argc, char **argv) {
     if (!strcmp(engine, "f32")) g_engine_f32 = 1;
     if (g_g2p_nano && g_engine_nano) {
         fprintf(stderr, "{\"error\": \"--g2p nano applies to int8/pq8/f32; --engine nano already uses the lexicon G2P\"}\n");
-        return 2;
-    }
-    if (g_g2p_nano && g_map != PHONEME_MAP) {
-        fprintf(stderr, "{\"error\": \"--g2p nano has no French G2P yet\"}\n");
         return 2;
     }
     if (!rate) rate = g_engine_nano ? 24000 : 22050;

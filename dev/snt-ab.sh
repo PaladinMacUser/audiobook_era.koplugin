@@ -93,7 +93,8 @@ build() { # $1 = output path, $2 = engine src dir, $3 = "" (ref split) or one po
       "$tree/src/snt_nano.c" "$tree/src/snt_front_q8.c" \
       "$tree/src/snt_piperlite_q8.c" "$tree/src/snt_front_f32.c" \
       "$tree/src/snt_piperlite.c" $port_src \
-      "$REPO/sanotts/nano_lex_g2p.c" "$REPO/sanotts/nano_lex_tables.c" -lm
+      "$REPO/sanotts/nano_lex_g2p.c" "$REPO/sanotts/nano_lex_tables.c" \
+      "$REPO/sanotts/nano_lex_fr.c" "$REPO/sanotts/nano_lex_fr_tables.c" -lm
 }
 
 if [ -n "$CROSS" ] && [ -z "${ESPEAK_BIN:-}" ] && [ -z "$IDS_DIR" ]; then
