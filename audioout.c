@@ -170,6 +170,8 @@ static AlsaApi A;
 #define SND_PCM_FORMAT_S16_LE   2
 #define SND_PCM_ACCESS_RW_INTERLEAVED 3
 
+static void log_line(const char *fmt, ...);
+
 /* ------------------------------------------------------------------ */
 /* In-process decode (AUDIOOUT_WITH_LIBAV, Tier 5b)                     */
 /*                                                                      */
@@ -216,17 +218,30 @@ static int dec_open(const char *path, DecState **out, long long *duration_ms,
     *out = NULL;
     DecState *d = calloc(1, sizeof *d);
     if (!d) return -1;
-    if (avformat_open_input(&d->fmt, path, NULL, NULL) != 0) goto fail;
-    if (avformat_find_stream_info(d->fmt, NULL) < 0) goto fail;
+    if (avformat_open_input(&d->fmt, path, NULL, NULL) != 0) {
+        log_line("dec open: avformat_open_input failed for %s", path);
+        goto fail;
+    }
+    if (avformat_find_stream_info(d->fmt, NULL) < 0) {
+        log_line("dec open: find_stream_info failed for %s", path);
+        goto fail;
+    }
     d->stream = av_find_best_stream(d->fmt, AVMEDIA_TYPE_AUDIO, -1, -1,
                                     &d->codec, 0);
-    if (d->stream < 0 || !d->codec) goto fail;
+    if (d->stream < 0 || !d->codec) {
+        log_line("dec open: no audio stream for %s (rc %d)", path, d->stream);
+        goto fail;
+    }
     AVStream *st = d->fmt->streams[d->stream];
     d->ctx = avcodec_alloc_context3(d->codec);
     if (!d->ctx) goto fail;
     if (avcodec_parameters_to_context(d->ctx, st->codecpar) < 0) goto fail;
     d->ctx->pkt_timebase = st->time_base;
     if (avcodec_open2(d->ctx, d->codec, NULL) < 0) goto fail;
+    log_line("dec: stream=%d codec=%s rate=%d fmt=%d ch=%d",
+             d->stream, d->codec ? d->codec->name : "?",
+             d->ctx->sample_rate, d->ctx->sample_fmt,
+             d->ctx->ch_layout.nb_channels);
     int orate = d->ctx->sample_rate > 0 ? d->ctx->sample_rate : 44100;
     int och = d->ctx->ch_layout.nb_channels > 0
         ? d->ctx->ch_layout.nb_channels : 2;
@@ -246,7 +261,10 @@ static int dec_open(const char *path, DecState **out, long long *duration_ms,
     if (dur <= 0 && d->fmt->bit_rate > 0)
         dur = (long long)d->fmt->pb ? 0
               : 0;  /* bitrate estimate needs the size; keep 0 = unknown */
-    if (dur <= 0) { goto fail; }
+    if (dur <= 0) {
+        log_line("dec open: no duration for %s", path);
+        goto fail;
+    }
     *duration_ms = dur;
     *rate = orate;
     *channels = och;

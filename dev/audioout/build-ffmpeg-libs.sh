@@ -17,10 +17,12 @@ SRC="/tmp/ffbuild-$VERSION"
 
 bash "$HERE/fetch-sysroot.sh"
 
-mkdir -p "$SRC" "$HERE/.ffinstall"
+mkdir -p "$HERE/.ffinstall"
 [ -f "$SRC.tar.xz" ] || curl -fsSL "https://www.ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$SRC.tar.xz"
 echo "$SHA256  $SRC.tar.xz" | (cd /tmp && sha256sum -c -)
-[ -d "$SRC" ] || tar xf "$SRC.tar.xz" -C /tmp
+rm -rf "/tmp/ffmpeg-$VERSION"
+[ -d "/tmp/ffmpeg-$VERSION" ] || tar xf "$SRC.tar.xz" -C /tmp
+cd "/tmp/ffmpeg-$VERSION"
 
 hdr() {
     nix build --no-link --print-out-paths --impure --expr \
@@ -29,7 +31,6 @@ hdr() {
 }
 SYSROOT="$HERE/.sysroot"
 
-cd "$SRC"
 nix shell "nixpkgs#gcc" "nixpkgs#gnumake" "nixpkgs#pkgsCross.armv7l-hf-multiplatform.stdenv.cc" -c bash -c "
 CC=armv7l-unknown-linux-gnueabihf-gcc ./configure --prefix='$HERE/.ffinstall' \
   --enable-cross-compile --cross-prefix=armv7l-unknown-linux-gnueabihf- --arch=arm --target-os=linux \
@@ -40,6 +41,7 @@ CC=armv7l-unknown-linux-gnueabihf-gcc ./configure --prefix='$HERE/.ffinstall' \
   --enable-static --disable-shared --enable-small --enable-pic \
   --enable-avcodec --enable-avformat --enable-avutil --enable-swresample \
   --enable-demuxer=mov,mp3,ogg,flac,asf,matroska,aac,wav,opus \
+  --enable-protocol=file \
   --enable-decoder=aac,aac_latm,mp3,mp3float,flac,vorbis,opus,wmav1,wmav2,alac,pcm_s16le,pcm_u8,pcm_f32le,pcm_s16be \
   --enable-parser=aac,mpegaudio,vorbis,opus,flac \
   --extra-cflags='-Os -ffunction-sections -fdata-sections -mfpu=vfpv3-d16 -march=armv7-a' \
