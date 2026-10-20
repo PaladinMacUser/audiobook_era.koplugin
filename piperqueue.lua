@@ -405,10 +405,11 @@ function PiperQueue:buildBaseCommand()
 -- per-clause espeak fork+exec, English and French alike. The
 -- per-voice def wins over the sanotts_g2p setting; absent flag =
 -- espeak path, byte-identical to the legacy command line.
-        local g2p = vcfg.g2p
-            or (engine.plugin and engine.plugin.getSetting
-                and engine.plugin:getSetting("sanotts_g2p", "espeak"))
-            or "espeak"
+        -- An explicit setting (the voice-menu toggle) beats the voice def,
+        -- so the toggle stays a working escape hatch back to espeak.
+        local g2p = (engine.plugin and engine.plugin.getSetting
+                and engine.plugin:getSetting("sanotts_g2p", nil))
+            or vcfg.g2p or "espeak"
         local g2p_flag = g2p == "nano" and " --g2p nano" or ""
             and " --g2p nano" or ""
         -- Thread the sanoTTS server across both cores on multi-core devices

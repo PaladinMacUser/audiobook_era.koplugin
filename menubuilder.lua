@@ -1138,10 +1138,19 @@ function MenuBuilder.buildSanottsVoiceMenu(plugin)
     table.insert(menu, {
         text = _("Word phonemization: dictionary (no espeak)"),
         checked_func = function()
-            return plugin:getSetting("sanotts_g2p", "espeak") == "nano"
+            local explicit = plugin:getSetting("sanotts_g2p", nil)
+            if explicit then return explicit == "nano" end
+            local cfg = plugin.tts_engine and plugin.tts_engine.sanotts_voice_cfg
+            return (cfg and cfg.g2p or "espeak") == "nano"
         end,
         callback = function()
-            plugin:toggleSetting("sanotts_g2p", "espeak")
+            -- toggle the EXPLICIT override against the current effective
+            -- value, so the checkbox always moves and the choice sticks
+            local explicit = plugin:getSetting("sanotts_g2p", nil)
+            local cfg = plugin.tts_engine and plugin.tts_engine.sanotts_voice_cfg
+            local effective = explicit or (cfg and cfg.g2p) or "espeak"
+            plugin:setSetting("sanotts_g2p",
+                effective == "nano" and "espeak" or "nano")
             local pq = plugin.tts_engine and plugin.tts_engine._piper
             if pq and pq.stopServers then pq:stopServers() end
         end,
@@ -1149,7 +1158,7 @@ function MenuBuilder.buildSanottsVoiceMenu(plugin)
             "Reads the pronunciation dictionary directly instead of running "
             .. "the espeak helper for every clause: faster and it keeps word "
             .. "boundaries exact. Hard-to-read words (names) still fall back "
-            .. "to espeak per clause. French voices always use espeak."
+            .. "to espeak per clause. On by default for all sanoTTS voices."
         ),
     })
     return menu
