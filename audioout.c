@@ -221,6 +221,8 @@ static struct {
     int alsa_rate, alsa_channels;
     unsigned long long alsa_written_frames;
 
+    long long next_ka_ms;               /* wall time the next keepalive
+                                           silence chunk may be written */
     int listen_fd;
     int client_fd;
 } S;
@@ -795,12 +797,16 @@ queue_clip(const char *path, long long gap_ms) {
     Clip c;
     if (clip_open(&c, path, g_rate, g_channels) != 0) return -1;
     c.gap_ms_after = gap_ms;
-    /* A clip queued while keepalive silence flows starts after every byte
-     * already written. */
-    long long now_written_ms =
-        (long long)((S.fifo_written * 1000ull) /
-                    (unsigned long long)(g_rate * g_channels * 2));
-    c.start_ms = (now_written_ms > S.fed_end_ms) ? now_written_ms : S.fed_end_ms;
+    /* Clip positions live on the AUDIBLE timeline (what the listener has
+     * heard), not the fifo-intake timeline: unpaced keepalive silence and
+     * the firehose sink make intake race ahead of wall time, and a clip
+     * whose end_ms is an intake position "completes" the moment the
+     * audible clock passes it -- the TTS session then races through
+     * sentences and pages. fed_end_ms only ever advances with real clips,
+     * so stacking works; the intake position only bounds the lead. */
+    long long base_ms = audible_ms();
+    if (S.fed_end_ms > base_ms) base_ms = S.fed_end_ms;
+    c.start_ms = base_ms;
     c.end_ms = c.start_ms + c.duration_ms + gap_ms;
     S.fed_end_ms = c.end_ms;
     S.all_fed = 0;
@@ -858,19 +864,29 @@ feed_tick(void) {
         return;
     }
     if (S.paused || S.fifo_fd < 0) return;
-    /* Keepalive silence is NEVER paced: it exists to hold the A2DP link
-     * and to keep filesrc's blocking read unblocked. Gate it behind the
-     * lead window and a fast sink drains the fifo, filesrc parks in read(),
-     * and the next teardown deadlocks in gst_pad_stop_task (silence ahead
-     * of the listener is harmless: it never enters fed_end_ms, and the
-     * audible clock is anchor-based, not intake-based). */
+    /* Keepalive silence holds the A2DP link and keeps filesrc's blocking
+     * read unblocked (a starved src deadlocks the next teardown; see
+     * pipeline_teardown). It is NEVER gated by the lead window, but it IS
+     * rate-limited to real time: the firehose sink accepts as fast as we
+     * write, and unthrottled silence would flood the BT firmware and race
+     * the intake position far ahead of the audible clock. */
     if (S.feed_idx < 0 && S.queue_len == 0) {
-        fifo_write(silence_chunk, SILENCE_CHUNK);   /* idle keepalive */
+        if (wall_now >= S.next_ka_ms) {
+            fifo_write(silence_chunk, SILENCE_CHUNK);   /* idle keepalive */
+            S.next_ka_ms = wall_now
+                + (long long)SILENCE_CHUNK * 1000LL
+                  / (g_rate * g_channels * 2);
+        }
         return;
     }
     if (S.all_fed) {
         /* Queue fully written (possibly still rendering): keepalive. */
-        fifo_write(silence_chunk, SILENCE_CHUNK);
+        if (wall_now >= S.next_ka_ms) {
+            fifo_write(silence_chunk, SILENCE_CHUNK);
+            S.next_ka_ms = wall_now
+                + (long long)SILENCE_CHUNK * 1000LL
+                  / (g_rate * g_channels * 2);
+        }
         return;
     }
     /* Pace REAL audio (clips and gaps) against the audible position: the

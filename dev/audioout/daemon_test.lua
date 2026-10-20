@@ -214,4 +214,34 @@ resp = ao:setVolume(0.5)
 ok(resp and resp.ok and resp.volume == 0.5, "volume command round-trips")
 ao:setVolume(1.0)
 
+-- 11. long-session timeline: after idling past the first clip's end on
+--     keepalive silence, a second clip must still take ~its full
+--     duration. The audible-vs-intake timeline divergence made every
+--     clip after ~30 s of session complete instantly, racing the
+--     read-along through sentences and pages.
+resp = ao:play(wav, { rate = 22050, channels = 1 })
+ok(resp and resp.ok, "long-session: first clip queued")
+do
+    local t = 0
+    while t < expected_ms / 1000 + 6 do
+        os.execute("sleep 1"); t = t + 1
+        local st = ao:status()
+        if (st.done_count or 0) > 0 then break end
+    end
+    os.execute("sleep 5")   -- idle on keepalive past the clip end
+    resp = ao:play(wav, { rate = 22050, channels = 1 })
+    ok(resp and resp.ok, "long-session: second clip queued")
+    local done0 = (ao:status() or {}).done_count or 0
+    local instant = false
+    t = 0
+    while t < expected_ms / 2000 do   -- half the duration
+        os.execute("sleep 1"); t = t + 1
+        local st = ao:status()
+        if (st.done_count or 0) > done0 then instant = true; break end
+    end
+    ok(not instant, "long-session: second clip did not complete instantly")
+    ao:stop()
+    ao:flush()
+end
+
 print(string.format("PASS - %d checks", checks))
