@@ -397,6 +397,9 @@ static struct {
     int external_active;
     int external_wait_first;            /* rebaseline base at first movement
                                            (legacy no-pos resume) */
+#ifdef AUDIOOUT_WITH_LIBAV
+    int ext_dec_eof;                    /* decoded stream fully delivered */
+#endif
     long long epoch_off_ms;             /* client ms at since-build intake 0 */
     long long external_total_ms;        /* stream length from the client */
     int external_done;                  /* latched completion flag */
@@ -561,6 +564,12 @@ audible_ms(void) {
     long long acc = S.epoch_off_ms
                   + (long long)(acc_bytes / OUT_BYTES_PER_MS)
                   + AUDIBLE_TAIL_SLACK_MS;
+#ifdef AUDIOOUT_WITH_LIBAV
+    /* The decoded stream is fully delivered: the last partial transport
+     * batch never crosses the pad probe, so the intake clamp would freeze
+     * the clock short of the announced total. The anchor alone is truth. */
+    if (S.ext_dec_eof) acc = est + AUDIBLE_TAIL_SLACK_MS;
+#endif
     if (est > acc) est = acc;
     long long lo = S.epoch_off_ms + S.external_base_ms;
     if (est < lo) est = lo;
@@ -1526,6 +1535,9 @@ handle_command(char *line) {
         drop_queue();
         S.external_active = 0;
 #ifdef AUDIOOUT_WITH_LIBAV
+        S.ext_dec_eof = 0;
+#endif
+#ifdef AUDIOOUT_WITH_LIBAV
         if (S.ext_dec) { dec_close((DecState *)S.ext_dec); S.ext_dec = NULL; }
         if (dec_path[0]) {
             long long dur = 0;
@@ -1610,13 +1622,19 @@ handle_command(char *line) {
                 "\"accepted_ms\":%lld,\"fed_ms\":%lld,\"fed_end_ms\":%lld,"
                 "\"done_count\":%llu,\"queue\":%d,\"rate\":%d,\"channels\":%d,"
                 "\"volume\":%.2f,\"unpaced\":%d,\"out\":\"%s\",\"uptime_ms\":%lld,"
-                "\"external\":%d,\"external_done\":%d}",
+                "\"external\":%d,\"external_done\":%d,\"decoder\":%d}",
                 state_str(), rend, (long long)(acc_bytes / OUT_BYTES_PER_MS),
                 fed, S.fed_end_ms, S.done_count, S.queue_len,
                 S.pipe_rate, S.pipe_channels, S.volume,
                 S.unpaced, S.out_alsa ? "alsa" : "mtk",
                 mono_ms() - g_started_ms,
-                S.external_active, S.external_done);
+                S.external_active, S.external_done,
+#ifdef AUDIOOUT_WITH_LIBAV
+                1
+#else
+                0
+#endif
+                );
     } else if (!strcmp(cmd, "volume")) {
         long long v = json_num(line, "value_x1000", 1000);
         double vol = (double)v / 1000.0;
