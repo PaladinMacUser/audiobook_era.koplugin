@@ -1132,10 +1132,12 @@ handle_command(char *line) {
             return;
         }
         respond("{\"ok\":true,\"queue\":%d,\"fed_end_ms\":%lld,"
-                "\"start_ms\":%lld,\"duration_ms\":%lld}",
+                "\"start_ms\":%lld,\"duration_ms\":%lld,"
+                "\"done_count\":%llu}",
                 S.queue_len, S.fed_end_ms,
                 S.queue[S.queue_len - 1].start_ms,
-                S.queue[S.queue_len - 1].duration_ms);
+                S.queue[S.queue_len - 1].duration_ms,
+                S.done_count);
     } else if (!strcmp(cmd, "pause")) {
         /* Freeze the clock in EVERY mode: in clip mode the frozen value is
          * what status reports while paused, and a collapse to 0 here sent

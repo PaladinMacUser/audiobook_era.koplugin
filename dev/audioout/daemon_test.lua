@@ -83,6 +83,7 @@ local t0_fed = resp.fed_ms
 -- 3. queue the tone
 resp = ao:play(wav, { rate = 22050, channels = 1 })
 ok(resp and resp.ok, "play accepted")
+ok(resp.done_count ~= nil, "play response carries done_count (completion baseline)")
 ok(math.abs(resp.fed_end_ms - t0_fed - expected_ms) < 1500,
    string.format("fed_end_ms ~= +%d (%+d)", expected_ms,
                  resp.fed_end_ms - t0_fed - expected_ms))

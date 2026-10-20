@@ -4322,7 +4322,14 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                 return false
             end
             self._audioout_active = true
-            self._audioout_done_baseline = resp.done_count or 0
+            -- The completion poll compares the daemon's done_count against
+            -- the value at queue time; a stale or missing baseline here
+            -- made every later group complete the moment it was queued.
+            self._audioout_done_baseline = resp.done_count
+            if not self._audioout_done_baseline then
+                local bst = self._audioout_client:status(400)
+                self._audioout_done_baseline = (bst and bst.done_count) or 0
+            end
             self._audioout_start_ms = resp.start_ms or 0
             self._audioout_fed_end_ms = resp.fed_end_ms
             self._audio_launched_at = UIManager:getTime()
