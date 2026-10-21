@@ -42,12 +42,19 @@ Text-to-speech for [KOReader](https://github.com/koreader/koreader) with synchro
 * [Books] Play audiobooks with scrubber seek, chapter navigation, and sleep timer
 * [Audiobookshelf] Browse, download, and sync playback progress with an [Audiobookshelf](https://www.audiobookshelf.org/) server (see [setup guide](docs/AUDIOBOOKSHELF.md))!
 * [Sync] Storyteller compatibility; EPUB 3 Media Overlays support (work in progress)
+* [Sync] BookOrbit friendly: read-along EPUBs play their embedded narration, and narration-free copies from BookOrbit are detected with guidance (see [BookOrbit](#bookorbit))
 
 ## Audiobookshelf integration
 
 Connect to an [Audiobookshelf](https://www.audiobookshelf.org/) server to browse your library, download audiobooks for offline playback, and sync progress across devices. All configuration is done through the KOReader menu; no file editing is required.
 
 For setup instructions, see [docs/AUDIOBOOKSHELF.md](docs/AUDIOBOOKSHELF.md).
+
+## BookOrbit
+
+[BookOrbit](https://github.com/bookorbit/bookorbit) is a self-hosted library server whose read-along books use the same EPUB 3 Media Overlay format as Storyteller exports. This plugin plays the embedded narration: open the book in KOReader and start the read-aloud as usual, and the publisher's own sentence timing drives the highlights. Reading progress syncs through BookOrbit's own KOReader plugin, which follows the page position that the narration moves.
+
+One thing to know: by default, BookOrbit's Kobo delivery strips the narration to keep downloads small. The plugin detects those narration-free copies and tells you what to do. To get the audio, set the device's read-along delivery to **Original** in BookOrbit (per-device setting under KOReader credentials) and download the book again.
 
 ## Quick start
 
