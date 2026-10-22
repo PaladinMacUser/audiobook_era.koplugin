@@ -54,7 +54,9 @@ For setup instructions, see [docs/AUDIOBOOKSHELF.md](docs/AUDIOBOOKSHELF.md).
 
 [BookOrbit](https://github.com/bookorbit/bookorbit) is a self-hosted library server whose read-along books use the same EPUB 3 Media Overlay format as Storyteller exports. This plugin plays the embedded narration: open the book in KOReader and start the read-aloud as usual, and the publisher's own sentence timing drives the highlights. Reading progress syncs through BookOrbit's own KOReader plugin, which follows the page position that the narration moves.
 
-One thing to know: by default, BookOrbit's Kobo delivery strips the narration to keep downloads small. The plugin detects those narration-free copies and tells you what to do. To get the audio, set the device's read-along delivery to **Original** in BookOrbit (per-device setting under KOReader credentials) and download the book again.
+One thing to know: by default, BookOrbit's KOReader delivery strips the narration to keep downloads small. The plugin detects those narration-free copies and tells you what to do. To get the audio, set the read-along delivery to **Original** for your KOReader credential and download the book again.
+
+For the full walkthrough, see [docs/BOOKORBIT.md](docs/BOOKORBIT.md).
 
 ## Quick start
 
