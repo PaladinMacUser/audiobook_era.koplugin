@@ -118,18 +118,30 @@ are (a) flip the default voice to kristin, (b) ship a lighter pq8 export
 (smaller width) for ARMv7, or (c) accept amy only on much faster hardware.
 This is a product decision, not a kernel one.
 
-Pending: needs device access (`.142` single-core MTK documented; Libra Color
-dual-core access pattern to be confirmed). Matrix to fill:
+## Device identity and the 2026-10-22 fill (Libra Colour, single device)
+
+Device identity settled 2026-10-22: the test device at 192.168.1.142 IS the
+Kobo Libra Colour (FBInk: "Kobo Libra Colour (390 => Monza @ Mark 13)").
+"Monza" is that model's codename, so the matrix below had split ONE device
+into two rows. It is also single-core (1 processor in /proc/cpuinfo), which
+closes the "after M3/M4 dual-core" premise: there is no second core for the
+worker to win, and the measured 2-thread rows confirm it.
+
+Fresh numbers (2026-10-22, deployed NEON binary, 5 passes per leg, pass1 ==
+pass5 determinism on every leg). Measurement caveat: the stock MTK
+`btservice` daemon spins ~90% of the core once Bluetooth has been used and
+poisons the run (int8 measured 0.157 under it vs 0.077 after SIGSTOPping it
+for the bench; resumed afterwards). Bench any MTK Kobo with it paused.
 
 | device | engine | threads | RTF med | notes |
 |---|---|---|---|---|
-| Libra Color | int8 | 1 | (spike anchor: 0.153) | reproduce within ~10% |
-| Libra Color | pq8 | 1 | pending | critical number for the default voice |
-| Libra Color | f32 | 1 | pending | |
-| Libra Color | int8 | 2 | pending | after M3 |
-| Libra Color | pq8 | 2 | pending | after M4 |
-| .142 (MTK) | int8 | 1 | 0.0793 (NEON; scalar 0.1708) | 2026-10-19 table above |
-| .142 (MTK) | pq8 | 1 | 3.4907 (NEON; scalar 5.8183) | 2026-10-19 table above |
+| Libra Colour (Monza) | int8 | 1 | **0.0774** (2026-10-22) | reproduces 0.0793 within 2.5%; spike anchor 0.153 was scalar pre-NEON |
+| Libra Colour (Monza) | pq8 | 1 | **3.3133** (2026-10-22) | reproduces 3.4907 within 5% |
+| Libra Colour (Monza) | int8 | 2 | 0.0774 (2026-10-22) | no gain, single core |
+| Libra Colour (Monza) | pq8 | 2 | 3.2310 (2026-10-22) | noise-level, single core |
+| Libra Colour (Monza) | f32 | 1 | pending | voice-fr is the only f32 model; the English bench corpus through the French phonemizer is not comparable, needs a real f32 corpus leg |
+| .142 (MTK) = Libra Colour | int8 | 1 | 0.0793 (NEON; scalar 0.1708) | 2026-10-19 table above |
+| .142 (MTK) = Libra Colour | pq8 | 1 | 3.4907 (NEON; scalar 5.8183) | 2026-10-19 table above |
 
 ## pq8 profile ranking (host, callgrind, 2 sentences, -O2)
 
