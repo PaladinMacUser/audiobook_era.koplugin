@@ -584,6 +584,118 @@ function Utils.findIgnoringSpaces(haystack, needle)
     return start_entry.s, end_entry.e
 end
 
+--- Decode the UTF-8 codepoint starting at byte i.
+--- Codepoint-aligned input is assumed (the callers walk lead bytes only);
+--- a continuation byte met here returns the byte value itself.
+-- @param s string  Input text
+-- @param i number  Byte offset (1-based)
+-- @return number codepoint, number next byte offset
+function Utils.decodeCharAt(s, i)
+    local b = s:byte(i)
+    if not b then return nil, i + 1 end
+    if b < 0x80 then return b, i + 1 end
+    local len, cp
+    if b >= 0xC2 and b <= 0xDF then len, cp = 2, b - 0xC0
+    elseif b >= 0xE0 and b <= 0xEF then len, cp = 3, b - 0xE0
+    elseif b >= 0xF0 and b <= 0xF4 then len, cp = 4, b - 0xF0
+    else return b, i + 1 end
+    for k = 1, len - 1 do
+        local cb = s:byte(i + k)
+        if not cb or cb < 0x80 or cb >= 0xC0 then return b, i + 1 end
+        cp = cp * 64 + (cb - 0x80)
+    end
+    return cp, i + len
+end
+
+--- True when the text contains CJK ideographs, kana, or their compatibility
+--- forms.  Korean is deliberately excluded: hangul text uses spaces, so the
+--- word-count heuristics keep working for it.
+-- @param s string
+-- @return boolean
+function Utils.hasCJKScript(s)
+    if not s or s == "" then return false end
+    local i = 1
+    while i <= #s do
+        local cp, next_i = Utils.decodeCharAt(s, i)
+        if cp and cp >= 0x3000 then
+            -- CJK punctuation (0x3000-0x303F), kana (0x3040-0x30FF), CJK
+            -- ext-A (0x3400-0x4DBF), unified ideographs (0x4E00-0x9FFF),
+            -- compatibility ideographs (0xF900-0xFAFF), halfwidth kana
+            -- (0xFF66-0xFF9D).
+            if (cp <= 0x30FF)
+                or (cp >= 0x3400 and cp <= 0x4DBF)
+                or (cp >= 0x4E00 and cp <= 0x9FFF)
+                or (cp >= 0xF900 and cp <= 0xFAFF)
+                or (cp >= 0xFF66 and cp <= 0xFF9D) then
+                return true
+            end
+        end
+        i = next_i or (i + 1)
+    end
+    return false
+end
+
+--- Count non-whitespace characters (codepoints, not bytes).  For spaceless
+--- scripts a whole sentence is one "%S+" token, so word counts are useless;
+--- character counts stand in for them.
+-- @param s string
+-- @return number
+function Utils.charCount(s)
+    if not s or s == "" then return 0 end
+    local n = 0
+    local i = 1
+    while i <= #s do
+        local cp, next_i = Utils.decodeCharAt(s, i)
+        if cp and not (cp == 0x20 or (cp >= 0x09 and cp <= 0x0D)) then
+            n = n + 1
+        end
+        i = next_i or (i + 1)
+    end
+    return n
+end
+
+--[[--
+Decide whether a page's last, unterminated sentence should absorb the next
+page's first sentence (the page-boundary wrap carry).
+
+The Latin heuristic stands: a continuation that starts lowercase is a wrapped
+clause (carry it); otherwise demand a reasonably long last line so headings
+do not swallow the next sentence.  For spaceless scripts (Chinese, Japanese)
+neither test can work: nothing is ever lowercase and every sentence is a
+single whitespace token, so the old guard refused the carry for every CJK
+page and cut each sentence straddling the page break (issue #96).  There the
+capitalization test is dropped and a character-count threshold stands in for
+the word count: cut prose lines run long, bare headings are short.
+
+-- @param last_text string   Last sentence on the page (no terminator)
+-- @param first_text string  First sentence on the next page
+-- @return boolean           true when the carry should proceed
+--]]
+function Utils.shouldCarryPageBoundary(last_text, first_text)
+    if Utils.hasCJKScript(first_text) or Utils.hasCJKScript(last_text) then
+        return Utils.charCount(last_text) >= 6
+    end
+    -- Latin path (kept byte-compatible with the old synccontroller guard).
+    local s = first_text or ""
+    s = s:gsub("^[%s\"']+", "")
+    s = s:gsub("^\194[\171\187]+", "") -- « »
+    s = s:gsub("^\226\128[\147-\159]+", "") -- dashes / curly quotes
+    s = s:gsub("^[%-%s]+", "")
+    local b1, b2 = s:byte(1, 2)
+    local starts_lower = false
+    if b1 then
+        if b1 >= 97 and b1 <= 122 then
+            starts_lower = true
+        elseif b1 == 195 and b2 and b2 >= 160 and b2 <= 191 and b2 ~= 183 then
+            starts_lower = true
+        end
+    end
+    if starts_lower then return true end
+    local n = 0
+    for _ in (last_text or ""):gmatch("%S+") do n = n + 1 end
+    return n >= 4
+end
+
 --- Detect the number of CPU cores (same logic as piperqueue.lua).
 -- @return number  Core count (1 when undetectable)
 function Utils.getCpuCores()
