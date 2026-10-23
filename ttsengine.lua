@@ -4164,20 +4164,21 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         local file_path = self.current_audio_file
         logger.warn("TTSEngine: kindle-gst-play:", file_path,
             "dur=", self._expected_play_duration_ms, "ms")
-        -- Audio focus ('Music') is taken once per session by
-        -- _ensureKindleKeepalive below — NOT per sentence: every setFocus
-        -- makes audiomgrd re-ramp gain to its stored level, which reset
-        -- the headset volume to max on every sentence boundary.
+        -- Take audio focus ('Music') ONCE per session and keep the A2DP
+        -- datapath open -- NOT per sentence: every setFocus makes audiomgrd
+        -- re-ramp gain to its stored level, which reset the headset volume
+        -- to max on every sentence boundary.  This runs before EITHER launch
+        -- path: firmware 5.17+ dropped gst-launch-0.10 entirely (issue #73),
+        -- so there the bundled binary is the only playback path and would
+        -- otherwise run with no focus and no keepalive at all.
+        self:_ensureKindleKeepalive()
         -- Prefer the system gst-launch-0.10 pipeline: on PW5/PW6 the working
         -- recipe is mixersink stream-type=Music sync=true (the bundled
         -- gst-play binary sets neither and hangs in commit).  Fall back to
-        -- the bundled binary only when the system pipeline cannot launch.
+        -- the bundled binary when the system pipeline cannot launch.
         local pid = nil
+        local from_bundled = false
         if self:commandExists("gst-launch-0.10") then
-            -- Keep the A2DP datapath up across sentence boundaries so the
-            -- next stream starts instantly instead of losing its opening
-            -- to the datapath resume.
-            self:_ensureKindleKeepalive()
             local sys_pid, raw_file = self:_trySystemGstLaunch(file_path)
             if sys_pid then
                 pid = sys_pid
@@ -4190,6 +4191,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
             end
         end
         if not pid and self._kindle_gst_play_bin then
+            from_bundled = true
             -- Launch gst-play in background, capture PID.
             -- Capture stderr to a log file for diagnostics (was previously
             -- discarded, making it impossible to debug silent failures).
@@ -4245,7 +4247,10 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
             if proc_fh then
                 proc_fh:close()
                 -- Still running -- perform a health check after a few seconds.
-                if not health_checked and poll_count >= health_check_polls then
+                -- Bundled helper only: the system gst-launch pipeline has no
+                -- marker line, and killing it mid-sentence would cut speech
+                -- that is playing perfectly well.
+                if from_bundled and not health_checked and poll_count >= health_check_polls then
                     health_checked = true
                     local log_text = ""
                     local log_fh = io.open("/tmp/.gst_play_last.log", "r")
@@ -4253,14 +4258,17 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                         log_text = log_fh:read("*a") or ""
                         log_fh:close()
                     end
-                    -- If the log only contains the initial loader message and
-                    -- (for the new helper) the pipeline description, but no
-                    -- playback progress, the pipeline is likely hung in state
-                    -- change or caps negotiation (missing audioconvert/audioresample).
-                    local has_playback_activity = log_text:match("GStreamer error")
-                        or log_text:match("EOS")
-                        or log_text:match("playback")
-                    local is_hung = not has_playback_activity
+                    -- The helper prints "state=PLAYING" once preroll
+                    -- completes (gst-play 0.6.2+).  A log that shows the
+                    -- loader line but no PLAYING marker means the pipeline
+                    -- never started: stuck in a state change or caps
+                    -- negotiation.  Before the marker existed this check
+                    -- matched on "playback"/"EOS" text, which a healthy
+                    -- helper never prints either -- so every sentence longer
+                    -- than ~2.4 s was killed as hung (issue #73: speech cut
+                    -- off after 1-2 words on 5.17+ firmware).
+                    local reached_playing = log_text:match("state=PLAYING")
+                    local is_hung = not reached_playing
                         and log_text:match("gst%-play: loaded libgstreamer")
                     if is_hung then
                         logger.err("TTSEngine: kindle-gst-play hung after",
@@ -4278,6 +4286,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                                 engine._gst_play_pid = sys_pid
                                 engine._gst_system_raw_file = raw_file
                                 pid = sys_pid
+                                from_bundled = false
                                 health_checked = false
                                 UIManager:scheduleIn(0.1, pollGstPlayDone)
                                 return
@@ -4347,6 +4356,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
                             engine._gst_play_pid = sys_pid
                             engine._gst_system_raw_file = raw_file
                             pid = sys_pid
+                            from_bundled = false
                             -- Reset state and continue polling with system process
                             engine.is_speaking = true
                             engine.play_generation = my_gen
@@ -6201,7 +6211,14 @@ end
 -- (filesrc /dev/zero ! mixersink) in the mixer for the whole reading
 -- session keeps the datapath up so sentence streams start instantly.
 -- Verified on PW5: zero suspend_audio_datapath events while running.
+-- Firmware 5.17+ dropped gst-launch-0.10, so there the keepalive builds
+-- the same silence stream over GStreamer 1.0 with rawaudioparse, the
+-- chain the bundled gst-play 0.6.1+ uses for real playback (issue #73).
 function TTSEngine:_ensureKindleKeepalive()
+    -- Remember a failed probe for the rest of the session: without this,
+    -- every sentence would re-run commandExists + io.popen on firmware
+    -- with no gst-launch at all.
+    if self._keepalive_unavailable then return end
     if self._keepalive_pid then
         local f = io.open("/proc/" .. self._keepalive_pid .. "/status", "r")
         if f then f:close() return end
@@ -6211,10 +6228,23 @@ function TTSEngine:_ensureKindleKeepalive()
     -- audiomgrd re-ramp gain to its stored level, which yanked the
     -- headset volume back up on every sentence boundary.
     os.execute("lipc-set-prop com.lab126.audiomgrd setFocus 'Music' 2>/dev/null")
-    local h = io.popen(
-        "gst-launch-0.10 filesrc location=/dev/zero"
-        .. " ! 'audio/x-raw-int,rate=22050,channels=1,width=16,depth=16,signed=true,endianness=1234'"
-        .. " ! mixersink stream-type=Music sync=true >/dev/null 2>&1 & echo $!")
+    local cmd
+    if self:commandExists("gst-launch-0.10") then
+        cmd = "gst-launch-0.10 filesrc location=/dev/zero"
+            .. " ! 'audio/x-raw-int,rate=22050,channels=1,width=16,depth=16,signed=true,endianness=1234'"
+            .. " ! mixersink stream-type=Music sync=true >/dev/null 2>&1 & echo $!"
+    elseif self:commandExists("gst-launch-1.0") then
+        cmd = "gst-launch-1.0 filesrc location=/dev/zero"
+            .. " ! rawaudioparse use-sink-caps=false format=pcm pcm-format=s16le"
+            .. " sample-rate=22050 num-channels=1"
+            .. " ! audioconvert ! audio/x-raw,format=S16LE,rate=22050,channels=1,layout=interleaved"
+            .. " ! mixersink stream-type=Music sync=true >/dev/null 2>&1 & echo $!"
+    else
+        self._keepalive_unavailable = true
+        logger.warn("TTSEngine: no gst-launch binary for Kindle A2DP keepalive")
+        return
+    end
+    local h = io.popen(cmd)
     local pid_str = h and h:read("*a") or ""
     if h then h:close() end
     self._keepalive_pid = tonumber(pid_str:match("(%d+)"))
