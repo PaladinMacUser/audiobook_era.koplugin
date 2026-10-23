@@ -1842,6 +1842,25 @@ find /usr /system /vendor /mnt /data -maxdepth 4 -name '*audio*.so*' 2>/dev/null
         -- Last ttssrc fallback log (stderr from kindle-native-tts-fallback path)
         info.kindle_ttssrc_fallback_log = shellCapture(
             "cat /tmp/.ttssrc_fallback.log 2>/dev/null", 2) or "none"
+
+        -- audiomgrd logs stream rejects and teardowns to a stderr file it
+        -- deletes immediately; the fd keeps it readable.  This is where a
+        -- mixer-side cause of cut-off speech would show (issue #73).
+        info.kindle_audiomgrd_err_fd = shellCapture(
+            "tail -20 /proc/$(pidof audiomgrd)/fd/2 2>/dev/null", 3) or "n/a"
+
+        -- KOReader's own crash log: fatal Lua errors land here, not in the
+        -- plugin debug log.  Without it a crash that takes KOReader down
+        -- (e.g. the Piper shutdown on 5.19.x) leaves nothing behind.
+        -- sanitizePath: a traceback can name the file being read.
+        local crash_log_raw = shellCapture(
+            "( tail -40 /mnt/us/koreader/crash.log 2>/dev/null || tail -40 crash.log 2>/dev/null )", 4)
+        info.koreader_crash_log = crash_log_raw and sanitizePath(crash_log_raw) or "none"
+
+        -- Kernel ring tail: OOM kills name the victim process, which is the
+        -- only way to tell a Lua crash from the kernel shooting KOReader.
+        -- Readable on rooted devices (the usual case for KOReader on Kindle).
+        info.dmesg_tail = shellCapture("dmesg | tail -25", 4) or "n/a"
     end
 
     -- v0.1.17.52: join the collected signals into a short diagnosis so the
