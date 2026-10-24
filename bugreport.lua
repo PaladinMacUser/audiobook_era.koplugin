@@ -28,10 +28,27 @@ local function sanitizePath(path)
     return path
 end
 
+--- Check once whether the timeout binary exists.  Very old Kindle
+--- firmwares (e.g. a KT4 on fw 5.3.x, issue #85) ship a BusyBox without
+--- it; wrapping commands there made every timed probe come back empty.
+local _has_timeout_bin = nil
+local function hasTimeoutBin()
+    if _has_timeout_bin ~= nil then return _has_timeout_bin end
+    local h = io.popen("command -v timeout 2>/dev/null")
+    if h then
+        local out = h:read("*l") or ""
+        h:close()
+        _has_timeout_bin = out ~= ""
+    else
+        _has_timeout_bin = false
+    end
+    return _has_timeout_bin
+end
+
 --- Run a shell command and return trimmed stdout (max 500 chars).
 local function shellCapture(cmd, timeout_s)
     local full_cmd
-    if timeout_s then
+    if timeout_s and hasTimeoutBin() then
         -- BusyBox timeout expects "timeout SECS PROG [ARGS]" and cannot
         -- run shell builtins (for, if, etc.) directly.  Wrap the entire
         -- command in "sh -c '...'" so timeout gets a single executable.
