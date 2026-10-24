@@ -336,9 +336,12 @@ glibc floor, VFPv3-D16 FPU pin):
   `espeak-ng/share` voice data via `ESPEAK_DATA_PATH`; the TTS route on these
   models is the ESPEAK backend played through the device `aplay`.
 
-Detection is `Utils.isLegacyKindleModel()` (KOReader `Device.model` against
-the six-model list) plus one cached `aplay -l` probe
-(`Utils.probeKindleAlsaCard()` → `plughw:N,M`). On legacy models the plugin
+Detection is `Utils.isLegacyKindleModel()`: KOReader `Device.model` against
+the six-model list, plus, when KOReader cannot name the device at all
+(nil or "unknown" model, seen on a KT4 with fw 5.3.x), an evidence
+fallback that requires both a real ALSA card (`Utils.probeKindleAlsaCard()`
+→ `plughw:N,M`) and a 2.6 kernel; PW2+ hardware has neither, so the
+fallback cannot false-positive there. On legacy models the plugin
 skips the BT-only gates (`_audioOutputReady`, the "no built-in speaker"
 refusals, the BT pre-flight toast) and the TTS audio player resolves to
 `aplay -q -D plughw:N,M`. A one-shot `lipc-set-prop com.lab126.audiomgrd

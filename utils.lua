@@ -108,10 +108,30 @@ Utils.LEGACY_KINDLE_MODELS = {
 }
 
 local _legacy_kindle_model = nil
+local _kindle_kernel_2_6 = nil
 
---- True when the current Kindle is a 2007-2011 speaker model.  Nil or
---- "unknown" model values conservatively return false; the bug report
---- captures Device.model so a misdetection can be closed later.
+--- True when the running kernel is from the 2.6 series (every 2007-2011
+--- Kindle firmware).  Cached for the session.
+-- @return boolean
+local function kernelIs26()
+    if _kindle_kernel_2_6 ~= nil then return _kindle_kernel_2_6 end
+    _kindle_kernel_2_6 = false
+    local h = io.popen("uname -r 2>/dev/null")
+    if h then
+        local rel = h:read("*l") or ""
+        h:close()
+        _kindle_kernel_2_6 = rel:match("^2%.6") ~= nil
+    end
+    return _kindle_kernel_2_6
+end
+
+--- True when the current Kindle is a 2007-2011 speaker model.  Matched
+--- first against the KOReader model list; when KOReader cannot name the
+--- device at all (nil or "unknown" model, seen on a KT4 with fw 5.3.x,
+--- issue #85), classify by evidence: the speaker generation is the only
+--- Kindle family that still exposes a real ALSA card, and it runs a 2.6
+--- kernel.  PW2+ hardware has no ALSA card and 3.x+ kernels, so both
+--- checks together cannot false-positive there.
 -- @return boolean
 function Utils.isLegacyKindleModel()
     if _legacy_kindle_model ~= nil then return _legacy_kindle_model end
@@ -119,6 +139,15 @@ function Utils.isLegacyKindleModel()
     local ok, Device = pcall(require, "device")
     if ok and Device and Device.model then
         _legacy_kindle_model = Utils.LEGACY_KINDLE_MODELS[Device.model] or false
+    end
+    if not _legacy_kindle_model and ok and Device
+        and Device.isKindle and Device:isKindle() then
+        local model = Device.model
+        if not model or model == "unknown" then
+            if Utils.probeKindleAlsaCard() and kernelIs26() then
+                _legacy_kindle_model = true
+            end
+        end
     end
     return _legacy_kindle_model
 end
