@@ -40,27 +40,38 @@ function Client:start()
     if self.closed then return false end
     if self:alive() then return true end
     os.remove(self.socket..".ready")
-    local p=io.popen(quote(self.binary).." --daemon "..quote(self.socket)
-        .." --idle-seconds "..tostring(self.idle_seconds or 120)
+    local arguments=""
+    for _,arg in ipairs(self.arguments or {}) do arguments=arguments.." "..quote(arg) end
+    local p=io.popen((self.launch_prefix or "")..quote(self.binary).." --daemon "..quote(self.socket)
+        .." --idle-seconds "..tostring(self.idle_seconds or 120)..arguments
         .." >"..quote(self.directory.."/worker.log").." 2>&1 & echo $!")
     local result=p and p:read("*a") or "";if p then p:close() end
     self.pid=tonumber(result:match("(%d+)"))
     if self.pid then self.starts=self.starts+1 end
     return self.pid~=nil
 end
-function Client:request(text,output,rate,volume,lead,current,callback)
+function Client:request(text,output,rate,volume,lead,current,callback,options)
+    options=options or {}
     self.next_id=self.next_id+1;self.requests=self.requests+1
     local base=self.directory.."/job-"..self.next_id
     local job={path=base..".req",input=base..".txt",output=base..".wav",external_output=output}
     self.jobs[job.path]=job
     local function cleanup()
-        for _,path in ipairs({job.input,job.path,job.path..".done",job.path..".cancel",job.output}) do os.remove(path) end
+        for _,path in ipairs({job.input,job.path,job.path..".done",job.path..".cancel",job.path..".pause",job.path..".playing",job.output}) do os.remove(path) end
         self.jobs[job.path]=nil
     end
     function job:cancel() if self.finished then return end;self.cancelled=true;write(self.path..".cancel","cancel\n") end
+    function job:pause()
+        if self.finished or self.paused_at then return end
+        self.paused_at=UIManager:getTime();write(self.path..".pause","pause\n")
+    end
+    function job:resume()
+        if self.paused_at then self.paused_seconds=(self.paused_seconds or 0)+time.to_s(UIManager:getTime()-self.paused_at);self.paused_at=nil end
+        os.remove(self.path..".pause")
+    end
     local function done(ok,reason)
         job.finished=true
-        if ok then
+        if ok and not options.no_output then
             -- Both paths are on /tmp; rename only after the worker has closed the complete WAV.
             ok=os.rename(job.output,output)~=nil
             if not ok then reason="Could not move RHVoice audio into the playback session" end
@@ -69,7 +80,8 @@ function Client:request(text,output,rate,volume,lead,current,callback)
         if current() and not job.cancelled then callback(ok,reason) end
     end
     if not write(job.input,text) or not write(job.path,table.concat({job.input,job.output,
-            string.format("%.3f",rate),string.format("%.3f",volume),tostring(lead),""},"\n")) then
+            string.format("%.3f",rate),string.format("%.3f",volume),tostring(lead),
+            options.voice or "Slt",string.format("%.3f",options.pitch or 1),options.format or "text",""},"\n")) then
         done(false,"Cannot write RHVoice request");return job
     end
     if not self:start() then done(false,"Cannot start the RHVoice process");return job end
@@ -77,17 +89,23 @@ function Client:request(text,output,rate,volume,lead,current,callback)
     local function poll()
         local active=current() and not job.cancelled and not self.closed
         if not active and not job.cancelled then job:cancel() end
+        if options.on_playing and not job.playing_notified then
+            local playing=read(job.path..".playing")
+            if playing and active then job.playing_notified=true;options.on_playing(tonumber(playing) or 0) end
+        end
         local marker=read(job.path..".done")
         if marker then
             if fd then ffi.C.close(fd);fd=nil end
-            done(active and marker:match("^OK")~=nil,marker:match("^ERR") and "RHVoice synthesis failed" or nil)
+            done(active and marker:match("^OK")~=nil,marker:match("^ERR") and (options.no_output and marker:gsub("%s+$","") or "RHVoice synthesis failed") or nil)
             return
         end
-        local elapsed=time.to_s(UIManager:getTime()-started)
-        if not self:alive() or elapsed>=60 then
-            if elapsed>=60 and self:alive() then ffi.C.kill(self.pid,15) end
+        local elapsed=time.to_s(UIManager:getTime()-started)-(job.paused_seconds or 0)
+            -(job.paused_at and time.to_s(UIManager:getTime()-job.paused_at) or 0)
+        local timeout=options.timeout or 60
+        if not self:alive() or elapsed>=timeout then
+            if elapsed>=timeout and self:alive() then ffi.C.kill(self.pid,15) end
             if fd then ffi.C.close(fd);fd=nil end
-            done(false,elapsed>=60 and "RHVoice request timed out" or "RHVoice process stopped")
+            done(false,elapsed>=timeout and ((options.label or "RHVoice").." request timed out") or ((options.label or "RHVoice").." process stopped"))
             return
         end
         if active and not job.sent and self:ready() then

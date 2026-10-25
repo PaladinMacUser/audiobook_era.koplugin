@@ -63,6 +63,16 @@ function Cache.key(engine,word)
         engine.word_gap,engine.clause_pause,engine.piper_model,engine.piper_speaker,
         engine.sanotts_voice_name,engine.sanotts_tempo,engine.sanotts_voice_dir,engine.sanotts_server,
         engine.rhvoice_bin,engine.backend_cmd,engine.getPocketBookAudioDevice and engine:getPocketBookAudioDevice())
+    local rhvoice_model
+    if engine.backend=="rhvoice" then
+        local Settings=dofile(dir.."rhvoicesettings.lua")
+        local options=engine.getRHVoiceOptions and engine:getRHVoiceOptions() or Settings.options(engine.plugin,engine.rhvoice_voice_override)
+        add(Settings.signature(options))
+        local root=engine.rhvoice_bin and engine.rhvoice_bin:match("^(.*)/[^/]+$")
+        for _,voice in ipairs(Settings.voices) do
+            if root and voice.id==options.voice then rhvoice_model=root.."/data/voices/"..voice.folder.."/24000/voice.data" end
+        end
+    end
     local plugin=engine.plugin
     for _,k in ipairs({"sanotts_g2p","native_helper_path","native_input_encoding","native_prestep_command"}) do
         add(plugin and plugin:getSetting(k,"") or "")
@@ -74,7 +84,7 @@ function Cache.key(engine,word)
         add(path,a and a.size,a and a.modification)
     end
     fingerprint(engine.piper_model);fingerprint(engine.rhvoice_bin)
-    fingerprint(engine.sanotts_server);fingerprint(engine.backend_cmd)
+    fingerprint(engine.sanotts_server);fingerprint(engine.backend_cmd);fingerprint(rhvoice_model)
     return table.concat(out,"|")
 end
 

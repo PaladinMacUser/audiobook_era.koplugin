@@ -47,3 +47,11 @@ Firmware API declarations used by this fork:
 [InkView 6.8 header](https://github.com/koreader/pocketbook-inkview/blob/4a3e32c39ed14ac7f2e3ca4f8c66a7d5fbe5e0fe/608/inkview.h)
 (`configureAudioOutput`, `get_audio_status`, `AUDIO_OUT_SPEAKER`).
 These routing APIs remain available in 6.10; `PlayFile` does not.
+
+Version 0.8.0 bundles the pinned official RHVoice BDL, CLB and Alan models
+alongside SLT. The CMU ARCTIC notice is retained in `rhvoice/LICENSE-CMU-VOICES`;
+exact revisions are in `rhvoice/SOURCES.json` and corresponding-source archive.
+The additional `rhvoice/era-player` is built from this repository's GPL source
+`rhvoice/era-player.c` with `tools/build-era-player.py`. It uses the existing
+bundled ALSA and glibc libraries, with no firmware library replacement or
+additional hardware driver.

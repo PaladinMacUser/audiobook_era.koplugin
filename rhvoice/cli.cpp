@@ -69,7 +69,13 @@ static bool number(const char *text, double min, double max, double &value) {
 }
 static bool render(RHVoice_tts_engine engine, const std::string &input,
                    const std::string &output, double speed, double volume,
-                   double lead_ms, const std::string &cancel = "") {
+                   double lead_ms, const std::string &cancel = "",
+                   const std::string &voice = "Slt", double pitch = 1, bool ssml = false) {
+    bool installed=false;
+    const RHVoice_voice_info *voices=RHVoice_get_voices(engine);
+    for(unsigned i=0;i<RHVoice_get_number_of_voices(engine);i++)
+        if(voices[i].name && voice==voices[i].name)installed=true;
+    if(!installed){fprintf(stderr,"RHVoice: selected voice is not installed\n");return false;}
     std::ifstream source(input.c_str(), std::ios::binary | std::ios::ate);
     if (!source || source.tellg() <= 0 || source.tellg() > 1048576) return false;
     source.seekg(0);
@@ -85,13 +91,13 @@ static bool render(RHVoice_tts_engine engine, const std::string &input,
     if (!out.file) { close(fd); unlink(temporary.c_str()); return false; }
     header(out.file, 0, 0);
     RHVoice_synth_params params = {};
-    params.voice_profile = "Slt";
+    params.voice_profile = voice.c_str();
     params.relative_rate = speed;
-    params.relative_pitch = 1;
+    params.relative_pitch = pitch;
     params.relative_volume = volume;
     params.punctuation_mode = RHVoice_punctuation_none;
     RHVoice_message message = engine ? RHVoice_new_message(engine, text.data(), text.size(),
-        RHVoice_message_text, &params, &out) : NULL;
+        ssml ? RHVoice_message_ssml : RHVoice_message_text, &params, &out) : NULL;
     bool ok = message && RHVoice_speak(message) && out.samples > out.lead_samples && out.rate && !ferror(out.file);
     if (message) RHVoice_delete_message(message);
     if (ok) header(out.file, out.rate, out.samples);
@@ -101,7 +107,7 @@ static bool render(RHVoice_tts_engine engine, const std::string &input,
     if (ok && rename(temporary.c_str(), output.c_str())) ok = false;
     unlink(temporary.c_str());
     if (!ok) { fprintf(stderr, "RHVoice/SLT could not generate audio\n"); return false; }
-    fprintf(stderr, "RHVoice/SLT: %u Hz, %u samples, rate %.3f\n", out.rate, out.samples, speed);
+    fprintf(stderr, "RHVoice/%s: %u Hz, %u samples, rate %.3f, pitch %.3f\n", voice.c_str(), out.rate, out.samples, speed, pitch);
     return true;
 }
 
@@ -162,7 +168,14 @@ static int serve(RHVoice_tts_engine engine, const std::string &socket_path, unsi
         bool valid = request && local_path(input, directory) && local_path(output, directory)
             && number(rate.c_str(), 0.25, 2, r) && number(volume.c_str(), 0, 1, v)
             && number(lead.c_str(), 0, 2000, l);
-        bool ok = valid && render(engine, input, output, r, v, l, job + ".cancel");
+        std::string voice="Slt", pitch_text="1", mode="text";
+        if (request.peek()!=std::char_traits<char>::eof()) {
+            std::getline(request, voice);std::getline(request, pitch_text);std::getline(request, mode);
+        }
+        double pitch=1;
+        valid = valid && (voice=="Slt" || voice=="Bdl" || voice=="Clb" || voice=="Alan")
+            && number(pitch_text.c_str(), .85, 1.15, pitch) && (mode=="text" || mode=="ssml");
+        bool ok = valid && render(engine, input, output, r, v, l, job + ".cancel", voice, pitch, mode=="ssml");
         bool cancelled = access((job + ".cancel").c_str(), F_OK) == 0;
         marker(job + ".done", ok ? "OK\n" : cancelled ? "CANCELLED\n" : "ERR synthesis failed\n");
         last = std::chrono::steady_clock::now();
@@ -171,8 +184,8 @@ static int serve(RHVoice_tts_engine engine, const std::string &socket_path, unsi
     return 0;
 }
 int main(int argc, char **argv) {
-    std::string input, output, data, daemon;
-    double speed = 1, volume = 1, lead = 0, idle = 120;
+    std::string input, output, data, daemon, voice="Slt", mode="text";
+    double speed = 1, volume = 1, lead = 0, idle = 120, pitch = 1;
     for (int i = 1; i < argc; i += 2) {
         if (i + 1 >= argc) return 2;
         std::string flag = argv[i];
@@ -180,6 +193,9 @@ int main(int argc, char **argv) {
         else if (flag == "--output") output = argv[i+1];
         else if (flag == "--data") data = argv[i+1];
         else if (flag == "--daemon") daemon = argv[i+1];
+        else if (flag == "--voice") { voice=argv[i+1]; if (voice!="Slt" && voice!="Bdl" && voice!="Clb" && voice!="Alan") return 2; }
+        else if (flag == "--pitch") { if (!number(argv[i+1], .85, 1.15, pitch)) return 2; }
+        else if (flag == "--format") { mode=argv[i+1]; if (mode!="text" && mode!="ssml") return 2; }
         else if (flag == "--speed") { if (!number(argv[i+1], .25, 2, speed)) return 2; }
         else if (flag == "--volume") { if (!number(argv[i+1], 0, 1, volume)) return 2; }
         else if (flag == "--lead-in-ms") { if (!number(argv[i+1], 0, 2000, lead)) return 2; }
@@ -199,7 +215,7 @@ int main(int argc, char **argv) {
     init.callbacks.set_sample_rate = set_rate; init.callbacks.play_speech = speech;
     RHVoice_tts_engine engine = RHVoice_new_tts_engine(&init);
     if (!engine) { fprintf(stderr, "RHVoice: engine initialization failed\n"); return 1; }
-    int result = daemon.empty() ? (render(engine, input, output, speed, volume, lead) ? 0 : 1)
+    int result = daemon.empty() ? (render(engine, input, output, speed, volume, lead, "", voice, pitch, mode=="ssml") ? 0 : 1)
         : serve(engine, daemon, static_cast<unsigned>(idle));
     RHVoice_delete_tts_engine(engine);
     return result;

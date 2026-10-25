@@ -54,16 +54,21 @@ def package(runtime_zip, output, with_piper=False, tempo_binary=None, rhvoice_di
     if rhvoice_dir is None:
         subprocess.run([sys.executable, str(ROOT / "tools/build-rhvoice.py")], check=True)
         rhvoice_dir = ROOT / ".cache/rhvoice-runtime"
+        subprocess.run([sys.executable,str(ROOT/"tools/build-era-player.py"),"--output",str(rhvoice_dir/"era-player")],check=True)
     rh_binary = (rhvoice_dir / "rhvoice-slt").read_bytes()
     if rh_binary[:6] != b"\x7fELF\x01\x01" or rh_binary[18:20] != b"\x28\x00":
         raise ValueError("RHVoice must be a little-endian 32-bit ARM ELF binary")
+    player_binary=(rhvoice_dir/"era-player").read_bytes()
+    if player_binary[:6]!=b"\x7fELF\x01\x01" or player_binary[18:20]!=b"\x28\x00":
+        raise ValueError("Era player must be a little-endian 32-bit ARM ELF binary")
     for source in sorted(rhvoice_dir.rglob("*")):
         if source.is_file():
             relative = source.relative_to(rhvoice_dir).as_posix()
-            content[PREFIX + "rhvoice/" + relative] = (source.read_bytes(), stat.S_IFREG | (0o755 if relative == "rhvoice-slt" else 0o644))
+            content[PREFIX + "rhvoice/" + relative] = (source.read_bytes(), stat.S_IFREG | (0o755 if relative in ("rhvoice-slt","era-player") else 0o644))
     for source in sorted((ROOT / "rhvoice").iterdir()):
         if source.is_file():
             content[PREFIX + "rhvoice/" + source.name] = (source.read_bytes(), stat.S_IFREG | 0o644)
+    content[PREFIX + "tools/build-era-player.py"] = ((ROOT / "tools/build-era-player.py").read_bytes(), stat.S_IFREG | 0o644)
     content[PREFIX + "tools/build-rhvoice.py"] = ((ROOT / "tools/build-rhvoice.py").read_bytes(), stat.S_IFREG | 0o644)
     for source in sorted((ROOT / "l10n").rglob("*")):
         if source.is_file():
@@ -75,7 +80,8 @@ def package(runtime_zip, output, with_piper=False, tempo_binary=None, rhvoice_di
                 "sanotts/snt_server", "sanotts/voice/front_q8.bin", "sanotts/voice/model_q8.bin",
                 "tempo/wav-tempo", "tempo/LICENSE", "rhvoice/rhvoice-slt", "gestureguard.lua",
                 "rhvoice/data/languages/English/cmulex.fst", "rhvoice/data/voices/slt/24000/voice.data",
-                "rhvoice/data/config/RHVoice.conf", "rhvoice/corresponding-source.tar.gz", "wordcache.lua", "rhvoiceclient.lua", "speechdiagnostics.lua")
+                "rhvoice/data/voices/bdl/24000/voice.data", "rhvoice/data/voices/clb/24000/voice.data", "rhvoice/data/voices/alan/24000/voice.data",
+                "rhvoice/data/config/RHVoice.conf", "rhvoice/corresponding-source.tar.gz", "rhvoice/era-player", "rhvoicesettings.lua", "wordcache.lua", "rhvoiceclient.lua", "speechdiagnostics.lua")
     if with_piper:
         required += (
                 "piper/piper.bin", "piper/lib/libonnxruntime.so.1.14.1",
@@ -103,7 +109,7 @@ def main():
     parser.add_argument("--with-piper", action="store_true", help="Also include the slower Piper engine and Danny voice")
     parser.add_argument("--tempo-binary", type=Path, help="Use an already built static ARM wav-tempo")
     parser.add_argument("--rhvoice-dir", type=Path, help="Use a runtime already built by tools/build-rhvoice.py")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.7.1.zip")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.8.0.zip")
     args = parser.parse_args()
     if args.runtime_zip:
         package(args.runtime_zip, args.output, args.with_piper, args.tempo_binary, args.rhvoice_dir)

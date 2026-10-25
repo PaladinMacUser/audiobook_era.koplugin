@@ -1574,6 +1574,7 @@ function SyncController:beginSentencePlayback(sentence)
         return
     end
 
+    self.tts_engine._rhvoice_continuous=self.tts_engine.backend==self.tts_engine.BACKENDS.RHVOICE
     -- Start TTS audio playback with callbacks
     local play_ok = self.tts_engine:play(
         -- Word callback
@@ -1671,6 +1672,9 @@ function SyncController:beginSentencePlayback(sentence)
                 -- Gap always padded into audio for Piper — minimal scheduling delay
                 delay = 0.05
                 logger.warn("SyncController: Piper gap padded in audio (", last_sent.end_type, "), delay=0.05s")
+            elseif controller.tts_engine.backend==controller.tts_engine.BACKENDS.RHVOICE then
+                local options=controller.tts_engine:getRHVoiceOptions()
+                delay=last_sent.end_type=="paragraph" and options.paragraph or options.sentence
             elseif last_sent.end_type == "paragraph" then
                 delay = (controller.plugin and controller.plugin:getSetting("paragraph_pause", 0.8)) or 0.8
             else
@@ -1850,7 +1854,9 @@ function SyncController:_prefetchNextSentence(explicit_idx)
     -- Piper abandoned for the session: prefetch via espeak synthesis
     -- instead of the dead Piper queue.
     local use_espeak = self._piper_abandoned and true or false
+    local chain_generation=self._chain_generation
     UIManager:scheduleIn(0.2, function()
+        if self.state==self.STATE.STOPPED or self._chain_generation~=chain_generation then return end
         engine:prefetch(text, use_espeak)
     end)
 end
@@ -2584,6 +2590,14 @@ function SyncController:startSentenceSyncLoop(sentence)
                 return
             end
             adjusted = (st.pos_ms or 0) - (self.tts_engine._audioout_start_ms or 0)
+        end
+
+        if self.tts_engine._era_pending then
+            if not self.tts_engine._era_playing_at then
+                UIManager:scheduleIn(0.05,syncUpdate);return
+            end
+            adjusted=time.to_ms(UIManager:getTime()-self.tts_engine._era_playing_at)
+                -(self.tts_engine.playback_latency_ms or 0)
         end
 
         if not adjusted then

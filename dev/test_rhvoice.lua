@@ -52,7 +52,7 @@ e._piper=dofile("piperqueue.lua"):new{engine=e}
 e.generateTimingEstimates=function(self) self.timing_data={{start_time=0,end_time=500}} end
 local function rhrow()
     for _,row in ipairs(Menu.buildEngineSelectMenu(plugin)) do
-        if row.text=="RHVoice (SLT, American English)" then return row end
+        if row.text=="RHVoice (English voices)" then return row end
     end
 end
 local previewed,preview_count
@@ -75,12 +75,12 @@ check(e.backend=="rhvoice" and e.backend_cmd==bin and settings.tts_backend=="rhv
 check(stops==1 and settings.espeak_only_mode==false, "engine switch stops old reading and clears forced espeak")
 check(e.rate==0.5 and e.volume==0.75, "engine selection retains the chosen rate and volume")
 e.current_audio_file="playing.wav"
-check(e:prefetch("next sentence")==false and e.current_audio_file=="playing.wav", "generic prefetch cannot overwrite RHVoice's playing file")
+
 
 local requests={}
 local service={binary=bin,closed=false}
-function service:request(text,output,rate,volume,lead,current,callback)
-    local job={text=text,output=output,rate=rate,volume=volume,lead=lead,current=current,callback=callback}
+function service:request(text,output,rate,volume,lead,current,callback,options)
+    local job={text=text,output=output,rate=rate,volume=volume,lead=lead,current=current,callback=callback,options=options}
     function job:cancel() self.cancelled=true end
     requests[#requests+1]=job;return job
 end
@@ -101,7 +101,7 @@ local function finish(r,ok,empty)
     r.callback(ok,not ok and "Simulated RHVoice failure" or nil)
 end
 local r=request("don't; $(touch /tmp/not-a-command)")
-check(r.text=="don't; $(touch /tmp/not-a-command)", "book text reaches the resident service literally")
+check(r.text:find("don&apos;t",1,true) and r.text:find("$(touch /tmp/not-a-command)",1,true) and r.options.format=="ssml", "book text is escaped as SSML and remains literal data")
 check(r.rate==0.5 and r.volume==0.75, "pass separate per-request rate and volume")
 check(r.lead==350, "Era speaker retains the clip-start guard")
 check(r.result()==0, "resident synthesis is asynchronous")
@@ -141,5 +141,59 @@ local c=setmetatable({tts_engine=e,stop=function(self) self.stopped=true end,
     readNextSentence=function() advance=advance+1 end}, {__index=Sync})
 check(c:_playViaEspeakOrSkip({text="word"},"failed")==false and c.stopped, "failed RHVoice stops reading")
 check(fallback==0 and advance==0 and #ui.shown==1, "failure neither changes the voice nor skips content")
+
+-- One bounded lookahead slot must never modify the playing audio/timing.
+e.current_audio_file="playing.wav";e.timing_data={{start_time=7,end_time=99}}
+local old_timing=e.timing_data;local before_requests=#requests
+check(e:prefetch("future sentence") and #requests==before_requests+1,"RHVoice queues one background request")
+local prefetched=requests[#requests]
+check(e.current_audio_file=="playing.wav" and e.timing_data==old_timing,"in-flight prefetch leaves playback untouched")
+e:prefetch("future sentence");check(#requests==before_requests+1,"same lookahead is not generated twice")
+finish(prefetched,true)
+check(e.current_audio_file=="playing.wav" and e.timing_data==old_timing,"ready lookahead cannot overwrite playing state")
+check(not e:usePrefetched("different") and e:usePrefetched("future sentence"),"only the matching ready sentence is adopted")
+check(e.current_audio_file==prefetched.output and e:getAudioLeadInMs()==350,"adopted prefetch keeps its own WAV and lead-in")
+os.remove(prefetched.output)
+e.current_audio_file="playing.wav";e:prefetch("pending sentence");local pending=requests[#requests]
+local completion=0
+e:synthesize("pending sentence",function(success) check(success,"awaited prefetch succeeds");completion=completion+1 end)
+check(requests[#requests]==pending and completion==0,"on-demand read awaits a pending lookahead instead of duplicating it")
+finish(pending,true);check(completion==1 and e.current_audio_file==pending.output,"awaited lookahead completes exactly once")
+os.remove(pending.output)
+e.current_audio_file="playing.wav";e:prefetch("old options");local obsolete=requests[#requests]
+settings.rhvoice_voice="Bdl";check(not e:usePrefetched("old options"),"voice change cannot consume old-voice cache")
+e:synthesize("old options",function() end)
+check(obsolete.cancelled and requests[#requests].options.voice=="Bdl","changed voice cancels stale lookahead and passes the new voice")
+finish(obsolete,true);check(e.current_audio_file=="playing.wav","late cancelled prefetch cannot replace current audio");os.remove(obsolete.output)
+e:stop();check(not e._rhvoice_slot and requests[#requests].cancelled,"stop cancels foreground and lookahead work")
+settings.rhvoice_voice=nil
+settings.rhvoice_prefetch=false
+check(e:prefetch("disabled")==false,"lookahead can be disabled")
+settings.rhvoice_prefetch=nil
+local deferred=#ui.scheduled
+local stopped=setmetatable({tts_engine=e,reading_sentence_idx=1,total_sentences=2,_chain_generation=4,state=Sync.STATE.PLAYING,
+    parsed_data={sentences={{text="current"},{text="late"}}}},{__index=Sync})
+stopped:_prefetchNextSentence();stopped.state=Sync.STATE.STOPPED
+before_requests=#requests;ui.scheduled[deferred+1]()
+check(#requests==before_requests,"deferred lookahead cannot restart synthesis after stop")
+
+-- Exercise the engine bridge, including the acknowledgement used by sync.
+local paused,resumed,played,completed,shutdown=0,0,{},0,0
+local player={closed=false,request=function(_,text,output,rate,volume,lead,current,callback,options)
+    played={text=text,lead=lead,current=current,callback=callback,options=options}
+    return {pause=function() paused=paused+1 end,resume=function() resumed=resumed+1 end,cancel=function() end}
+end,shutdown=function() shutdown=shutdown+1 end}
+e._era_service=player;e._pb_speaker={pcm="hwout_mix"};e.is_speaking=true;e.is_paused=false
+e.current_audio_file="guarded.wav";e._audio_lead_in_file="guarded.wav";e._audio_lead_in_ms=350
+io.open=function(path,mode) if path=="/reader/rhvoice/era-player" then return {close=function() end} end;return real_open(path,mode) end
+check(e:_playEraRHVoice() and played.options.no_output and played.lead==350,"continuous engine uses the resident speaker service with guard metadata")
+played.options.on_playing(0)
+check(e.playback_latency_ms==80 and e._era_playing_at==1,"warm PCM acknowledgement supplies the highlight anchor without the removed guard")
+e:pause();e:resume();check(paused==1 and resumed==1,"engine pause/resume controls PCM without signalling its process")
+e.on_complete_callback=function() completed=completed+1 end
+played.callback(true);played.callback(true)
+check(completed==1 and not e.is_speaking,"speaker completion advances exactly once")
+e:_stopEraPlayer();check(shutdown==1 and not e._era_service,"stop releases the persistent speaker service")
+io.open=real_open
 os.execute=real_execute
 print("ok - "..checks.." RHVoice selection, async synthesis and failure checks passed")

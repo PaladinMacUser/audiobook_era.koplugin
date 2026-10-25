@@ -1,13 +1,12 @@
 # PocketBook Era: English read-aloud through the built-in speaker
 
 Target: **original Era (PB700), firmware U700.6.10.3209, KOReader 2026.03**.
-Version **0.7.1** fixes the RHVoice Preview crash in KOReader's shared LuaJIT
-environment (a socket address needed an explicit pointer conversion).
-It retains pronunciation caching, a resident RHVoice worker,
-independent word speed and repeat, voice previews, and audio diagnostics.
-It includes RHVoice/SLT, sanoTTS/Kristin, eSpeak NG, pitch-preserving tempo
-and **Read word**. Your existing engine, reading speed and output remain
-selected when upgrading.
+Version **0.8.0** adds SLT/BDL/CLB/Alan English voices, per-voice previews,
+one-sentence RHVoice lookahead, a persistent Era speaker stream, gentle pitch,
+separate punctuation pauses, pronunciation corrections, and reading presets.
+It retains word caching, independent word speed/repeat, diagnostics and the
+KOReader 2026.03 Preview crash fix. Saved engine, voice, speed and output
+choices remain selected; the default RHVoice voice remains SLT.
 
 The stock PocketBook **English (American) Julie** engine is not connected
 in this build: the public InkView SDK has no speech-synthesis API, and its
@@ -19,7 +18,7 @@ emulation in the development check; actual Era speed needs a device test.
 2. If an older `audiobook.koplugin` or `audiobook_era.koplugin` is installed,
    move it outside the `plugins` folder as a backup. Keep only one installed
    copy of this plugin.
-3. Extract **`audiobook-era-v0.7.1.zip`**. Copy its **`audiobook.koplugin`**
+3. Extract **`audiobook-era-v0.8.0.zip`**. Copy its **`audiobook.koplugin`**
    folder into **`applications/koreader/plugins/`** on the Era's USB drive.
    The device path is `/mnt/ext1/applications/koreader/plugins/audiobook.koplugin/`.
    Do not use GitHub's “Source code” ZIP: it lacks the speech runtime.
@@ -27,7 +26,7 @@ emulation in the development check; actual Era speed needs a device test.
 5. Open an English EPUB. Under **Tools → Audiobook Read-Along**, choose
    **Audio output (PocketBook) → Era built-in speaker (firmware audio routing)**.
    This is the default on a fresh installation of an original Era. Select
-   **Voice settings → TTS engine → RHVoice (SLT, American English)** to try
+   **Voice settings → TTS engine → RHVoice (English voices)** to try
    the new engine. Your saved rate, such as 0.5×, and volume still apply.
    To return to Kristin, select **sanoTTS (neural, lightweight)** and choose
    **kristin (English, 700 KB, fast)** under **sanoTTS voice**.
@@ -38,14 +37,14 @@ emulation in the development check; actual Era speed needs a device test.
 No Wi-Fi, Bluetooth speaker, root access, or external TTS service is needed.
 The stock PocketBook TTS voice packages are separate from this plugin's voice.
 
-At 1.0×, try **Read word** again after installing this build. Version 0.7.1
+At 1.0×, try **Read word** again after installing this build. Version 0.8.0
 adds a 350 ms silent speaker lead-in before each RHVoice clip to protect its
 beginning while the firmware audio path opens. It does not change the speech
 samples or rate, and estimated highlighting accounts for the delay.
 
 ## KOReader 2026.03 touch crash on the original Era
 
-Version 0.7.1 includes a compatibility guard for
+Version 0.8.0 includes a compatibility guard for
 `frontend/device/gesturedetector.lua:295: attempt to index field 'initial_tev'`.
 An interrupted touch contact may have no origin when KOReader checks a
 two-finger tap. The plugin rejects that invalid two-finger gesture and lets
@@ -70,7 +69,9 @@ The development ARM-emulation check generated a short sentence in about
 0.9 seconds and a word at half speed in about 0.7 seconds, including startup.
 Actual Era performance is unmeasured. RHVoice now loads once and reuses the
 same process until idle for 120 seconds, book close, suspend or KOReader exit.
-It does not prefetch, so short gaps between sentences are still possible.
+It pre-synthesizes one upcoming sentence while the current one plays, and
+continuous reading can keep the Era speaker stream open between sentences.
+Page turns or slow synthesis can still add gaps.
 Failed synthesis stops reading instead of silently changing the voice or
 skipping content. Word timing is estimated. See `rhvoice/README.md`.
 
@@ -82,6 +83,60 @@ It speaks one selected word and stops, without advancing to the next sentence
 or page. With several words selected, it speaks the first one. Choosing
 another word, starting read-along, closing the book, or suspending cancels
 any previous word request.
+
+## RHVoice voices, pauses and pronunciation
+
+Open **Voice settings → RHVoice voices and tuning** after selecting RHVoice.
+All four voices are included in the complete ZIP, with no separate download:
+
+| Voice | Accent | Gender |
+| --- | --- | --- |
+| SLT | American English | Female |
+| BDL | American English | Male |
+| CLB | American English | Female |
+| Alan | Scottish English | Male |
+
+Under **English voice**, each selection has its own **Preview** row. A sample
+uses your current speed and pitch without changing the saved voice or Repeat
+word. **Pitch** ranges from 85–115%; 100% preserves the original voice.
+**Comma pause** controls commas, semicolons and non-numeric colons; 0 keeps
+natural model pauses. Clock/number separators remain intact. Explicit comma
+pauses stay in seconds when reading speed changes. **Added sentence pause**
+and **Added paragraph pause** add independent time after the voice's natural
+ending. The paragraph setting is used at paragraph boundaries.
+
+**Pronunciation corrections → Add pronunciation correction** lets you enter
+a word/name/abbreviation and how it should be spoken (for example, `Dr.` →
+`doctor`). Matching ignores English letter case, respects word boundaries,
+uses longer phrases first, and does not recursively replace the result.
+Corrections apply to both continuous reading and Read word. Edit or remove an
+entry in the same menu. Changes invalidate affected pronunciation lookups;
+old speech cannot be replayed from a different voice/pitch/correction setup.
+
+**Reading presets** explicitly set both reading and word speeds, RHVoice pitch,
+and pauses; they preserve the chosen voice, engine and output. Afterwards,
+word speed and reading speed can still be adjusted independently:
+
+| Preset | Reading speed | Word speed | Pitch | Comma | Sentence | Paragraph |
+| --- | --- | --- | --- | --- | --- | --- |
+| Slow and clear | 0.5× | 0.5× | 100% | 0.25 s | 0.4 s | 1.2 s |
+| Everyday reading | 0.75× | 0.75× | 100% | 0.12 s | 0.2 s | 0.8 s |
+| Word practice | 0.5× | 0.4× | 95% | 0.3 s | 0.5 s | 1.4 s |
+
+**Pre-synthesize next sentence** and **Keep Era speaker open between
+sentences** are on by default and can be disabled separately. The lookahead
+is bounded to one sentence on the current page and does not alter playing
+audio or silently fall back to another voice. The continuous player only
+opens the firmware's selected `hwout_mix`/`tts_sm` route at 48 kHz stereo;
+it never changes hardware mixer switches. It keeps PCM flowing with silence
+through sentence gaps and pause/resume. Only an already-open stream skips
+the clip's wake-up guard. Stop, suspend, book close and exit release it;
+it also exits after ten idle seconds. Words/previews keep the existing clip
+player and guard. Page transitions can still have a gap.
+
+Word highlighting uses estimated timing. Long punctuation pauses or spoken
+expansions may reduce its accuracy. These changes do not modify firmware
+or KOReader core files; try previews and a paragraph on the Era after updating.
 
 ## Word replay, speed and cache
 
@@ -135,7 +190,7 @@ larger Piper/Danny alternative can be included by building with `--with-piper`.
 ### Slower speech without stretching the voice model
 
 If 1.0× speech is too fast, keep **Voice settings → Speech rate** at **0.5×**
-or **0.75×**. On the Era, version 0.7.1 renders Kristin at its native pace
+or **0.75×**. On the Era, version 0.8.0 renders Kristin at its native pace
 and changes the completed WAV's tempo with Sonic, preserving pitch. It no
 longer doubles the model's phoneme durations for 0.5× playback. The same
 processing applies to **Read word**. Your saved speed is retained.
@@ -191,5 +246,5 @@ Run `LUAJIT=luajit sh dev/run_pocketbook_tests.sh` for the native ABI and engine
 regression tests. These require a host C compiler and LuaJIT, not the reader.
 Run `python3 dev/test_wav_tempo.py` for pitch, duration, word-ending and
 malformed-input checks of the tempo converter.
-Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.7.1.zip` with
+Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.8.0.zip` with
 `qemu-arm` installed to verify the packaged ARM English engine and player.

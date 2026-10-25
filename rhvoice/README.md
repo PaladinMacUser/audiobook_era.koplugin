@@ -1,7 +1,7 @@
-# RHVoice / SLT for PocketBook Era
+# RHVoice English voices for PocketBook Era
 
 This is an additional offline English TTS engine. Select **Voice settings →
-TTS engine → RHVoice (SLT, American English)**. Installing it does not change
+TTS engine → RHVoice (English voices)**. Installing it does not change
 your saved engine, rate, volume, or speaker output. Kristin remains available.
 Both **Read aloud from here** and **Read word** use the selected engine.
 
@@ -14,8 +14,8 @@ The adapter renders high-quality 24 kHz mono PCM and uses RHVoice's built-in
 Sonic rate control, so a saved speed such as 0.5× is supported. The existing
 Era speaker player converts it to the firmware's 48 kHz stereo route.
 Synthesis runs in a separate process while KOReader remains responsive.
-Version 0.7.0 reuses a resident engine across requests (see below). It does
-not prefetch with RHVoice, so pauses between sentences remain possible. Failed
+Version 0.7.0 reuses a resident engine across requests (see below). It
+now supports one-sentence lookahead and a persistent Era PCM player in 0.8.0. Failed
 synthesis stops reading instead of skipping text or changing to eSpeak.
 Highlighting uses estimated word timing.
 
@@ -92,8 +92,9 @@ voice previews. The same RHVoice engine and voice data remain loaded across
 requests; speed, volume and speaker lead-in are supplied per request. Ordinary
 Stop cancels synthesis without unloading the model. Closing the book,
 suspending or leaving KOReader terminates the worker; it also exits after
-120 seconds without a request. Synthesis remains sequential, with no RHVoice
-prefetch, so sentence gaps can remain. The first request after unloading
+120 seconds without a request. Synthesis remains sequential inside the worker. Version 0.8.0 adds a bounded
+lookahead slot while the current sentence is playing, so synthesis overlaps
+playback. Sentence gaps can remain if synthesis is slower than playback. The first request after unloading
 still pays the model startup cost.
 
 The private 0700 directory under `/tmp/audiobook-rh-*` contains a Unix datagram
@@ -115,3 +116,42 @@ Version 0.7.1 fixes a Preview crash when KOReader has already declared
 standard socket signature and explicitly casts its private Unix-address
 struct to that pointer type. The IPC suite runs with both socket-header
 load orders, as well as in a fresh Lua VM.
+
+## English voices and prosody (0.8.0)
+
+The bundle also pins BDL (`ea6b944550af6f9b33f2cc5e20f38d3b19087068`),
+CLB (`e0aa06cf50334f10844d1a28a72b3fdcf3cdd150`) and Alan
+(`bb3fdb15b9c64109f396f56f6155965bfcf89977`) from the official
+[bdl-eng](https://github.com/RHVoice/bdl-eng),
+[clb-eng](https://github.com/RHVoice/clb-eng), and
+[alan-eng](https://github.com/RHVoice/alan-eng) repositories. BDL is American
+male, CLB American female, Alan Scottish male. The CMU ARCTIC voice notice
+is included as `LICENSE-CMU-VOICES`; all four original models are unmodified.
+The corresponding-source archive includes all four pinned voice directories.
+
+The optional three extra request lines are voice (`Slt`, `Bdl`, `Clb`, `Alan`),
+pitch (0.85–1.15) and input format (`text` or `ssml`). Old five-line requests
+retain SLT, pitch 1 and plain text. One-shot testing also accepts `--voice`,
+`--pitch` and `--format`. User/book text is escaped before SSML generation;
+pronunciation substitutions are literal, case-insensitive, whole-word and
+non-recursive. The engine preserves explicit break duration independently of
+speech rate, as verified against generated PCM. Sentence/paragraph additions
+are scheduled independently by the reading controller.
+
+`era-player.c` builds a separate small ARM process with `tools/build-era-player.py`.
+It uses libasound's public opaque-handle ABI through the bundled loader and
+libraries, opens only `hwout_mix` or `tts_sm`, and keeps a nonblocking 48 kHz
+stereo PCM open while feeding audio or gap/pause silence. It makes no mixer
+calls. Requests use the same private Unix datagram transport, with the input
+text file naming a canonical PCM WAV under `/tmp/`. `.playing` acknowledges
+the retained lead-in in milliseconds; `.done` acknowledges that the queued
+speech passed the PCM delay, not merely that it was sent. `.pause` pauses
+advancement, `.cancel` drops and closes PCM. Normal completion keeps it open
+for the next sentence; ten idle seconds or TERM closes it. Fresh streams
+retain the 350 ms leading silence; warm streams skip precisely those silent
+frames. UI stop/book close/suspend/exit terminates the tracked process.
+
+Host fixture tests compare exact speech frames, one-PCM reuse and lifecycle.
+ARM tests exercise all voices, pitch, SSML, cancellation, idle restart, and
+real ALSA null playback through the packaged loader. Physical Era listening
+and latency still require device validation. Highlighting remains estimated.

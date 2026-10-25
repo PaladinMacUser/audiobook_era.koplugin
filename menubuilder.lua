@@ -65,7 +65,7 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
                 espeak = _("espeak-ng"),
                 piper = _("Piper (neural)"),
                 sanotts = _("sanoTTS (neural)"),
-                rhvoice = _("RHVoice (SLT, American English)"),
+                rhvoice = _("RHVoice (English voices)"),
                 pico = _("Pico TTS"),
                 flite = _("Flite"),
                 festival = _("Festival"),
@@ -304,6 +304,11 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
                 .. "occur, turn this off."
             ),
         })
+    end
+
+    if plugin.tts_engine.backend==plugin.tts_engine.BACKENDS.RHVOICE then
+        table.insert(menu,{text=_("RHVoice voices and tuning"),
+            sub_item_table_func=function() return MenuBuilder.buildRHVoiceMenu(plugin) end})
     end
 
     -- Speech rate submenu
@@ -1025,7 +1030,7 @@ function MenuBuilder.buildEngineSelectMenu(plugin)
     if engine.rhvoice_bin then
         table.insert(available, {
             id = engine.BACKENDS.RHVOICE,
-            label = _("RHVoice (SLT, American English)"),
+            label = _("RHVoice (English voices)"),
         })
     end
 
@@ -2485,6 +2490,109 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
         title = _("TTS settings"),
         items = items,
     })
+end
+
+-- RHVoice-specific controls keep espeak pitch and pause settings independent.
+function MenuBuilder.buildRHVoiceMenu(plugin)
+    local Settings=dofile(_dir.."rhvoicesettings.lua")
+    local function values(key,choices,suffix,default)
+        local menu={}
+        for _i,value in ipairs(choices) do
+            menu[#menu+1]={text=tostring(value)..suffix,
+                checked_func=function() return plugin:getSetting(key,default)==value end,
+                callback=function() plugin:stopReadAlong();plugin:setSetting(key,value) end}
+        end
+        return menu
+    end
+    local voices={}
+    for _i,voice in ipairs(Settings.installed(plugin.tts_engine)) do
+        voices[#voices+1]={text=voice.label,
+            checked_func=function() return plugin:getSetting("rhvoice_voice","Slt")==voice.id end,
+            callback=function() plugin:stopReadAlong();plugin:setSetting("rhvoice_voice",voice.id) end}
+        voices[#voices+1]={text=T(_("Preview: %1"),voice.label),callback=function(touchmenu)
+            if touchmenu then touchmenu:closeMenu() end
+            plugin:previewVoice(plugin.tts_engine.BACKENDS.RHVOICE,false,voice.id)
+        end}
+    end
+    local presets={}
+    for _i,preset in ipairs(Settings.presets) do
+        presets[#presets+1]={text=_(preset.name),callback=function() Settings.applyPreset(plugin,preset) end,
+            help_text=T(_("Reading speed %1x; word speed %2x. Also sets RHVoice pitch and pauses. Voice and output stay selected."),preset.rate,preset.word_rate)}
+    end
+    return {
+        {text_func=function() return T(_("English voice: %1"),plugin:getSetting("rhvoice_voice","Slt")) end,sub_item_table=voices},
+        {text=_("Reading presets"),sub_item_table=presets},
+        {text_func=function() return T(_("Pitch: %1%%"),math.floor(Settings.options(plugin).pitch*100+0.5)) end,
+            sub_item_table=values("rhvoice_pitch",{0.85,0.9,0.95,1,1.05,1.1,1.15},"x",1)},
+        {text_func=function() return T(_("Comma pause: %1s (0 = natural)"),Settings.options(plugin).comma) end,
+            sub_item_table=values("rhvoice_comma_pause",{0,0.1,0.12,0.2,0.25,0.3,0.5,0.75,1,1.5},"s",0)},
+        {text_func=function() return T(_("Added sentence pause: %1s"),Settings.options(plugin).sentence) end,
+            sub_item_table=values("rhvoice_sentence_pause",{0,0.1,0.2,0.3,0.4,0.5,0.75,1,1.5,2,3},"s",plugin:getSetting("sentence_pause",0.1))},
+        {text_func=function() return T(_("Added paragraph pause: %1s"),Settings.options(plugin).paragraph) end,
+            sub_item_table=values("rhvoice_paragraph_pause",{0,0.2,0.4,0.6,0.8,1,1.2,1.4,1.5,2,3,5},"s",plugin:getSetting("paragraph_pause",0.8))},
+        {text=_("Pronunciation corrections"),sub_item_table_func=function() return MenuBuilder.buildRHCorrectionsMenu(plugin) end},
+        {text=_("Pre-synthesize next sentence"),checked_func=function() return plugin:getSetting("rhvoice_prefetch",true) end,
+            callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_prefetch",true) end},
+        {text=_("Keep Era speaker open between sentences"),checked_func=function() return plugin:getSetting("rhvoice_keep_speaker",true) end,
+            callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_keep_speaker",true) end,
+            enabled_func=function() return plugin.tts_engine:supportsPocketBookSpeaker() end},
+    }
+end
+
+function MenuBuilder.buildRHCorrectionsMenu(plugin)
+    local entries=plugin:getSetting("rhvoice_corrections",{})
+    local menu={{text=_("Add pronunciation correction"),callback=function()
+        MenuBuilder.editRHCorrection(plugin,nil)
+    end}}
+    local keys={};for key in pairs(entries) do keys[#keys+1]=key end;table.sort(keys)
+    for _i,key in ipairs(keys) do
+        menu[#menu+1]={text=key.." → "..entries[key],sub_item_table={
+            {text=_("Edit pronunciation"),callback=function() MenuBuilder.editRHCorrection(plugin,key) end},
+            {text=_("Remove correction"),callback=function()
+                plugin:stopReadAlong()
+                local updated={};for k,v in pairs(plugin:getSetting("rhvoice_corrections",{})) do if k~=key then updated[k]=v end end
+                plugin:setSetting("rhvoice_corrections",updated)
+            end},
+        }}
+    end
+    return menu
+end
+
+function MenuBuilder.editRHCorrection(plugin,key)
+    local InputDialog=require("ui/widget/inputdialog")
+    local function replacement(from)
+        local dialog
+        dialog=InputDialog:new{title=T(_("Say “%1” as:"),from),
+            input=plugin:getSetting("rhvoice_corrections",{})[from] or "",input_hint=_("Spoken spelling or expansion"),
+            buttons={{{text=_("Cancel"),callback=function() UIManager:close(dialog) end},
+                {text=_("Save"),is_enter_default=true,callback=function()
+                    local spoken=(dialog:getInputText() or ""):gsub("^%s+",""):gsub("%s+$","")
+                    if spoken=="" or #spoken>160 or spoken:find("[\r\n]") then
+                        UIManager:show(InfoMessage:new{text=_("Keep the pronunciation short and on one line."),timeout=3});return
+                    end
+                    local updated={};local count=0
+                    for k,v in pairs(plugin:getSetting("rhvoice_corrections",{})) do updated[k]=v;count=count+1 end
+                    if not updated[from] and count>=200 then
+                        UIManager:show(InfoMessage:new{text=_("Remove a correction before adding another (limit 200)."),timeout=3});return
+                    end
+                    plugin:stopReadAlong();updated[from]=spoken;plugin:setSetting("rhvoice_corrections",updated)
+                    UIManager:close(dialog)
+                end}}}}
+        UIManager:show(dialog);dialog:onShowKeyboard()
+    end
+    if key then replacement(key);return end
+    local dialog
+    dialog=InputDialog:new{title=_("Word, name or abbreviation"),
+        input=plugin.word_reader and plugin.word_reader.last_word or "",
+        buttons={{{text=_("Cancel"),callback=function() UIManager:close(dialog) end},
+            {text=_("Next"),is_enter_default=true,callback=function()
+                local from=(dialog:getInputText() or ""):gsub("^%s+",""):gsub("%s+$",""):lower()
+                if from=="" or #from>80 or from:find("[\r\n]") then
+                    UIManager:show(InfoMessage:new{text=_("Keep the word or abbreviation short and on one line."),timeout=3});return
+                end
+                UIManager:close(dialog);replacement(from)
+            end}}}}
+    UIManager:show(dialog);dialog:onShowKeyboard()
 end
 
 return MenuBuilder

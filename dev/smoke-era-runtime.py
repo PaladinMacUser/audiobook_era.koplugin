@@ -32,10 +32,10 @@ def check_resident_rhvoice(binary, qemu):
                 ready = Path(str(endpoint) + ".ready")
                 wait(ready.exists)
                 assert int(ready.read_text()) == worker.pid
-                def submit(index, text, speed=.5, lead=350):
+                def submit(index, text, speed=.5, lead=350, voice="Slt", pitch=1, mode="text"):
                     job, src, dest = (root / f"{index}.{suffix}" for suffix in ("req", "txt", "wav"))
                     src.write_text(text)
-                    job.write_text(f"{src}\n{dest}\n{speed}\n1\n{lead}\n")
+                    job.write_text(f"{src}\n{dest}\n{speed}\n1\n{lead}\n{voice}\n{pitch}\n{mode}\n")
                     sender.sendto(str(job).encode(), str(endpoint))
                     return job, dest
                 durations = []
@@ -51,6 +51,29 @@ def check_resident_rhvoice(binary, qemu):
                         assert any(wav.readframes(wav.getnframes()))
                         durations.append(wav.getnframes() - 8400)
                 assert 1.8 < durations[1] / durations[0] < 2.2, "One resident engine honors changed rate"
+                waveforms = []
+                for index, voice in enumerate(("Slt", "Bdl", "Clb", "Alan"),20):
+                    job, audio = submit(index,"Hello from your PocketBook reader.",voice=voice)
+                    wait(lambda: Path(str(job)+".done").exists())
+                    assert Path(str(job)+".done").read_text().strip()=="OK",voice
+                    with wave.open(str(audio)) as wav:
+                        assert wav.getframerate()==24000
+                        pcm=wav.readframes(wav.getnframes());assert any(pcm)
+                        waveforms.append(pcm)
+                    assert worker.poll() is None and int(ready.read_text())==worker.pid
+                assert len(set(waveforms))==4,"Four distinct installed English voices"
+                job, pitched = submit(30,"Hello from your PocketBook reader.",pitch=.9)
+                wait(lambda: Path(str(job)+".done").exists())
+                with wave.open(str(pitched)) as wav:
+                    pcm=wav.readframes(wav.getnframes())
+                    assert pcm!=waveforms[0] and .95<len(pcm)/len(waveforms[0])<1.05,"Pitch changes speech without changing its speed"
+                pause_frames=[]
+                for index, pause in enumerate((100,500),31):
+                    job, audio=submit(index,f'<speak>Hello,<break time="{pause}ms"/> reader.</speak>',mode="ssml")
+                    wait(lambda: Path(str(job)+".done").exists())
+                    assert Path(str(job)+".done").read_text().strip()=="OK"
+                    with wave.open(str(audio)) as wav: pause_frames.append(wav.getnframes())
+                assert 8500<pause_frames[1]-pause_frames[0]<11000,"SSML comma pause controls actual PCM duration at half speed"
                 job, audio = submit(2, "reader " * 1000)
                 # Cancel a potentially running long request, then enqueue a fresh word.
                 Path(str(job) + ".cancel").write_text("cancel")
@@ -77,7 +100,7 @@ def check_resident_rhvoice(binary, qemu):
                 sender.close()
                 if worker.poll() is None:
                     worker.kill(); worker.wait()
-    print("Resident RHVoice ARM check: reused model, per-request rates, guarded clip starts, cancellation, invalid request, idle unload and restart")
+    print("Resident RHVoice ARM check: four distinct English voices, pitch, SSML pauses, reused model, per-request rates, guarded clip starts, cancellation, invalid request, idle unload and restart")
 
 
 def main():
@@ -230,6 +253,10 @@ def main():
                                  "--rate", "48000", "--channels", "2", str(rh_paths[1])],
                                 env=env, capture_output=True, text=True, check=True, timeout=30)
         assert "PLAYING\n" in result.stderr and "write error:" not in result.stderr
+        from test_era_player import check_player
+        with tempfile.TemporaryDirectory(prefix="audiobook-arm-pcm-") as player_directory:
+            check_player([args.qemu,str(loader),"--library-path",str(plugin/"wav-play/lib")+":"+str(libraries),
+                          str(plugin/"rhvoice/era-player")],env,Path(player_directory))
         print("ARM runtime OK: espeak, resident sanoTTS, RHVoice/SLT, selected-word synthesis, PCM conversion, ALSA null playback")
 
 

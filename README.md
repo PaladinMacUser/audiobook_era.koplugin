@@ -1,48 +1,46 @@
 # PocketBook Era fork
 
 Offline English read-aloud through the original Era's built-in speaker,
-targeting **U700.6.10.3209** and **KOReader 2026.03**. Version **0.7.1**
-fixes the RHVoice Preview crash caused by KOReader's preloaded socket FFI
-declaration. It includes a bounded word-pronunciation cache, one resident
-RHVoice process,
-independent word speed and repeat, previews beside installed engines, and
-persistent audio diagnostics with a spoken test. It also includes a compatibility guard for KOReader 2026.03’s missing touch-origin
-crash on the original Era, and adds **RHVoice/SLT (American English)** as another offline TTS engine,
-alongside **sanoTTS/Kristin**, eSpeak NG and **Read word**. Your current
-engine remains selected. RHVoice clips on the Era speaker include a 350 ms
-silent lead-in to protect their beginnings while the firmware output opens. To try SLT, choose **Tools → Audiobook Read-Along →
-Voice settings → TTS engine → RHVoice (SLT, American English)**.
-At slower speeds it now uses pitch-preserving audio tempo conversion: Kristin
-renders at its native pace, then Sonic slows the finished clip. Existing
-speed preferences, including 0.5×, are retained. This addresses the duration
-model's stretched-phoneme distortion; the underlying voice remains Kristin.
-See [installation and device checks](INSTALL-ERA.md) and
+targeting **U700.6.10.3209** and **KOReader 2026.03**.
+
+Version **0.8.0** includes four offline RHVoice voices: **SLT** and **CLB**
+(American English, female), **BDL** (American English, male), and **Alan**
+(Scottish English, male). Open **Tools → Audiobook Read-Along → Voice settings
+→ RHVoice voices and tuning** to select or preview a voice.
+
+The same menu provides gentle pitch adjustment, separate comma/sentence/
+paragraph pauses, saved pronunciation corrections, and the **Slow and clear**,
+**Everyday reading**, and **Word practice** presets. Corrections apply to
+continuous reading and **Read word**. Voice previews preserve the selected
+reading voice and last word for Repeat.
+
+RHVoice pre-synthesizes one upcoming sentence while the current one plays.
+Continuous reading can keep one firmware-routed speaker stream open between
+sentences, feeding silence during pauses. Stop, book close, suspend and exit
+release it; the player also unloads after ten idle seconds. Fresh playback
+retains the 350 ms guard that protects word beginnings. Single-word playback
+and previews use the established guarded clip player.
+
+The earlier word cache, independent pronunciation speed, Repeat last word,
+persistent RHVoice engine, audio test and saved-failure diagnostics remain
+included, together with Kristin, eSpeak, pitch-preserving slow speech,
+speaker routing and highlighting fixes, and the KOReader 2026.03 gesture
+guard. The Preview socket-type crash fix is retained. Saved engine, SLT voice,
+speed and output choices are preserved on upgrade; presets apply only when
+selected explicitly. Word timing remains estimated, especially with large
+pauses or pronunciation expansions.
+
+See [installation and device checks](INSTALL-ERA.md),
+[RHVoice details and pinned sources](rhvoice/README.md), and
 [the Era package workflow](../../actions/workflows/era.yml).
-
-The speaker route and word-highlighting fixes are retained. This build
-switches an existing Era Piper setup to sanoTTS/Kristin once, then preserves
-subsequent user choices. **Read word** speaks one selected word and stops;
-**Read aloud from here** continues reading as before.
-
-The stock PocketBook Julie voice is not integrated yet: InkView exposes
-routing but no public synthesis API. The bug report now lists candidate
-stock-engine voice/library paths for further investigation. The included
-Kristin voice is a separate faster engine, confirmed reading through the
-speaker on the Era. The user reports the slower-speech change helped but
-Kristin's quality remains limited; RHVoice is a separate voice to compare.
+The new stream is tested under ARM emulation and with a deterministic ALSA
+fixture; physical speaker latency and voice preference need an Era listening
+check. The stock PocketBook Julie engine is not integrated.
 
 Build with `python3 tools/package-era.py` (Python 3, Git, curl, CMake and
-`g++-arm-linux-gnueabihf`); add `--with-piper` for the larger
-Piper/Danny alternative. The in-app updater points to this fork. The upstream
-documentation follows; some optional engines and audiobook features require
-the larger upstream runtime bundle.
-
-RHVoice renders SLT at 24 kHz, supports the saved speech rate and volume,
-and works with both read-along and selected-word playback. It is a classic
-statistical voice, not a large neural narrator. A short sentence took about
-0.9 seconds including startup under ARM emulation; actual Era speed and
-preferred voice quality need a listening check. See [RHVoice details and
-source](rhvoice/README.md).
+`g++-arm-linux-gnueabihf`); add `--with-piper` for the larger Piper/Danny
+alternative. The in-app updater points to this fork. The upstream
+documentation follows; some optional features require its larger runtime.
 
 ---
 

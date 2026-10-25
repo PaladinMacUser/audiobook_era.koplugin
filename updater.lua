@@ -37,6 +37,7 @@ local CRITICAL_FILES = {
     "wordreader.lua",
     "wordcache.lua",
     "rhvoiceclient.lua",
+    "rhvoicesettings.lua",
     "speechdiagnostics.lua",
     "gestureguard.lua",
     "pocketbookaudio.lua",

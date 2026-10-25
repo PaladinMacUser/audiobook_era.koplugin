@@ -23,7 +23,7 @@ try:
             job = Path(s.recv(4096).decode())
         except socket.timeout:
             break
-        src, dest, rate, volume, lead = job.read_text().splitlines()
+        src, dest, rate, volume, lead = job.read_text().splitlines()[:5]
         text = Path(src).read_text()
         if text == 'crash':
             os._exit(7)

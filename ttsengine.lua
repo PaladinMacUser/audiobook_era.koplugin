@@ -1004,7 +1004,17 @@ function TTSEngine:recordAudioFailure(stage,message)
     return Diagnostics.record(self.plugin,self,stage,message)
 end
 
-function TTSEngine:_synthesizeRHVoice(text,audio_file,callback)
+function TTSEngine:getRHVoiceOptions()
+    local options=dofile(_utils_dir.."rhvoicesettings.lua").options(self.plugin,self.rhvoice_voice_override)
+    return options
+end
+
+function TTSEngine:_rhvoiceSignature(text)
+    local Settings=dofile(_utils_dir.."rhvoicesettings.lua")
+    return text.."\0"..Settings.signature(self:getRHVoiceOptions()).."|"..tostring(self.rate).."|"..tostring(self.volume)
+end
+
+function TTSEngine:_getRHVoiceClient()
     local owner=self.plugin or self
     local client=owner._rhvoice_service
     if not client or client.closed or client.binary~=self.rhvoice_bin then
@@ -1013,31 +1023,85 @@ function TTSEngine:_synthesizeRHVoice(text,audio_file,callback)
         client=self.rhvoice_bin and Client:new{binary=self.rhvoice_bin}
         owner._rhvoice_service=client
     end
-    if not client then
-        self:recordAudioFailure("RHVoice startup","Cannot create the resident RHVoice session")
-        if callback then callback(false) end;return false
-    end
-    if self._rhvoice_pending then self._rhvoice_pending:cancel() end
-    local generation=self.synthesis_generation
+    return client
+end
+
+function TTSEngine:_requestRHVoice(text,audio_file,current,callback)
+    local client=self:_getRHVoiceClient()
+    if not client then callback(false,"Cannot create the resident RHVoice session");return nil end
+    local Settings=dofile(_utils_dir.."rhvoicesettings.lua")
+    local options=self:getRHVoiceOptions()
     local lead=self:supportsPocketBookSpeaker() and self:getPocketBookAudioDevice()=="era-speaker" and 350 or 0
-    local function current() return self.synthesis_generation==generation end
-    self._rhvoice_pending=client:request(text,audio_file,self.rate or 1,self.volume or 1,lead,current,
+    options.format="ssml"
+    local job=client:request(Settings.ssml(text,options,self.rate),audio_file,self.rate or 1,self.volume or 1,lead,current,
         function(ok,reason)
             if not current() then return end
-            self._rhvoice_pending=nil
-            if ok and WavUtils.getDurationMs(audio_file)<=0 then
+            if ok and WavUtils.getDurationMs(audio_file)<=lead then
                 ok=false;reason="RHVoice returned an invalid or empty WAV";os.remove(audio_file)
             end
-            if ok then
-                self.current_audio_file=audio_file
-                self._audio_lead_in_file=audio_file;self._audio_lead_in_ms=lead
-                self:generateTimingEstimates(text)
-            else
-                self:recordAudioFailure("RHVoice",reason or "Resident synthesis failed")
+            callback(ok,reason,lead)
+        end,options)
+    return job
+end
+
+function TTSEngine:_adoptRHVoice(text,file,lead)
+    self.current_audio_file=file
+    self._audio_lead_in_file=file;self._audio_lead_in_ms=lead
+    self:generateTimingEstimates(text)
+end
+
+function TTSEngine:_synthesizeRHVoice(text,audio_file,callback)
+    local generation=self.synthesis_generation
+    local function current() return self.synthesis_generation==generation end
+    local function complete(ok,reason,lead,file)
+        if not current() then return end
+        self._rhvoice_pending=nil
+        if ok then self:_adoptRHVoice(text,file or audio_file,lead)
+        else self:recordAudioFailure("RHVoice",reason or "Resident synthesis failed") end
+        if callback then callback(ok,ok and self.timing_data or nil) end
+    end
+    local slot=self._rhvoice_slot
+    if slot and slot.signature==self:_rhvoiceSignature(text) then
+        if slot.state=="ready" then
+            self._rhvoice_slot=nil;complete(true,nil,slot.lead,slot.file)
+        elseif slot.state=="pending" then
+            slot.waiter=function(ok,reason)
+                if self._rhvoice_slot==slot then self._rhvoice_slot=nil end
+                complete(ok,reason,slot.lead,slot.file)
             end
-            if callback then callback(ok,ok and self.timing_data or nil) end
-        end)
+            self._rhvoice_pending=slot.job
+        else self._rhvoice_slot=nil;complete(false,slot.reason) end
+        return nil
+    end
+    self:_cancelRHVoicePrefetch()
+    if self._rhvoice_pending then self._rhvoice_pending:cancel() end
+    self._rhvoice_pending=self:_requestRHVoice(text,audio_file,current,complete)
     return nil
+end
+
+function TTSEngine:_cancelRHVoicePrefetch()
+    local slot=self._rhvoice_slot;self._rhvoice_slot=nil
+    if slot then
+        if slot.job then slot.job:cancel() end
+        os.remove(slot.file)
+    end
+end
+
+function TTSEngine:prefetchRHVoice(text)
+    if self.plugin and not self.plugin:getSetting("rhvoice_prefetch",true) then return false end
+    local signature=self:_rhvoiceSignature(text)
+    if self._rhvoice_slot and self._rhvoice_slot.signature==signature then return true end
+    self:_cancelRHVoicePrefetch()
+    self.file_counter=(self.file_counter or 0)+1
+    local slot={text=text,signature=signature,state="pending",
+        file=string.format("/tmp/audiobook_rh_prefetch_%d_%d_%d.wav",os.time(),self._instance_id or 0,self.file_counter)}
+    self._rhvoice_slot=slot
+    slot.job=self:_requestRHVoice(text,slot.file,function() return self._rhvoice_slot==slot end,
+        function(ok,reason,lead)
+            slot.state=ok and "ready" or "failed";slot.reason=reason;slot.lead=lead
+            if slot.waiter then slot.waiter(ok,reason) end
+        end)
+    return true
 end
 
 function TTSEngine:_nativeFifoPath()
@@ -2186,9 +2250,7 @@ function TTSEngine:prefetch(text, use_espeak)
     if not self.backend or not text or text == "" then
         return false
     end
-    -- RHVoice runs asynchronously. The generic prefetch slot assumes a
-    -- synchronous callback and would overwrite the playing clip on return.
-    if self.backend == self.BACKENDS.RHVOICE then return false end
+    if self.backend == self.BACKENDS.RHVOICE then return self:prefetchRHVoice(text) end
     -- Android TTS: dedicated async lookahead (issue #96).  The generic
     -- synchronous slot fill below cannot be used (synthesizeAndroid is async
     -- and would clobber current_audio_file), so prefetchAndroid fills the
@@ -2493,6 +2555,13 @@ Check if prefetched audio matches the given text and swap it in.
 @return boolean true if prefetch was used
 --]]
 function TTSEngine:usePrefetched(text)
+    if self.backend==self.BACKENDS.RHVOICE then
+        local slot=self._rhvoice_slot
+        if slot and slot.state=="ready" and slot.signature==self:_rhvoiceSignature(text) then
+            self._rhvoice_slot=nil;self:_adoptRHVoice(text,slot.file,slot.lead);return true
+        end
+        return false
+    end
     -- Check single-slot prefetch (espeak-ng)
     if self._prefetch_file and self._prefetch_text == text then
         if self.current_audio_file then
@@ -2591,6 +2660,7 @@ end
 Clean up prefetch state.
 --]]
 function TTSEngine:_cleanPrefetch()
+    self:_cancelRHVoicePrefetch()
     if self._prefetch_file then
         if not self._prefetch_in_use then
             os.remove(self._prefetch_file)
@@ -2805,6 +2875,55 @@ function TTSEngine:_releaseAudioout()
     if self._audioout_client then self._audioout_client:release() end
 end
 
+-- Continuous RHVoice playback uses one firmware-routed ALSA stream. Single
+-- words and previews keep the established per-clip player and wake-up guard.
+function TTSEngine:_playEraRHVoice()
+    local binary=(self.plugin_dir or ""):gsub("/+$","").."/rhvoice/era-player"
+    local file=io.open(binary,"rb")
+    if not file then self:recordAudioFailure("Era speaker","Persistent player is missing; reinstall the complete Era package");return false end
+    file:close()
+    local Client=dofile(_utils_dir.."rhvoiceclient.lua")
+    if not self._era_service or self._era_service.closed then
+        local function quote(value) return "'"..value:gsub("'","'\\''").."'" end
+        local prefix=""
+        if self.espeak_linker and self.espeak_lib_path then
+            prefix=quote(self.espeak_linker).." --library-path "..quote((self.plugin_dir or "").."/wav-play/lib:"..self.espeak_lib_path).." "
+        end
+        self._era_service=Client:new{binary=binary,launch_prefix=prefix,idle_seconds=10,arguments={"--device",self._pb_speaker.pcm}}
+    end
+    if not self._era_service then self:recordAudioFailure("Era speaker","Cannot create the continuous playback session");return false end
+    self.play_generation=(self.play_generation or 0)+1
+    local generation=self.play_generation
+    local duration=self:getAudioDurationMs()
+    self._current_audio_duration_ms=duration
+    self.playback_latency_ms=self:getAudioLeadInMs()+80
+    self:startTimingLoop()
+    self._era_playing_at=nil
+    self._audio_launched_at=UIManager:getTime()
+    self._era_pending=self._era_service:request(self.current_audio_file,"/tmp/audiobook_unused.wav",1,1,self:getAudioLeadInMs(),
+        function() return self.is_speaking and self.play_generation==generation end,
+        function(ok,reason)
+            self._era_pending=nil
+            if ok then self:onPlaybackComplete()
+            else
+                self:recordAudioFailure("Era speaker",reason or "Continuous playback failed")
+                self.is_speaking=false
+                if self.on_fail_callback then self.on_fail_callback() end
+            end
+        end,{no_output=true,label="Era speaker",timeout=math.max(60,duration/1000+15),on_playing=function(lead)
+            self.playback_latency_ms=lead+80
+            self._audio_launched_at=UIManager:getTime();self.playback_start_time=self._audio_launched_at
+            self._era_playing_at=self._audio_launched_at
+        end})
+    return true
+end
+
+function TTSEngine:_stopEraPlayer()
+    self._era_playing_at=nil
+    if self._era_pending then self._era_pending:cancel();self._era_pending=nil end
+    if self._era_service then self._era_service:shutdown();self._era_service=nil end
+end
+
 function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     local t0 = UIManager:getTime()
     -- Register the TTS audio file with the session recorder, if active.
@@ -2895,6 +3014,10 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
             })
             return false
         end
+    end
+    if self.backend==self.BACKENDS.RHVOICE and self._rhvoice_continuous and self._pb_speaker_active
+            and (not self.plugin or self.plugin:getSetting("rhvoice_keep_speaker",true)) then
+        return self:_playEraRHVoice()
     end
     -- Block playback when no real audio output exists and no BT device is
     -- connected.  On single-core Kobos (no speaker), silently looping
@@ -7086,8 +7209,10 @@ function TTSEngine:pause()
     if self.is_speaking and not self.is_paused then
         self.is_paused = true
         self.pause_time = UIManager:getTime()
+        -- The Era player feeds silence while paused, preserving its PCM.
+        if self._era_pending then self._era_pending:pause()
         -- Android: pause via MediaPlayer API
-        if self.audio_player_type == "android" and self._android_tts then
+        elseif self.audio_player_type == "android" and self._android_tts then
             self._android_tts:pausePlayback()
         -- PocketBook InkView: no direct pause API; audio plays to natural
         -- end but word-highlighting and sentence advance are suspended.
@@ -7122,11 +7247,13 @@ function TTSEngine:resume()
         local pause_duration = UIManager:getTime() - self.pause_time
         local pause_ms = time.to_ms(pause_duration)
         self.playback_start_time = self.playback_start_time + pause_duration
+        if self._era_playing_at then self._era_playing_at=self._era_playing_at+pause_duration end
         -- Accumulate total pause time so the completion timer knows how
         -- much real playback time has actually elapsed.
         self._total_pause_ms = (self._total_pause_ms or 0) + pause_ms
         -- Android: resume via MediaPlayer API
-        if self.audio_player_type == "android" and self._android_tts then
+        if self._era_pending then self._era_pending:resume()
+        elseif self.audio_player_type == "android" and self._android_tts then
             self._android_tts:resumePlayback()
         -- PocketBook InkView: no direct resume API; timing loop resumes
         -- automatically when is_paused is cleared above.
@@ -7157,6 +7284,8 @@ end
 Stop playback.
 --]]
 function TTSEngine:stop()
+    self:_stopEraPlayer()
+    self._rhvoice_continuous=false
     if self._rhvoice_pending then self._rhvoice_pending:cancel();self._rhvoice_pending=nil end
     self.synthesis_generation = (self.synthesis_generation or 0) + 1
     -- Always bump generation and clear state, even if not speaking.
@@ -7279,6 +7408,7 @@ Uses SIGTERM (not SIGKILL) so GStreamer can close the BT audio sink
 gracefully and not leave the BT firmware in a bad state.
 --]]
 function TTSEngine:forceKillAll()
+    self:_stopEraPlayer()
     if self._rhvoice_pending then self._rhvoice_pending:cancel();self._rhvoice_pending=nil end
     self.synthesis_generation = (self.synthesis_generation or 0) + 1
     self._socket_clean = false

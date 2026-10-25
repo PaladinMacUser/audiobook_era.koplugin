@@ -715,7 +715,7 @@ function Audiobook:addToMainMenu(menu_items)
                         return T(_("Voice settings (Piper - %1)"), model_label)
                     end
                     if self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE then
-                        return _("Voice settings (RHVoice - SLT)")
+                        return T(_("Voice settings (RHVoice - %1)"),self:getSetting("rhvoice_voice","Slt"))
                     end
                     local voice_label = self:getSetting("tts_voice_label", "English (GB)")
                     local variant_label = self:getSetting("tts_variant_label", "")
@@ -1276,7 +1276,7 @@ function Audiobook:addToMainMenu(menu_items)
                         local backend_labels = {
                             espeak = "espeak-ng",
                             piper = "Piper",
-                            rhvoice = "RHVoice (SLT, American English)",
+                            rhvoice = "RHVoice (English voices)",
                             pico = "Pico",
                             flite = "Flite",
                             festival = "Festival",
@@ -1401,6 +1401,7 @@ end
 function Audiobook:_configureSpeechTools(backend,rate)
     self:_ensureSpeechTools()
     local e,reading=self._speech_engine,self.tts_engine
+    e.rhvoice_voice_override=nil
     e:setBackend(backend);e:setRate(rate);e:setVolume(reading.volume or 1)
     e:setVoice(reading.voice or "en");e:setPitch(reading.pitch or 50)
     e:setWordGap(reading.word_gap or 0);e:setClausePause(reading.clause_pause or 0)
@@ -1416,11 +1417,12 @@ function Audiobook:repeatLastWord()
     self:readSelectedWord(word)
 end
 
-function Audiobook:previewVoice(backend,is_test)
+function Audiobook:previewVoice(backend,is_test,rhvoice_voice)
     if not self._init_ok then self:_showInitError();return end
     if not self:_audioOutputReady() then return end
     self:stopReadAlong()
     self:_configureSpeechTools(backend or self.tts_engine.backend,self:getSetting("speech_rate",1))
+    self._speech_engine.rhvoice_voice_override=rhvoice_voice
     self._audio_test_status=is_test and "Running" or self._audio_test_status
     local text=is_test and "Hello. This is the PocketBook speaker test. One, two, three."
         or "Hello. This is a sample of this English reading voice."

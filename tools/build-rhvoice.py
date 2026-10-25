@@ -12,6 +12,9 @@ REVISIONS = {
     "engine": "fa9dd196fd2dac3b0bf089a2d80fc8477c2380e3",
     "english": "8a2ea34df72a190dae245460aeb20a867d64775c",
     "slt": "c17dded68322016aba2868d9c29f11bba14d275f",
+    "bdl": "ea6b944550af6f9b33f2cc5e20f38d3b19087068",
+    "clb": "e0aa06cf50334f10844d1a28a72b3fdcf3cdd150",
+    "alan": "bb3fdb15b9c64109f396f56f6155965bfcf89977",
 }
 
 
@@ -38,7 +41,8 @@ def copy_tree(source, target):
 def build(source, output, cc, cxx, cmake, jobs):
     fetch("RHVoice/RHVoice", REVISIONS["engine"], source)
     fetch("RHVoice/English", REVISIONS["english"], source / "data/languages/English")
-    fetch("RHVoice/slt-eng", REVISIONS["slt"], source / "data/voices/slt")
+    for name in ("slt","bdl","clb","alan"):
+        fetch("RHVoice/"+name+"-eng", REVISIONS[name], source / "data/voices" / name)
     # Only one Boost algorithm was used by the synthesis core. Replace that
     # expression with equivalent standard-library code to avoid a large
     # unrelated Boost dependency in this standalone static build.
@@ -66,7 +70,8 @@ def build(source, output, cc, cxx, cmake, jobs):
     shutil.copyfile(build_dir / "rhvoice-slt", output / "rhvoice-slt")
     (output / "rhvoice-slt").chmod(0o755)
     copy_tree(source / "data/languages/English", output / "data/languages/English")
-    copy_tree(source / "data/voices/slt", output / "data/voices/slt")
+    for name in ("slt","bdl","clb","alan"):
+        copy_tree(source / "data/voices" / name, output / "data/voices" / name)
     config = output / "data/config"
     config.mkdir(parents=True, exist_ok=True)
     (config / "RHVoice.conf").write_text("# High-quality 24 kHz SLT; rate control uses Sonic.\nquality=max\n")
@@ -77,7 +82,7 @@ def build(source, output, cc, cxx, cmake, jobs):
     with tarfile.open(output / "corresponding-source.tar.gz", "w:gz") as archive:
         def keep(info):
             return None if ".git" in Path(info.name).parts else info
-        for relative in ("src", "licenses", "LICENSE.md", "README.md", "data/languages/English", "data/voices/slt"):
+        for relative in ("src", "licenses", "LICENSE.md", "README.md", "data/languages/English", "data/voices/slt", "data/voices/bdl", "data/voices/clb", "data/voices/alan"):
             archive.add(source / relative, "source/RHVoice/" + relative, filter=keep)
         archive.add(ROOT / "rhvoice", "source/era/rhvoice")
         for name in ("sonic.c", "sonic.h", "LICENSE"):

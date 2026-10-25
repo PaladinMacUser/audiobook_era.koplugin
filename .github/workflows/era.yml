@@ -19,11 +19,13 @@ jobs:
         run: sh dev/run_pocketbook_tests.sh
       - name: Test pitch-preserving speech tempo
         run: python3 dev/test_wav_tempo.py
+      - name: Test persistent Era PCM stream
+        run: python3 dev/test_era_player.py
       - name: Assemble installable English package
         run: python3 tools/package-era.py
       - name: Verify bundled ARM English speech and WAV playback
-        run: python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.7.1.zip
+        run: python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.8.0.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: audiobook-era-v0.7.1
+          name: audiobook-era-v0.8.0
           path: dist/*
