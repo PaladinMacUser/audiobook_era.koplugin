@@ -19,6 +19,14 @@ RHVoice. A short pause between sentences is therefore possible. Failed
 synthesis stops reading instead of skipping text or changing to eSpeak.
 Highlighting uses estimated word timing.
 
+Version 0.6.3.7 adds 350 ms of silence before each RHVoice clip when the
+Era built-in speaker is selected. This gives the firmware audio path time
+to open before the first phoneme. Speech samples and the selected rate are
+unchanged. Highlighting accounts for the lead-in, which is excluded from
+speech-duration estimates. Other audio routes keep the original waveform.
+This targets clipped clip beginnings; the physical speaker still needs a
+listening check.
+
 Development checks under ARM emulation generated a short sentence in about
 0.9 seconds and a selected word at 0.5× in about 0.7 seconds, including
 startup. These are not measurements on a physical Era.

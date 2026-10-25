@@ -1,10 +1,11 @@
 # PocketBook Era fork
 
 Offline English read-aloud through the original Era's built-in speaker,
-targeting **U700.6.10.3209** and **KOReader 2026.03**. Version **0.6.3.6**
+targeting **U700.6.10.3209** and **KOReader 2026.03**. Version **0.6.3.7**
 adds **RHVoice/SLT (American English)** as another offline TTS engine,
 alongside **sanoTTS/Kristin**, eSpeak NG and **Read word**. Your current
-engine remains selected. To try SLT, choose **Tools → Audiobook Read-Along →
+engine remains selected. RHVoice clips on the Era speaker include a 350 ms
+silent lead-in to protect their beginnings while the firmware output opens. To try SLT, choose **Tools → Audiobook Read-Along →
 Voice settings → TTS engine → RHVoice (SLT, American English)**.
 At slower speeds it now uses pitch-preserving audio tempo conversion: Kristin
 renders at its native pace, then Sonic slows the finished clip. Existing

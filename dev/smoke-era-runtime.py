@@ -115,6 +115,19 @@ def main():
             rh_paths.append(path)
             assert not list(root.glob(path.name + ".rhvoice.*")), "RHVoice must not leave partial WAVs"
         assert 1.8 < rh_durations[1] / rh_durations[0] < 2.2, "RHVoice honors the selected half speed"
+        # Speaker wake-up guard must prepend silence without trimming,
+        # fading, resampling or otherwise changing a single speech sample.
+        for index, text, speed in [(0, "Hello from your PocketBook reader.", "1.0"), (2, "reader", "0.5")]:
+            rh_text.write_text(text)
+            guarded = root / f"rhvoice-guard-{index}.wav"
+            subprocess.run([args.qemu, str(rh / "rhvoice-slt"), "--input", str(rh_text),
+                            "--output", str(guarded), "--speed", speed, "--lead-in-ms", "350"],
+                           capture_output=True, check=True, timeout=30)
+            with wave.open(str(rh_paths[index])) as original, wave.open(str(guarded)) as padded:
+                assert original.getframerate() == padded.getframerate() == 24000
+                assert padded.getnframes() == original.getnframes() + 8400
+                assert padded.readframes(8400) == bytes(16800), "Guard is exactly 350 ms of silence"
+                assert padded.readframes(padded.getnframes()) == original.readframes(original.getnframes()), "Every speech sample, including the first and last, must be unchanged"
         failed = root / "rhvoice-missing-data.wav"
         result = subprocess.run([args.qemu, str(rh / "rhvoice-slt"), "--data", str(root / "missing-data"),
                                  "--input", str(rh_text), "--output", str(failed), "--speed", "0.5"],

@@ -87,11 +87,24 @@ local r=request("don't; $(touch /tmp/not-a-command)")
 check(r.contents=="don't; $(touch /tmp/not-a-command)", "book text is written literally to a file")
 check(not launched:find("touch /tmp/not-a-command",1,true), "book text cannot become shell code")
 check(launched:find("--speed '0.500'",1,true) and launched:find("--volume '0.750'",1,true), "pass the saved speed and volume to RHVoice")
+check(launched:find("--lead-in-ms 350",1,true), "Era speaker gets a short clip-start guard")
 check(r.result()==0 and type(r.poll)=="function", "synthesis returns to the UI before audio is ready")
 finish(r,"0",200)
 local n,ok=r.result()
 check(n==1 and ok and e.current_audio_file==r.output, "successful audio is delivered once")
+check(e:getAudioLeadInMs()==350, "guard duration is attached to this completed clip")
+e.getWavDurationMs=function() return 1350 end
+check(e:getAudioDurationMs()==1000, "speech timing excludes the speaker guard")
+e.current_audio_file="different.wav"
+check(e:getAudioLeadInMs()==0, "other clips cannot inherit the old guard")
+e.current_audio_file=r.output
 os.remove(r.output)
+
+settings.pb_alsa_device="tts_sm"
+local no_guard=request("another output")
+check(not launched:find("--lead-in-ms",1,true), "other audio routes keep their original PCM")
+finish(no_guard,"0",200);os.remove(no_guard.output)
+settings.pb_alsa_device=nil
 
 r=request("cancelled word")
 e:stop();e.current_audio_file="newer.wav"

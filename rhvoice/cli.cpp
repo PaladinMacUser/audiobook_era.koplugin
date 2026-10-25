@@ -14,6 +14,7 @@
 struct Output {
     FILE *file;
     uint32_t rate = 0, samples = 0;
+    uint32_t lead_ms = 0, lead_samples = 0;
 };
 static void le16(FILE *f, uint16_t n) { fputc(n & 255, f); fputc(n >> 8, f); }
 static void le32(FILE *f, uint32_t n) { le16(f, n & 65535); le16(f, n >> 16); }
@@ -28,6 +29,16 @@ static int set_rate(int rate, void *userdata) {
     Output *out = static_cast<Output *>(userdata);
     if (rate < 8000 || rate > 48000 || (out->samples && out->rate != (unsigned)rate)) return 0;
     out->rate = rate;
+    if (!out->samples && out->lead_ms) {
+        static const short silence[1024] = {};
+        out->lead_samples = rate * out->lead_ms / 1000;
+        while (out->samples < out->lead_samples) {
+            unsigned n = out->lead_samples - out->samples;
+            if (n > 1024) n = 1024;
+            if (fwrite(silence, 2, n, out->file) != n) return 0;
+            out->samples += n;
+        }
+    }
     return 1;
 }
 static int speech(const short *samples, unsigned count, void *userdata) {
@@ -46,6 +57,7 @@ static bool number(const char *text, double min, double max, double &value) {
 int main(int argc, char **argv) {
     std::string input, output, data;
     double speed = 1, volume = 1;
+    double lead_ms = 0;
     for (int i = 1; i < argc; i += 2) {
         if (i + 1 >= argc) return 2;
         std::string flag = argv[i];
@@ -54,6 +66,7 @@ int main(int argc, char **argv) {
         else if (flag == "--data") data = argv[i + 1];
         else if (flag == "--speed") { if (!number(argv[i + 1], 0.25, 2, speed)) return 2; }
         else if (flag == "--volume") { if (!number(argv[i + 1], 0, 1, volume)) return 2; }
+        else if (flag == "--lead-in-ms") { if (!number(argv[i + 1], 0, 2000, lead_ms)) return 2; }
         else return 2;
     }
     if (input.empty() || output.empty()) return 2;
@@ -71,6 +84,7 @@ int main(int argc, char **argv) {
     std::string text((std::istreambuf_iterator<char>(source)), std::istreambuf_iterator<char>());
     if (!source.eof() && source.fail()) return 2;
     Output out;
+    out.lead_ms = static_cast<uint32_t>(lead_ms);
     std::string temporary = output + ".rhvoice.XXXXXX";
     int fd = mkstemp(&temporary[0]);
     if (fd < 0) return 1;
@@ -92,7 +106,7 @@ int main(int argc, char **argv) {
     params.punctuation_mode = RHVoice_punctuation_none;
     RHVoice_message message = engine ? RHVoice_new_message(engine, text.data(), text.size(),
         RHVoice_message_text, &params, &out) : NULL;
-    bool ok = message && RHVoice_speak(message) && out.samples && out.rate && !ferror(out.file);
+    bool ok = message && RHVoice_speak(message) && out.samples > out.lead_samples && out.rate && !ferror(out.file);
     if (message) RHVoice_delete_message(message);
     if (engine) RHVoice_delete_tts_engine(engine);
     if (ok) header(out.file, out.rate, out.samples);

@@ -910,6 +910,10 @@ function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
     if self.backend == self.BACKENDS.RHVOICE then
         cmd = cmd .. string.format(" --volume '%.3f'", self.volume or 1.0)
     end
+    local lead_in_ms = self.backend == self.BACKENDS.RHVOICE
+        and self:supportsPocketBookSpeaker() and self:getPocketBookAudioDevice() == "era-speaker"
+        and 350 or 0
+    if lead_in_ms > 0 then cmd = cmd .. " --lead-in-ms " .. lead_in_ms end
     local done_marker = audio_file .. ".done"
     local log_file = self.backend == self.BACKENDS.RHVOICE
         and "/tmp/.rhvoice_last.log" or "/tmp/.native_tts_last.log"
@@ -948,6 +952,8 @@ function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
 
             if exit_code == "0" and size > 44 then
                 engine.current_audio_file = audio_file
+                engine._audio_lead_in_file = audio_file
+                engine._audio_lead_in_ms = lead_in_ms
                 engine:generateTimingEstimates(engine._native_tts_text or text)
                 os.remove(log_file)
                 if callback then callback(true, engine.timing_data) end
@@ -3863,6 +3869,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     else
         self.playback_latency_ms = 0
     end
+    self.playback_latency_ms = self.playback_latency_ms + self:getAudioLeadInMs()
     -- Scale timing data to match real audio duration
     if real_duration_ms > 0 and #self.timing_data > 0 then
         local estimated_total = self.timing_data[#self.timing_data].end_time
@@ -6512,7 +6519,12 @@ Get actual audio duration from the current WAV file.
 @return number Duration in milliseconds, or 0 on error
 --]]
 function TTSEngine:getAudioDurationMs()
-    return self:getWavDurationMs(self.current_audio_file)
+    return math.max(0, self:getWavDurationMs(self.current_audio_file) - self:getAudioLeadInMs())
+end
+
+function TTSEngine:getAudioLeadInMs()
+    return self.current_audio_file and self.current_audio_file == self._audio_lead_in_file
+        and (self._audio_lead_in_ms or 0) or 0
 end
 
 --[[--
