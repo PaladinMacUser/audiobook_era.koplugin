@@ -16,7 +16,18 @@ local function pump(until_true,seconds)
 end
 package.loaded['ui/uimanager']=ui
 package.loaded['ui/time']={to_s=function(s) return s end}
+-- KOReader/LuaSocket can define sendto before the plugin is loaded. FFI
+-- declarations are global: exercise both orders, not only a fresh Lua VM.
+local load_order=arg[1] or 'standalone'
+local function load_socket_header()
+    ffi.cdef[[
+        struct sockaddr { unsigned short sa_family; char sa_data[14]; };
+        long sendto(int, const void *, size_t, int, const struct sockaddr *, unsigned int);
+    ]]
+end
+if load_order=='koreader-first' then load_socket_header() end
 local Client=dofile('rhvoiceclient.lua')
+if load_order=='plugin-first' then load_socket_header() end
 local lfs=require('lfs')
 local checks=0
 local function check(v,msg) checks=checks+1;assert(v,msg) end
@@ -59,4 +70,4 @@ check(count==before,'shutdown never delivers pending callback')
 request('reader');check(result==false and not c:alive(),'closed client cannot restart worker')
 for name in lfs.dir(c.directory) do if name~='.' and name~='..' then os.remove(c.directory..'/'..name) end end
 lfs.rmdir(c.directory);os.remove(binary)
-print('ok - '..checks..' resident worker IPC and cancellation checks passed')
+print('ok - '..checks..' resident worker IPC and cancellation checks passed ('..load_order..')')

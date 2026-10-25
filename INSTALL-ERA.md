@@ -1,7 +1,9 @@
 # PocketBook Era: English read-aloud through the built-in speaker
 
 Target: **original Era (PB700), firmware U700.6.10.3209, KOReader 2026.03**.
-Version **0.7.0** adds pronunciation caching, a resident RHVoice worker,
+Version **0.7.1** fixes the RHVoice Preview crash in KOReader's shared LuaJIT
+environment (a socket address needed an explicit pointer conversion).
+It retains pronunciation caching, a resident RHVoice worker,
 independent word speed and repeat, voice previews, and audio diagnostics.
 It includes RHVoice/SLT, sanoTTS/Kristin, eSpeak NG, pitch-preserving tempo
 and **Read word**. Your existing engine, reading speed and output remain
@@ -17,7 +19,7 @@ emulation in the development check; actual Era speed needs a device test.
 2. If an older `audiobook.koplugin` or `audiobook_era.koplugin` is installed,
    move it outside the `plugins` folder as a backup. Keep only one installed
    copy of this plugin.
-3. Extract **`audiobook-era-v0.7.0.zip`**. Copy its **`audiobook.koplugin`**
+3. Extract **`audiobook-era-v0.7.1.zip`**. Copy its **`audiobook.koplugin`**
    folder into **`applications/koreader/plugins/`** on the Era's USB drive.
    The device path is `/mnt/ext1/applications/koreader/plugins/audiobook.koplugin/`.
    Do not use GitHub's “Source code” ZIP: it lacks the speech runtime.
@@ -36,14 +38,14 @@ emulation in the development check; actual Era speed needs a device test.
 No Wi-Fi, Bluetooth speaker, root access, or external TTS service is needed.
 The stock PocketBook TTS voice packages are separate from this plugin's voice.
 
-At 1.0×, try **Read word** again after installing this build. Version 0.7.0
+At 1.0×, try **Read word** again after installing this build. Version 0.7.1
 adds a 350 ms silent speaker lead-in before each RHVoice clip to protect its
 beginning while the firmware audio path opens. It does not change the speech
 samples or rate, and estimated highlighting accounts for the delay.
 
 ## KOReader 2026.03 touch crash on the original Era
 
-Version 0.7.0 includes a compatibility guard for
+Version 0.7.1 includes a compatibility guard for
 `frontend/device/gesturedetector.lua:295: attempt to index field 'initial_tev'`.
 An interrupted touch contact may have no origin when KOReader checks a
 two-finger tap. The plugin rejects that invalid two-finger gesture and lets
@@ -133,7 +135,7 @@ larger Piper/Danny alternative can be included by building with `--with-piper`.
 ### Slower speech without stretching the voice model
 
 If 1.0× speech is too fast, keep **Voice settings → Speech rate** at **0.5×**
-or **0.75×**. On the Era, version 0.7.0 renders Kristin at its native pace
+or **0.75×**. On the Era, version 0.7.1 renders Kristin at its native pace
 and changes the completed WAV's tempo with Sonic, preserving pitch. It no
 longer doubles the model's phoneme durations for 0.5× playback. The same
 processing applies to **Read word**. Your saved speed is retained.
@@ -189,5 +191,5 @@ Run `LUAJIT=luajit sh dev/run_pocketbook_tests.sh` for the native ABI and engine
 regression tests. These require a host C compiler and LuaJIT, not the reader.
 Run `python3 dev/test_wav_tempo.py` for pitch, duration, word-ending and
 malformed-input checks of the tempo converter.
-Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.7.0.zip` with
+Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.7.1.zip` with
 `qemu-arm` installed to verify the packaged ARM English engine and player.

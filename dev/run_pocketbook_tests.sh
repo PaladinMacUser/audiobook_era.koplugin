@@ -22,4 +22,6 @@ LD_LIBRARY_PATH="$test_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "${LUAJIT:-luaj
 "${LUAJIT:-luajit}" dev/test_gesture_guard.lua
 "${LUAJIT:-luajit}" dev/test_word_cache.lua
 "${LUAJIT:-luajit}" dev/test_rhvoice_client.lua
+"${LUAJIT:-luajit}" dev/test_rhvoice_client.lua koreader-first
+"${LUAJIT:-luajit}" dev/test_rhvoice_client.lua plugin-first
 "${LUAJIT:-luajit}" dev/test_speech_tools.lua

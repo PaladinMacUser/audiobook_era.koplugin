@@ -109,3 +109,9 @@ one. Lua also terminates a worker whose request exceeds 60 seconds.
 
 The ARM smoke test covers worker reuse, changed speed, exact speaker lead-in,
 cancellation followed by another request, invalid input, idle exit and restart.
+
+Version 0.7.1 fixes a Preview crash when KOReader has already declared
+`sendto` with a `const struct sockaddr *` parameter. The Lua client uses the
+standard socket signature and explicitly casts its private Unix-address
+struct to that pointer type. The IPC suite runs with both socket-header
+load orders, as well as in a fresh Lua VM.

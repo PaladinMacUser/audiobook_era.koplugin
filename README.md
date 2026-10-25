@@ -1,8 +1,10 @@
 # PocketBook Era fork
 
 Offline English read-aloud through the original Era's built-in speaker,
-targeting **U700.6.10.3209** and **KOReader 2026.03**. Version **0.7.0**
-adds a bounded word-pronunciation cache, one resident RHVoice process,
+targeting **U700.6.10.3209** and **KOReader 2026.03**. Version **0.7.1**
+fixes the RHVoice Preview crash caused by KOReader's preloaded socket FFI
+declaration. It includes a bounded word-pronunciation cache, one resident
+RHVoice process,
 independent word speed and repeat, previews beside installed engines, and
 persistent audio diagnostics with a spoken test. It also includes a compatibility guard for KOReader 2026.03’s missing touch-origin
 crash on the original Era, and adds **RHVoice/SLT (American English)** as another offline TTS engine,

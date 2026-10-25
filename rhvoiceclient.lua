@@ -4,7 +4,8 @@ local ffi = require("ffi")
 local UIManager = require("ui/uimanager")
 local time = require("ui/time")
 pcall(ffi.cdef, [[typedef struct { unsigned short family; char path[108]; } ab_rh_address;]])
-pcall(ffi.cdef, [[int socket(int,int,int); long sendto(int,const void*,size_t,int,const void*,unsigned int);]])
+pcall(ffi.cdef, [[struct sockaddr; int socket(int,int,int);
+    long sendto(int,const void*,size_t,int,const struct sockaddr*,unsigned int);]])
 pcall(ffi.cdef, [[int close(int); int getpid(void); int kill(int,int); char *mkdtemp(char*);]])
 local Client = {}; Client.__index = Client
 local function quote(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
@@ -94,7 +95,10 @@ function Client:request(text,output,rate,volume,lead,current,callback)
             if fd>=0 then
                 local address=ffi.new("ab_rh_address");address.family=1
                 ffi.copy(address.path,self.socket)
-                local count=ffi.C.sendto(fd,job.path,#job.path,0,address,2+#self.socket+1)
+                -- KOReader may already have declared sendto with sockaddr*.
+                -- The private Unix-address struct needs an explicit pointer cast.
+                local count=ffi.C.sendto(fd,job.path,#job.path,0,
+                    ffi.cast("const struct sockaddr *",address),2+#self.socket+1)
                 ffi.C.close(fd);fd=nil
                 if count==#job.path then job.sent=true end
             else fd=nil end
