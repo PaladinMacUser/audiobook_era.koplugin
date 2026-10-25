@@ -7440,7 +7440,8 @@ setting, or for the session by the RTF auto-degrade escalation.
 --]]
 function TTSEngine:_piperLowResource()
     if self._session_low_resource then return true end
-    if self.plugin and self.plugin:getSetting("piper_low_resource", false) then
+    local era_piper = self.backend == self.BACKENDS.PIPER and self:supportsPocketBookSpeaker()
+    if self.plugin and self.plugin:getSetting("piper_low_resource", era_piper) then
         return true
     end
     return false
@@ -7454,10 +7455,18 @@ by the RTF auto-degrade escalation.
 --]]
 function TTSEngine:_piperAggressiveSplit()
     if self._session_split_long then return true end
-    if self.plugin and self.plugin:getSetting("piper_aggressive_split", false) then
+    local era_piper = self.backend == self.BACKENDS.PIPER and self:supportsPocketBookSpeaker()
+    if self.plugin and self.plugin:getSetting("piper_aggressive_split", era_piper) then
         return true
     end
     return false
+end
+
+-- On the Era an explicit Piper choice favors the neural voice over instant
+-- playback. Genuine synthesis failures still stop with an actionable error.
+function TTSEngine:preferPiperVoice()
+    return self.backend == self.BACKENDS.PIPER and self.plugin
+        and self.plugin:getSetting("piper_keep_voice", self:supportsPocketBookSpeaker()) or false
 end
 
 return TTSEngine

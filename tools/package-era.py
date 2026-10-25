@@ -24,7 +24,7 @@ def package(runtime_zip, output):
             if info.is_dir() or not name.startswith(PREFIX):
                 continue
             relative = name[len(PREFIX):]
-            if (relative.startswith(("espeak-ng/lib/", "espeak-ng/share/espeak-ng-data/", "wav-play/"))
+            if (relative.startswith(("espeak-ng/lib/", "espeak-ng/share/espeak-ng-data/", "wav-play/", "piper/"))
                     or relative == "espeak-ng/bin/espeak-ng.bin"):
                 content[name] = (upstream.read(info), info.external_attr >> 16)
     # Current source always replaces upstream Lua, including the fork updater.
@@ -40,7 +40,10 @@ def package(runtime_zip, output):
     required = ("pocketbookaudio.lua", "ttsengine.lua", "main.lua", "updater.lua",
                 "espeak-ng/bin/espeak-ng.bin", "espeak-ng/lib/ld-linux-armhf.so.3",
                 "espeak-ng/lib/libespeak-ng.so.1", "espeak-ng/share/espeak-ng-data/en_dict",
-                "wav-play/wav-play.bin", "wav-play/lib/libasound.so.2")
+                "wav-play/wav-play.bin", "wav-play/lib/libasound.so.2",
+                "piper/piper.bin", "piper/lib/libonnxruntime.so.1.14.1",
+                "piper/lib/libpiper_phonemize.so.1", "piper/espeak-ng-data/phontab",
+                "piper/en_US-danny-low.onnx", "piper/en_US-danny-low.onnx.json")
     for relative in required:
         if PREFIX + relative not in content:
             raise ValueError("Missing release component: " + relative)
@@ -60,7 +63,7 @@ def package(runtime_zip, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-zip", type=Path, help="Use a previously downloaded v0.6.3 runtime ZIP")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.2.zip")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.3.zip")
     args = parser.parse_args()
     if args.runtime_zip:
         package(args.runtime_zip, args.output)

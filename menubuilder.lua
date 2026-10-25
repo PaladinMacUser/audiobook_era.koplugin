@@ -176,6 +176,7 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
     -- while Piper warms up.  Only relevant when both backends are usable.
     if plugin.tts_engine
        and plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.PIPER
+       and not plugin.tts_engine:preferPiperVoice()
        and plugin.tts_engine.espeak_bin then
         table.insert(menu, {
             text = _("Quick start with espeak (while Piper loads)"),
@@ -189,17 +190,25 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
     end
 
     -- Piper mitigations for underpowered devices (single-core, low RAM).
-    -- Both are OFF by default; the RTF auto-degrade can also enable them
-    -- for a session when Piper measurably cannot keep up with playback.
+    -- Enabled by default on Era; elsewhere the RTF mitigation can enable
+    -- them for a session when Piper cannot keep up with playback.
     if plugin.tts_engine
        and plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.PIPER then
         table.insert(menu, {
+            text = _("Keep Piper voice (wait for synthesis)"),
+            checked_func = function() return plugin.tts_engine:preferPiperVoice() end,
+            callback = function()
+                plugin:setSetting("piper_keep_voice", not plugin.tts_engine:preferPiperVoice())
+            end,
+            help_text = _("Wait for the selected neural voice instead of using espeak while Piper loads or synthesizes slowly. Enabled by default on the PocketBook Era. Initial speech and pauses between sentences can take longer."),
+        })
+        table.insert(menu, {
             text = _("Low-resource mode (slow devices)"),
             checked_func = function()
-                return plugin:getSetting("piper_low_resource", false)
+                return plugin.tts_engine:_piperLowResource()
             end,
             callback = function()
-                plugin:toggleSetting("piper_low_resource", false)
+                plugin:toggleSetting("piper_low_resource", plugin.tts_engine:supportsPocketBookSpeaker())
             end,
             help_text = _(
                 "Synthesizes one sentence at a time and prioritizes the "
@@ -210,10 +219,10 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
         table.insert(menu, {
             text = _("Split sentences aggressively for Piper"),
             checked_func = function()
-                return plugin:getSetting("piper_aggressive_split", false)
+                return plugin.tts_engine:_piperAggressiveSplit()
             end,
             callback = function()
-                plugin:toggleSetting("piper_aggressive_split", false)
+                plugin:toggleSetting("piper_aggressive_split", plugin.tts_engine:supportsPocketBookSpeaker())
             end,
             help_text = _(
                 "Limits synthesis chunks to about 150 characters instead "

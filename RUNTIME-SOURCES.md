@@ -1,12 +1,13 @@
 # Bundled runtime provenance
 
-The Era ZIP reuses unmodified ARMv7 hard-float eSpeak NG, glibc and ALSA
-runtime files and wav-play from
+The Era ZIP reuses unmodified ARMv7 hard-float Piper, eSpeak NG, glibc and
+ALSA runtime files, wav-play and the `en_US-danny-low` English voice from
 [upstream v0.6.3](https://github.com/stradichenko/audiobook.koplugin/releases/tag/v0.6.3).
 The input ZIP SHA256 is
 `a479409534cea65af60923cab69716a9affcb9357ab160f4bad5c03925d96b9a`.
-Piper, sanoTTS, MBROLA databases and audiobook decoders are omitted from this
-English speech package. The read-aloud engine works offline.
+sanoTTS, MBROLA databases and audiobook decoders are omitted. Both bundled
+speech engines work offline. Piper includes its own phonemizer data, shared
+libraries, neural voice weights and model configuration (16 kHz English).
 
 Runtime source and build recipes:
 
@@ -15,6 +16,9 @@ Runtime source and build recipes:
 - `cross-build-wav-play.nix` and `wav-play.c` (WAV player and ALSA dependency)
 - `package-for-kobo.sh` in the source repository (collects the runtime closure)
 - [eSpeak NG](https://github.com/espeak-ng/espeak-ng), GPL-3.0-or-later
+- [Piper](https://github.com/rhasspy/piper/tree/2023.11.14-2), MIT
+- [ONNX Runtime](https://github.com/microsoft/onnxruntime/tree/v1.14.1), MIT
+- [Danny voice source and model card](https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/danny/low)
 - [alsa-lib](https://github.com/alsa-project/alsa-lib), LGPL-2.1-or-later
 - [glibc](https://sourceware.org/git/glibc.git), LGPL-2.1-or-later
 

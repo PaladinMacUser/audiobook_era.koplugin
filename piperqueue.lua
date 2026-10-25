@@ -59,6 +59,12 @@ local function _pool_count(engine)
     if engine and engine.backend == engine.BACKENDS.SANOTTS then
         return 1
     end
+    -- The Era has two cores but only 512 MB RAM. Two ONNX processes each
+    -- load a complete neural model; keep one resident model on this device.
+    if engine and engine.backend == engine.BACKENDS.PIPER
+            and engine.supportsPocketBookSpeaker and engine:supportsPocketBookSpeaker() then
+        return 1
+    end
     return SERVER_COUNT
 end
 

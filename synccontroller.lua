@@ -922,6 +922,7 @@ function SyncController:readNextSentence()
         -- While Piper hasn't delivered any audio yet, keep playing via
         -- espeak so the user never hits a dead stall on slow hardware.
         local use_espeak_early = self.plugin
+            and not self.tts_engine:preferPiperVoice()
             and self.plugin:getSetting("espeak_cold_start", true)
             and self.tts_engine.espeak_bin
             and not self._piper_warmed_up
@@ -1133,6 +1134,7 @@ function SyncController:readNextSentence()
         -- espeak-ng (~300ms) so there's no dead silence while Piper
         -- warms up.  Subsequent sentences use Piper as normal.
         local use_espeak_fallback = self.plugin
+            and not self.tts_engine:preferPiperVoice()
             and self.plugin:getSetting("espeak_cold_start", true)
             and self.tts_engine.espeak_bin
             and not self._piper_warmed_up
@@ -3050,6 +3052,16 @@ through to readNextSentence() only when espeak is unavailable or fails.
 @return boolean  true when the sentence is being played via espeak
 --]]
 function SyncController:_playViaEspeakOrSkip(sentence, reason)
+    if self.tts_engine and self.tts_engine:preferPiperVoice() then
+        logger.err("SyncController: Piper voice could not be generated:", reason)
+        self:stop()
+        local InfoMessage = require("ui/widget/infomessage")
+        UIManager:show(InfoMessage:new{
+            text = _("Piper could not generate this sentence.\n\nTry again, or choose espeak-ng in Voice settings for faster speech. Generate a bug report if the problem repeats."),
+            timeout = 10,
+        })
+        return false
+    end
     if self.tts_engine and self.tts_engine.espeak_bin then
         logger.warn("SyncController: espeak fallback for sentence",
             self.reading_sentence_idx, "(", reason, ")")
@@ -3090,6 +3102,7 @@ modified, and Piper is tried again on the next playback session.
 function SyncController:_checkPiperRtfEscalation()
     if self._piper_abandoned then return end
     if not self.tts_engine or not self.tts_engine._piper then return end
+    if self.tts_engine:preferPiperVoice() then return end
     if self.tts_engine.backend ~= self.tts_engine.BACKENDS.PIPER and self.tts_engine.backend ~= self.tts_engine.BACKENDS.SANOTTS then return end
     local pq = self.tts_engine._piper
     local rtf = pq:getRtf()

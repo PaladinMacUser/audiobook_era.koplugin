@@ -1,6 +1,7 @@
 # PocketBook Era fork
 
-English read-aloud through the original Era's built-in speaker, targeting
+English read-aloud through the original Era's built-in speaker, with
+**Piper neural TTS + the bundled English Danny voice** and eSpeak NG, targeting
 firmware **U700.6.10.3209** and **KOReader 2026.03**. See
 [installation and device checks](INSTALL-ERA.md) and
 [the Era package workflow](../../actions/workflows/era.yml).
@@ -8,10 +9,15 @@ firmware **U700.6.10.3209** and **KOReader 2026.03**. See
 This fork prepares the firmware audio route with `configureAudioOutput()`,
 checks `AUDIO_OUT_SPEAKER`, and sends speech to the firmware's named loopback
 PCM without changing the codec mixer. It does not depend on `PlayFile`, which
-firmware 6.10 removed. Initial speaker speech has been confirmed on this
-firmware. Version 0.6.3.2 fixes the reported word-highlighting crash and
-starts with the working `hwout_mix` route. Continuous playback still needs
-a device retest.
+firmware 6.10 removed. Speaker playback and word highlighting are confirmed
+working in 0.6.3.2. Version 0.6.3.3 adds the Piper runtime and voice, limits
+Piper to one resident model on the Era, and defaults to waiting for the
+neural voice instead of switching to eSpeak when loading or slow.
+
+After installing, select **Voice settings → TTS engine → Piper** and keep
+**Era built-in speaker** selected. Piper works offline; startup and pauses
+can take longer than eSpeak on the reader. Its on-device performance still
+needs verification.
 
 Build the installable English ZIP with `python3 tools/package-era.py`.
 The in-app updater points to this fork so an upstream update cannot replace
