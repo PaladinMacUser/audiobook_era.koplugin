@@ -118,8 +118,10 @@ local CP1252_UNICODE = {
     [0x0178] = 0x9F, -- Ÿ
 }
 
+local instance_sequence=0
 function TTSEngine:new(o)
     o = o or {}
+    instance_sequence=instance_sequence+1;o._instance_id=instance_sequence
     setmetatable(o, self)
     self.__index = self
     o.rate = o.rate or self.DEFAULT_RATE
@@ -760,6 +762,14 @@ Synthesize text and return timing metadata.
 --]]
 function TTSEngine:synthesize(text, callback)
     self.synthesis_generation = (self.synthesis_generation or 0) + 1
+    local generation=self.synthesis_generation
+    local original_callback=callback
+    callback=function(ok,timing)
+        if not ok and generation==self.synthesis_generation and self._failure_recorded_generation~=generation then
+            self:recordAudioFailure("synthesis","The selected engine could not generate audio")
+        end
+        if original_callback then original_callback(ok,timing) end
+    end
     if not self.backend then
         logger.err("TTSEngine: No TTS backend available")
         -- Show error to user
@@ -881,7 +891,7 @@ Runs the helper once per sentence and polls a .done marker.
 function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
     local temp_dir = "/tmp"
     self.file_counter = (self.file_counter or 0) + 1
-    local input_file = temp_dir .. "/audiobook_native_" .. os.time() .. "_" .. self.file_counter .. ".txt"
+    local input_file = temp_dir .. "/audiobook_native_" .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".txt"
 
     local f = io.open(input_file, "wb")
     if not f then
@@ -986,9 +996,50 @@ function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
     return nil
 end
 
---[[--
-Return the configured FIFO path for the native TTS daemon.
---]]
+-- Preserve the latest synthesis/output failure across restarts.
+function TTSEngine:recordAudioFailure(stage,message)
+    self._failure_recorded_generation=self.synthesis_generation
+    self._failure_serial=(self._failure_serial or 0)+1
+    local Diagnostics=dofile(_utils_dir.."speechdiagnostics.lua")
+    return Diagnostics.record(self.plugin,self,stage,message)
+end
+
+function TTSEngine:_synthesizeRHVoice(text,audio_file,callback)
+    local owner=self.plugin or self
+    local client=owner._rhvoice_service
+    if not client or client.closed or client.binary~=self.rhvoice_bin then
+        if client then client:shutdown() end
+        local Client=dofile(_utils_dir.."rhvoiceclient.lua")
+        client=self.rhvoice_bin and Client:new{binary=self.rhvoice_bin}
+        owner._rhvoice_service=client
+    end
+    if not client then
+        self:recordAudioFailure("RHVoice startup","Cannot create the resident RHVoice session")
+        if callback then callback(false) end;return false
+    end
+    if self._rhvoice_pending then self._rhvoice_pending:cancel() end
+    local generation=self.synthesis_generation
+    local lead=self:supportsPocketBookSpeaker() and self:getPocketBookAudioDevice()=="era-speaker" and 350 or 0
+    local function current() return self.synthesis_generation==generation end
+    self._rhvoice_pending=client:request(text,audio_file,self.rate or 1,self.volume or 1,lead,current,
+        function(ok,reason)
+            if not current() then return end
+            self._rhvoice_pending=nil
+            if ok and WavUtils.getDurationMs(audio_file)<=0 then
+                ok=false;reason="RHVoice returned an invalid or empty WAV";os.remove(audio_file)
+            end
+            if ok then
+                self.current_audio_file=audio_file
+                self._audio_lead_in_file=audio_file;self._audio_lead_in_ms=lead
+                self:generateTimingEstimates(text)
+            else
+                self:recordAudioFailure("RHVoice",reason or "Resident synthesis failed")
+            end
+            if callback then callback(ok,ok and self.timing_data or nil) end
+        end)
+    return nil
+end
+
 function TTSEngine:_nativeFifoPath()
     local configured = self.plugin:getSetting("native_fifo_path", "")
     if configured and configured ~= "" then
@@ -1012,7 +1063,7 @@ function TTSEngine:_synthesizeNativeDaemon(text, audio_file, speed, callback)
 
     local temp_dir = "/tmp"
     self.file_counter = (self.file_counter or 0) + 1
-    local input_file = temp_dir .. "/audiobook_native_" .. os.time() .. "_" .. self.file_counter .. ".txt"
+    local input_file = temp_dir .. "/audiobook_native_" .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".txt"
     local f = io.open(input_file, "wb")
     if not f then
         logger.err("TTSEngine: cannot write native daemon input file")
@@ -1191,7 +1242,7 @@ function TTSEngine:synthesizeCommand(text, callback)
     -- Use Android cache dir when running on Android (no /tmp); otherwise /tmp
     local temp_dir = self._android_tts and self._android_tts:getTempDir() or "/tmp"
     self.file_counter = (self.file_counter or 0) + 1
-    local audio_file = temp_dir .. "/audiobook_tts_" .. os.time() .. "_" .. self.file_counter .. ".wav"
+    local audio_file = temp_dir .. "/audiobook_tts_" .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".wav"
     local timing_file = temp_dir .. "/audiobook_timing_" .. os.time() .. ".txt"
     local cmd
     -- Limit text length to avoid command line issues and MBROLA phoneme
@@ -1308,7 +1359,7 @@ function TTSEngine:synthesizeCommand(text, callback)
             safe_text = '<speak>' .. safe_text .. '</speak>'
             -- Write SSML to a temp file (avoids shell escaping entirely)
             self.file_counter = (self.file_counter or 0) + 1
-            local ssml_file = temp_dir .. "/audiobook_ssml_" .. os.time() .. "_" .. self.file_counter .. ".xml"
+            local ssml_file = temp_dir .. "/audiobook_ssml_" .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".xml"
             local sf = io.open(ssml_file, "w")
             if sf then
                 sf:write(safe_text)
@@ -1354,10 +1405,7 @@ function TTSEngine:synthesizeCommand(text, callback)
         -- Platform-native TTS via user-supplied helper binary/script.
         return self:_synthesizeNative(text, audio_file, callback)
     elseif self.backend == self.BACKENDS.RHVOICE then
-        -- The bundled static adapter uses the same file-in/file-out
-        -- protocol, independently of user-supplied native helper settings.
-        return self:_synthesizeNativeOneshot(text, audio_file,
-            string.format("%.3f", self.rate or 1.0), callback)
+        return self:_synthesizeRHVoice(text,audio_file,callback)
     end
     if not cmd then
         logger.err("TTSEngine: Cannot create command for backend:", self.backend)
@@ -2058,7 +2106,7 @@ function TTSEngine:espeakSynthesizeFallback(text)
     if not self.espeak_bin then return nil end
     local temp_dir = self._android_tts and self._android_tts:getTempDir() or "/tmp"
     self.file_counter = (self.file_counter or 0) + 1
-    local audio_file = temp_dir .. "/audiobook_espeak_fb_" .. os.time() .. "_" .. self.file_counter .. ".wav"
+    local audio_file = temp_dir .. "/audiobook_espeak_fb_" .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".wav"
     local exec_prefix = ""
     local esp_data = self:_resolveEspeakDataPath()
     if self.espeak_static then
@@ -2322,7 +2370,7 @@ end
 function TTSEngine:_androidDispatchPrefetch(atts, text, slot_no)
     self.file_counter = (self.file_counter or 0) + 1
     local slot_path = atts:getTempDir() .. "/audiobook_prefetch_"
-        .. os.time() .. "_" .. self.file_counter .. ".wav"
+        .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".wav"
     -- Voice/language for THIS text, same selection the on-demand path uses.
     self:_androidSelectLanguage(atts, text)
     -- Dispatch with the same not-ready retry shape as the playback path:
@@ -2775,6 +2823,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     logger.dbg("TTSEngine: play() called, audio_file=", self.current_audio_file,
         "is_speaking=", self.is_speaking)
     if not self.current_audio_file then
+        self:recordAudioFailure("playback","No audio file to play")
         logger.err("TTSEngine: No audio file to play")
         UIManager:show(InfoMessage:new{
             text = _("No audio file to play."),
@@ -2784,7 +2833,14 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     end
     self.on_word_callback = on_word
     self.on_complete_callback = on_complete
-    self.on_fail_callback = on_fail
+    local failure_serial=self._failure_serial or 0
+    self.on_fail_callback = function()
+        if (self._failure_serial or 0)==failure_serial then
+            self:recordAudioFailure("playback","The selected audio player failed")
+        end
+        if on_fail then on_fail() end
+    end
+    if self.plugin then self.plugin._last_audio_engine=self.backend;self.plugin._last_audio_instance=self end
     self.is_speaking = true
     self.is_paused = false
     -- Start playback using system player (cached after first probe)
@@ -2796,6 +2852,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         self._cached_player = nil
     end
     if not player then
+        self:recordAudioFailure("audio output",self._pb_speaker_error or "No audio player found")
         logger.err("TTSEngine: No audio player found")
         self.player_error = true
         local msg
@@ -2829,6 +2886,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     if self._pb_speaker_active then
         local ok, err = self._pb_speaker:prepare()
         if not ok then
+            self:recordAudioFailure("Era speaker",err)
             logger.err("TTSEngine: Era speaker preparation failed:", err)
             self.is_speaking = false
             UIManager:show(InfoMessage:new{
@@ -6852,6 +6910,7 @@ function TTSEngine:_startProcessWatcher(bt_retry_allowed, skip_on_fail, conv_ret
                     engine.play_generation = (engine.play_generation or 0) + 1
                     engine._pb_speaker:reset()
                     logger.err("TTSEngine: Era speaker playback failed:", player_stderr)
+                    engine:recordAudioFailure("Era speaker",player_stderr or "No player status received")
                     UIManager:show(InfoMessage:new{
                         text = _("Speaker playback failed. Generate an Audiobook bug report.")
                             .. "\n\n" .. (player_stderr or "No player status received."):sub(1, 300),
@@ -7098,6 +7157,7 @@ end
 Stop playback.
 --]]
 function TTSEngine:stop()
+    if self._rhvoice_pending then self._rhvoice_pending:cancel();self._rhvoice_pending=nil end
     self.synthesis_generation = (self.synthesis_generation or 0) + 1
     -- Always bump generation and clear state, even if not speaking.
     -- This ensures stale scheduled callbacks (launchAndStart, checkProcess,
@@ -7219,6 +7279,7 @@ Uses SIGTERM (not SIGKILL) so GStreamer can close the BT audio sink
 gracefully and not leave the BT firmware in a bad state.
 --]]
 function TTSEngine:forceKillAll()
+    if self._rhvoice_pending then self._rhvoice_pending:cancel();self._rhvoice_pending=nil end
     self.synthesis_generation = (self.synthesis_generation or 0) + 1
     self._socket_clean = false
     -- Cancel any pending launchAndStart

@@ -56,24 +56,31 @@ end
 seed(Plugin._registerHighlightButtons,"UIManager",ui)
 seed(Plugin._registerDictButtons,"PLUGIN_PATH","./")
 local chosen, registered, highlight = {}, {}, {}
+local repeats=0
 local plugin = setmetatable({_init_ok=true,ui={
     dictionary={addToDictButtons=function(_, b) registered[b.id]=b end},
     highlight={addToHighlightDialog=function(_, id, fn) highlight[id]=fn end}},
+    repeatLastWord=function() repeats=repeats+1 end,
     readSelectedWord=function(_, text) chosen[#chosen+1]=text end}, {__index=Plugin})
 plugin:_registerDictButtons()
 check(registered.audiobook_read_word and registered.audiobook_read, "modern dictionary keeps both reading actions")
+check(registered.audiobook_repeat_word,"modern dictionary offers repeat")
+registered.audiobook_repeat_word.callback();check(repeats==1,"modern dictionary repeat uses the last word")
 check(registered.audiobook_read_word.text == "Read word", "exact requested button label")
 check(not registered.audiobook_read_word.show_func({is_wiki=true}), "exclude wiki actions")
 registered.audiobook_read_word.callback({word="lookup",highlight={selected_text={text="selected"}}})
 check(chosen[#chosen] == "selected", "modern dictionary uses the original selection")
 local legacy = {}
 plugin:onDictButtonsReady({lookupword="legacyword"},legacy)
-local word_button, aloud_button
+local word_button, aloud_button, repeat_button
 for _, row in ipairs(legacy) do for _, b in ipairs(row) do
     if b.id == "audiobook_read_word" then word_button=b end
     if b.id == "audiobook_read" then aloud_button=b end
+    if b.id == "audiobook_repeat_word" then repeat_button=b end
 end end
 check(word_button and aloud_button, "KOReader 2026.03 dictionary has both actions")
+check(repeat_button,"legacy dictionary offers repeat")
+repeat_button.callback();check(repeats==2,"legacy dictionary repeat uses last word")
 word_button.callback()
 check(chosen[#chosen] == "legacyword", "legacy dictionary passes only its selected word")
 plugin:_registerHighlightButtons()
@@ -83,4 +90,8 @@ highlight["15_read_word"](popup).callback()
 check(popup.closed, "close text-selection popup before playback")
 ui.scheduled[#ui.scheduled]()
 check(chosen[#chosen] == "snapshot", "selection text survives popup closure")
+local repeat_popup={onClose=function(self) self.closed=true end}
+highlight["15_repeat_word"](repeat_popup).callback()
+ui.scheduled[#ui.scheduled]()
+check(repeat_popup.closed and repeats==3,"text selection closes popup then repeats last word")
 print("ok - " .. checks .. " selected-word and menu integration checks passed")

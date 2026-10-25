@@ -251,6 +251,12 @@ function Audiobook:_registerHighlightButtons()
                 end,
             }
         end)
+        self.ui.highlight:addToHighlightDialog("15_repeat_word",function(this)
+            return {text=_("Repeat last word"),callback=function()
+                this:onClose()
+                UIManager:scheduleIn(0.3,function() self:repeatLastWord() end)
+            end}
+        end)
     end
 
 end
@@ -270,6 +276,11 @@ function Audiobook:_registerDictButtons()
     end
     local plugin = self
 
+    self.ui.dictionary:addToDictButtons({
+        id="audiobook_repeat_word",text=_("Repeat last word"),font_bold=false,conditional=true,
+        show_func=function(popup) return plugin._init_ok and not popup.is_wiki and not popup.is_wiki_fullpage end,
+        callback=function() plugin:repeatLastWord() end,
+    })
     self.ui.dictionary:addToDictButtons({
         id = "audiobook_read_word",
         text = _("Read word"), font_bold = false, conditional = true,
@@ -375,6 +386,9 @@ function Audiobook:_initSubmodules()
                 self.tts_engine.backend_cmd = self:getSetting("native_helper_path", "")
             end
             self.tts_engine:setRate(self:getSetting("speech_rate", 1.0))
+            if self:getSetting("word_speech_rate",nil)==nil then
+                self:setSetting("word_speech_rate",self.tts_engine.rate)
+            end
             self.tts_engine:setPitch(self:getSetting("speech_pitch", 50))
             self.tts_engine:setVolume(self:getSetting("speech_volume", 1.0))
             local mbrola_voice = self:getSetting("tts_mbrola_voice", "")
@@ -1182,6 +1196,10 @@ function Audiobook:addToMainMenu(menu_items)
                 help_text = _("Records the current audiobook or TTS session. Audio, video/screenshots, and optional touch events are saved to a folder on device storage."),
             },
             {
+                text = _("Audio diagnostics and test"),
+                sub_item_table_func=function() return MenuBuilder.buildAudioDiagnosticsMenu(self) end,
+            },
+            {
                 text = _("Generate bug report"),
                 callback = function()
                     BugReport.menuCallback(self)
@@ -1304,6 +1322,8 @@ function Audiobook:onDictButtonsReady(dict_popup, buttons)
             plugin:readSelectedWord(WordReader.dictionaryText(dict_popup))
         end,
     }})
+    table.insert(buttons,{{id="audiobook_repeat_word",text=_("Repeat last word"),font_bold=false,
+        callback=function() plugin:repeatLastWord() end}})
     
     -- Add "Read aloud from here" button at the end (below Wikipedia/Search/Close)
     table.insert(buttons, {{
@@ -1357,8 +1377,75 @@ function Audiobook:readSelectedWord(text)
     if not self._init_ok then self:_showInitError(); return end
     if not self.word_reader or not self.word_reader.selectedWord(text) then return end
     if not self:_audioOutputReady() then return end
+    local rate=self:getSetting("word_speech_rate",0.75)
+    local desired=setmetatable({rate=rate},{__index=self.tts_engine})
+    if self:getSetting("word_cache_enabled",true) and self.word_reader:wouldCoalesce(text,desired) then return end
     self:stopReadAlong()
+    self:_configureSpeechTools(self.tts_engine.backend,rate)
     self.word_reader:read(text)
+end
+
+function Audiobook:_ensureSpeechTools()
+    if self._speech_engine then return end
+    local Engine=getmetatable(self.tts_engine) or dofile(PLUGIN_PATH.."ttsengine.lua")
+    self._speech_engine=Engine:new{plugin=self,plugin_dir=self.tts_engine.plugin_dir}
+    self.word_reader.engine=self._speech_engine
+    local ok,cache=pcall(function()
+        local DataStorage=require("datastorage")
+        return dofile(PLUGIN_PATH.."wordcache.lua"):new{
+            directory=DataStorage:getDataDir().."/cache/audiobook-words"}
+    end)
+    if ok then self._word_cache=cache end
+end
+
+function Audiobook:_configureSpeechTools(backend,rate)
+    self:_ensureSpeechTools()
+    local e,reading=self._speech_engine,self.tts_engine
+    e:setBackend(backend);e:setRate(rate);e:setVolume(reading.volume or 1)
+    e:setVoice(reading.voice or "en");e:setPitch(reading.pitch or 50)
+    e:setWordGap(reading.word_gap or 0);e:setClausePause(reading.clause_pause or 0)
+    if backend==e.BACKENDS.PIPER and reading.piper_model then e:setPiperModel(reading.piper_model) end
+    e:setPiperSpeaker(reading.piper_speaker or 0)
+    e:setSanottsVoice(reading.sanotts_voice_name or self:getSetting("sanotts_voice","kristin"))
+    self.word_reader.cache=self:getSetting("word_cache_enabled",true) and self._word_cache or nil
+end
+
+function Audiobook:repeatLastWord()
+    local word=self.word_reader and self.word_reader.last_word
+    if not word then UIManager:show(InfoMessage:new{text=_("Read a word first."),timeout=2});return end
+    self:readSelectedWord(word)
+end
+
+function Audiobook:previewVoice(backend,is_test)
+    if not self._init_ok then self:_showInitError();return end
+    if not self:_audioOutputReady() then return end
+    self:stopReadAlong()
+    self:_configureSpeechTools(backend or self.tts_engine.backend,self:getSetting("speech_rate",1))
+    self._audio_test_status=is_test and "Running" or self._audio_test_status
+    local text=is_test and "Hello. This is the PocketBook speaker test. One, two, three."
+        or "Hello. This is a sample of this English reading voice."
+    UIManager:show(InfoMessage:new{text=is_test and _("Audio test: listen for the spoken sentence.")
+        or _("Playing a voice sample. Your selected reading engine is unchanged."),timeout=2})
+    self.word_reader:preview(text,function(ok)
+        if is_test then self._audio_test_status=ok==nil and "Cancelled" or ok and "Player completed; confirm that speech was audible" or "Playback failed" end
+    end)
+end
+
+function Audiobook:showAudioDiagnostics()
+    local Diagnostics=dofile(PLUGIN_PATH.."speechdiagnostics.lua")
+    UIManager:show(InfoMessage:new{text=Diagnostics.describe(self,self.tts_engine)})
+end
+
+function Audiobook:clearWordCache()
+    if not self._word_cache and self.tts_engine then self:_ensureSpeechTools() end
+    if self._word_cache then self._word_cache:clear() end
+    UIManager:show(InfoMessage:new{text=_("Pronunciation cache cleared."),timeout=2})
+end
+
+function Audiobook:_shutdownSpeechTools()
+    if self.word_reader then self.word_reader:stop() end
+    if self._speech_engine then self._speech_engine:forceKillAll() end
+    if self._rhvoice_service then self._rhvoice_service:shutdown();self._rhvoice_service=nil end
 end
 
 function Audiobook:startReadAlong(text, start_pos, anchor_xp)
@@ -4183,6 +4270,7 @@ end
 -- leaves them holding audio hardware resources, which can crash the
 -- entire device on some Kobo models.
 function Audiobook:onSuspend()
+    self:_shutdownSpeechTools()
     if self.word_reader then self.word_reader:stop() end
     if self.session_recorder then
         pcall(function() self.session_recorder:stop() end)
@@ -4535,6 +4623,7 @@ function Audiobook:_restoreAlignedOverlaySession()
 end
 
 function Audiobook:onCloseDocument()
+    self:_shutdownSpeechTools()
     logger.warn("Audiobook: onCloseDocument event received")
     -- Re-assert the overlay inset into the sidecar before ReaderConfig writes
     -- copt_* (SaveSettings fires before CloseDocument, so this only covers
@@ -4554,6 +4643,7 @@ end
 -- Safety net: if UIManager tears down the widget tree (exit, doc switch)
 -- without CloseDocument firing first, force-stop everything.
 function Audiobook:onCloseWidget()
+    self:_shutdownSpeechTools()
     logger.warn("Audiobook: onCloseWidget event received")
     -- Do NOT stop the session recorder here for the same reason as above:
     -- widget teardown can happen when switching documents, and we want the

@@ -307,6 +307,14 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
     end
 
     -- Speech rate submenu
+    table.insert(menu,{
+        text=_("Word pronunciation"),
+        sub_item_table_func=function() return MenuBuilder.buildPronunciationMenu(plugin) end,
+    })
+    table.insert(menu,{
+        text=_("Audio diagnostics and test"),
+        sub_item_table_func=function() return MenuBuilder.buildAudioDiagnosticsMenu(plugin) end,
+    })
     table.insert(menu, {
         text_func = function()
             return T(_("Speech rate: %1x"), plugin:getSetting("speech_rate", 1.0))
@@ -577,6 +585,32 @@ function MenuBuilder.buildSpeechRateMenu(plugin)
     end
 
     return menu
+end
+
+function MenuBuilder.buildPronunciationMenu(plugin)
+    local rates={}
+    for _,rate in ipairs({0.25,0.5,0.75,1,1.25,1.5,1.75,2}) do
+        rates[#rates+1]={text=string.format("%.2fx",rate),
+            checked_func=function() return plugin:getSetting("word_speech_rate",0.75)==rate end,
+            callback=function() plugin:setSetting("word_speech_rate",rate) end}
+    end
+    return {
+        {text_func=function() return T(_("Pronunciation speed: %1x"),plugin:getSetting("word_speech_rate",0.75)) end,
+            sub_item_table=rates},
+        {text=_("Repeat last word"),callback=function() plugin:repeatLastWord() end},
+        {text=_("Cache word pronunciations"),checked_func=function() return plugin:getSetting("word_cache_enabled",true) end,
+            callback=function() plugin:toggleSetting("word_cache_enabled",true) end},
+        {text=_("Clear pronunciation cache"),callback=function() plugin:clearWordCache() end},
+    }
+end
+
+function MenuBuilder.buildAudioDiagnosticsMenu(plugin)
+    return {
+        {text=_("Audio status and latest failure"),callback=function() plugin:showAudioDiagnostics() end},
+        {text=_("Test audio output"),callback=function() plugin:previewVoice(nil,true) end},
+        {text=_("Stop test or preview"),callback=function() if plugin.word_reader then plugin.word_reader:stop() end end},
+        {text=_("Clear saved audio failure"),callback=function() plugin:setSetting("last_audio_failure",nil) end},
+    }
 end
 
 function MenuBuilder.buildPitchMenu(plugin)
@@ -1031,7 +1065,7 @@ function MenuBuilder.buildEngineSelectMenu(plugin)
         return menu
     end
 
-    for _, backend in ipairs(available) do
+    for _i, backend in ipairs(available) do
         table.insert(menu, {
             text = backend.label,
             checked_func = function()
@@ -1053,6 +1087,13 @@ function MenuBuilder.buildEngineSelectMenu(plugin)
                 if touchmenu_instance then
                     touchmenu_instance:closeMenu()
                 end
+            end,
+        })
+        table.insert(menu,{
+            text=T(_("Preview: %1"),backend.label),
+            callback=function(touchmenu_instance)
+                if touchmenu_instance then touchmenu_instance:closeMenu() end
+                plugin:previewVoice(backend.id)
             end,
         })
     end

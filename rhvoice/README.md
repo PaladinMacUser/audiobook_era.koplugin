@@ -14,8 +14,8 @@ The adapter renders high-quality 24 kHz mono PCM and uses RHVoice's built-in
 Sonic rate control, so a saved speed such as 0.5× is supported. The existing
 Era speaker player converts it to the firmware's 48 kHz stereo route.
 Synthesis runs in a separate process while KOReader remains responsive.
-The engine is loaded for each request; this version does not prefetch with
-RHVoice. A short pause between sentences is therefore possible. Failed
+Version 0.7.0 reuses a resident engine across requests (see below). It does
+not prefetch with RHVoice, so pauses between sentences remain possible. Failed
 synthesis stops reading instead of skipping text or changing to eSpeak.
 Highlighting uses estimated word timing.
 
@@ -83,3 +83,29 @@ Place `rhvoice-slt` alongside the installed `data` folder, or pass `--data`
 explicitly when testing outside the plugin. The helper accepts `--input`,
 `--output`, `--speed` and `--volume`, writes its WAV atomically, and exits
 nonzero if synthesis fails.
+
+## Resident worker (0.7.0)
+
+KOReader now starts one `rhvoice-slt --daemon SOCKET --idle-seconds 120`
+process and shares it between continuous reading, word pronunciation and
+voice previews. The same RHVoice engine and voice data remain loaded across
+requests; speed, volume and speaker lead-in are supplied per request. Ordinary
+Stop cancels synthesis without unloading the model. Closing the book,
+suspending or leaving KOReader terminates the worker; it also exits after
+120 seconds without a request. Synthesis remains sequential, with no RHVoice
+prefetch, so sentence gaps can remain. The first request after unloading
+still pays the model startup cost.
+
+The private 0700 directory under `/tmp/audiobook-rh-*` contains a Unix datagram
+socket, a PID readiness marker and temporary request files. No network port
+is opened. Each datagram names a `.req` file with five newline-terminated
+fields: input path, output path, speed (0.25–2), volume (0–1), lead-in ms
+(0–2000). Input and output must be flat paths in the socket directory. The
+worker atomically writes `.req.done` containing `OK`, `CANCELLED`, or `ERR`.
+Creating `.req.cancel` interrupts synthesis without terminating the process.
+Only complete WAVs reach playback, and a cancelled request cannot deliver
+late audio. Missing/dead workers fail promptly; the next request can restart
+one. Lua also terminates a worker whose request exceeds 60 seconds.
+
+The ARM smoke test covers worker reuse, changed speed, exact speaker lead-in,
+cancellation followed by another request, invalid input, idle exit and restart.

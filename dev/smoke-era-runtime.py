@@ -5,12 +5,79 @@ import json
 import os
 import shutil
 import shlex
+import socket
 import subprocess
 import tempfile
 import time
 import wave
 from pathlib import Path
 from zipfile import ZipFile
+
+
+def check_resident_rhvoice(binary, qemu):
+    """Run the real packaged ARM worker, independent of Lua's IPC fixture."""
+    with tempfile.TemporaryDirectory(prefix="ab-rh-") as directory:
+        root = Path(directory)
+        endpoint = root / "worker.sock"
+        command = [qemu, str(binary), "--daemon", str(endpoint), "--idle-seconds", "2"]
+        def wait(predicate, seconds=15):
+            deadline = time.monotonic() + seconds
+            while not predicate():
+                assert time.monotonic() < deadline, "Resident RHVoice timed out"
+                time.sleep(.02)
+        with (root / "worker.log").open("w") as log:
+            worker = subprocess.Popen(command, stdout=log, stderr=log)
+            sender = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            try:
+                ready = Path(str(endpoint) + ".ready")
+                wait(ready.exists)
+                assert int(ready.read_text()) == worker.pid
+                def submit(index, text, speed=.5, lead=350):
+                    job, src, dest = (root / f"{index}.{suffix}" for suffix in ("req", "txt", "wav"))
+                    src.write_text(text)
+                    job.write_text(f"{src}\n{dest}\n{speed}\n1\n{lead}\n")
+                    sender.sendto(str(job).encode(), str(endpoint))
+                    return job, dest
+                durations = []
+                for index, speed in enumerate((1, .5)):
+                    job, audio = submit(index, "Hello from your PocketBook reader.", speed)
+                    done = Path(str(job) + ".done")
+                    wait(done.exists)
+                    assert done.read_text().strip() == "OK"
+                    assert worker.poll() is None and int(ready.read_text()) == worker.pid
+                    with wave.open(str(audio)) as wav:
+                        assert wav.getframerate() == 24000 and wav.getsampwidth() == 2
+                        assert wav.readframes(8400) == bytes(16800), "Resident mode keeps 350ms guard"
+                        assert any(wav.readframes(wav.getnframes()))
+                        durations.append(wav.getnframes() - 8400)
+                assert 1.8 < durations[1] / durations[0] < 2.2, "One resident engine honors changed rate"
+                job, audio = submit(2, "reader " * 1000)
+                # Cancel a potentially running long request, then enqueue a fresh word.
+                Path(str(job) + ".cancel").write_text("cancel")
+                next_job, next_audio = submit(3, "reader")
+                wait(lambda: Path(str(next_job) + ".done").exists())
+                assert Path(str(job) + ".done").read_text().strip() == "CANCELLED"
+                assert not audio.exists() and next_audio.exists() and worker.poll() is None
+                # Malformed requests fail without killing the reusable process.
+                bad = root / "bad.req"
+                bad.write_text(f"{root}/missing.txt\n{root}/bad.wav\n0\n1\n350\n")
+                sender.sendto(str(bad).encode(), str(endpoint))
+                wait(lambda: Path(str(bad) + ".done").exists())
+                assert Path(str(bad) + ".done").read_text().startswith("ERR")
+                assert not (root / "bad.wav").exists()
+                worker.wait(timeout=5)
+                assert worker.returncode == 0 and not endpoint.exists() and not ready.exists()
+                assert not list(root.glob("*.rhvoice.*")), "No partial output after cancellation"
+                # Reusing the socket directory after idle exit must work, with clean TERM shutdown.
+                worker = subprocess.Popen(command, stdout=log, stderr=log)
+                wait(ready.exists)
+                worker.terminate(); worker.wait(timeout=5)
+                assert worker.returncode == 0 and not endpoint.exists() and not ready.exists()
+            finally:
+                sender.close()
+                if worker.poll() is None:
+                    worker.kill(); worker.wait()
+    print("Resident RHVoice ARM check: reused model, per-request rates, guarded clip starts, cancellation, invalid request, idle unload and restart")
 
 
 def main():
@@ -135,6 +202,7 @@ def main():
         assert result.returncode and not failed.exists(), "Missing RHVoice data must fail without publishing a WAV"
         assert not list(root.glob("*.rhvoice.*")), "No partial RHVoice outputs after failure"
         print(f"RHVoice ARM check: four English clips, half-speed duration and failure handling in {time.monotonic()-rh_started:.2f}s under emulation")
+        check_resident_rhvoice(rh / "rhvoice-slt", args.qemu)
         # The optional larger build keeps the slow Piper alternative tested.
         piper = plugin / "piper"
         if (piper / "piper.bin").exists():

@@ -55,6 +55,16 @@ local function rhrow()
         if row.text=="RHVoice (SLT, American English)" then return row end
     end
 end
+local previewed,preview_count
+plugin.previewVoice=function(_,backend) previewed=backend;preview_count=(preview_count or 0)+1 end
+local entries=Menu.buildEngineSelectMenu(plugin)
+local offered=0
+for i=1,#entries,2 do
+    check(entries[i+1] and entries[i+1].text:find("Preview"),"each installed engine has a neighboring preview")
+    entries[i+1].callback();offered=offered+1
+end
+check(preview_count==offered and previewed~=nil and settings.tts_backend=="sanotts" and e.backend=="sanotts",
+    "preview rows call preview without selecting the reading engine")
 local row=rhrow()
 check(row and not row.checked_func(), "RHVoice is an additional, unselected engine")
 check(settings.tts_backend=="sanotts" and e.backend=="sanotts", "building the menu preserves the existing voice")
@@ -67,60 +77,63 @@ check(e.rate==0.5 and e.volume==0.75, "engine selection retains the chosen rate 
 e.current_audio_file="playing.wav"
 check(e:prefetch("next sentence")==false and e.current_audio_file=="playing.wav", "generic prefetch cannot overwrite RHVoice's playing file")
 
-local launched
-os.execute=function(cmd) launched=cmd;return 0 end
+local requests={}
+local service={binary=bin,closed=false}
+function service:request(text,output,rate,volume,lead,current,callback)
+    local job={text=text,output=output,rate=rate,volume=volume,lead=lead,current=current,callback=callback}
+    function job:cancel() self.cancelled=true end
+    requests[#requests+1]=job;return job
+end
+plugin._rhvoice_service=service
+os.execute=function() return 0 end
 local function request(text)
-    ui.scheduled={}
     local completed,success=0,nil
     e:synthesize(text,function(ok) completed=completed+1;success=ok end)
-    local input=assert(launched:match("%-%-input '([^']+)'"))
-    local output=assert(launched:match("%-%-output '([^']+)'"))
-    local f=assert(real_open(input,"rb"));local contents=f:read("*a");f:close()
-    return {input=input,output=output,contents=contents,poll=ui.scheduled[1],result=function() return completed,success end}
+    local job=requests[#requests];job.result=function() return completed,success end
+    return job
 end
-local function finish(r,exit,bytes)
-    if bytes then local f=assert(real_open(r.output,"wb"));f:write(string.rep("x",bytes));f:close() end
-    local f=assert(real_open(r.output..".done","w"));f:write(exit);f:close()
-    r.poll()
+local Wav=dofile("wavutils.lua")
+local function finish(r,ok,empty)
+    if ok then
+        if empty then local f=assert(real_open(r.output,"wb"));f:write(string.rep("x",44));f:close()
+        else assert(Wav.generateSilence(r.output,400,24000)) end
+    end
+    r.callback(ok,not ok and "Simulated RHVoice failure" or nil)
 end
 local r=request("don't; $(touch /tmp/not-a-command)")
-check(r.contents=="don't; $(touch /tmp/not-a-command)", "book text is written literally to a file")
-check(not launched:find("touch /tmp/not-a-command",1,true), "book text cannot become shell code")
-check(launched:find("--speed '0.500'",1,true) and launched:find("--volume '0.750'",1,true), "pass the saved speed and volume to RHVoice")
-check(launched:find("--lead-in-ms 350",1,true), "Era speaker gets a short clip-start guard")
-check(r.result()==0 and type(r.poll)=="function", "synthesis returns to the UI before audio is ready")
-finish(r,"0",200)
+check(r.text=="don't; $(touch /tmp/not-a-command)", "book text reaches the resident service literally")
+check(r.rate==0.5 and r.volume==0.75, "pass separate per-request rate and volume")
+check(r.lead==350, "Era speaker retains the clip-start guard")
+check(r.result()==0, "resident synthesis is asynchronous")
+finish(r,true)
 local n,ok=r.result()
-check(n==1 and ok and e.current_audio_file==r.output, "successful audio is delivered once")
-check(e:getAudioLeadInMs()==350, "guard duration is attached to this completed clip")
+check(n==1 and ok and e.current_audio_file==r.output,"successful resident audio is delivered")
+check(e:getAudioLeadInMs()==350,"guard metadata belongs to the completed clip")
 e.getWavDurationMs=function() return 1350 end
-check(e:getAudioDurationMs()==1000, "speech timing excludes the speaker guard")
+check(e:getAudioDurationMs()==1000,"speech timing excludes the guard")
 e.current_audio_file="different.wav"
-check(e:getAudioLeadInMs()==0, "other clips cannot inherit the old guard")
-e.current_audio_file=r.output
+check(e:getAudioLeadInMs()==0,"other clips do not inherit the guard")
 os.remove(r.output)
-
 settings.pb_alsa_device="tts_sm"
-local no_guard=request("another output")
-check(not launched:find("--lead-in-ms",1,true), "other audio routes keep their original PCM")
-finish(no_guard,"0",200);os.remove(no_guard.output)
-settings.pb_alsa_device=nil
-
+local no_guard=request("another route")
+check(no_guard.lead==0,"other routes have no speaker guard")
+finish(no_guard,true);os.remove(no_guard.output);settings.pb_alsa_device=nil
 r=request("cancelled word")
 e:stop();e.current_audio_file="newer.wav"
-finish(r,"0",200)
-check(r.result()==0 and e.current_audio_file=="newer.wav", "cancelled synthesis cannot replace a newer clip")
-
-r=request("failed synthesis")
-finish(r,"1",200)
-n,ok=r.result()
-check(n==1 and ok==false and e.current_audio_file=="newer.wav", "failed synthesis rejects even a nonempty output")
+local newer=request("new word")
+finish(r,true)
+check(r.cancelled and r.result()==0 and e.current_audio_file=="newer.wav","cancelled audio cannot replace a newer clip")
+check(e._rhvoice_pending==newer,"stale completion cannot forget the newer pending request")
 os.remove(r.output)
-r=request("empty synthesis")
-finish(r,"0",44)
+finish(newer,true);os.remove(newer.output)
+e.current_audio_file="newer.wav"
+r=request("failure");finish(r,false)
 n,ok=r.result()
-check(n==1 and ok==false, "header-only WAV is a synthesis failure")
-os.remove(r.output)
+check(n==1 and ok==false and e.current_audio_file=="newer.wav","failed resident request preserves current audio")
+check(settings.last_audio_failure.message=="Simulated RHVoice failure","save the specific failure rather than overwriting it with a generic error")
+r=request("empty WAV");finish(r,true,true)
+n,ok=r.result();check(n==1 and ok==false,"header-only audio is rejected")
+check(plugin._rhvoice_service==service and not service.closed,"stopping audio keeps the shared resident service available")
 
 local fallback,advance=0,0
 e.espeakSynthesizeFallback=function() fallback=fallback+1 end

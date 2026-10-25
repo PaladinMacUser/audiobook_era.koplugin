@@ -395,6 +395,8 @@ local function collectPluginInfo(plugin)
         info.settings = {
             tts_backend = plugin:getSetting("tts_backend", "auto"),
             speech_rate = plugin:getSetting("speech_rate", 1.0),
+            word_speech_rate = plugin:getSetting("word_speech_rate", 0.75),
+            word_cache_enabled = plugin:getSetting("word_cache_enabled", true),
             speech_pitch = plugin:getSetting("speech_pitch", 50),
             speech_volume = plugin:getSetting("speech_volume", 1.0),
             highlight_style = plugin:getSetting("highlight_style", "background"),
@@ -476,6 +478,11 @@ local function collectAudioInfo(plugin, skip_intensive)
     if skip_intensive then
         info._skipped_intensive = "true"
     end
+
+    local diagnostic_ok, diagnostic = pcall(function()
+        return dofile(_utils_dir .. "speechdiagnostics.lua").describe(plugin,plugin.tts_engine)
+    end)
+    if diagnostic_ok then info.speech_status = diagnostic end
 
     -- TTS command availability
     local tts_cmds = {"espeak-ng", "espeak", "piper", "pico2wave", "flite", "festival"}
