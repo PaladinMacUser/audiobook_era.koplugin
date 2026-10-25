@@ -50,6 +50,7 @@ local Utils = dofile(_utils_dir .. "utils.lua")
 local WavUtils = dofile(_utils_dir .. "wavutils.lua")
 local PiperQueue = dofile(_utils_dir .. "piperqueue.lua")
 local AndroidTts = dofile(_utils_dir .. "androidtts.lua")
+local PocketBookAudio = dofile(_utils_dir .. "pocketbookaudio.lua")
 
 -- Plugin debug log (the file bug reports attach); logger.* goes to logcat,
 -- which Android reporters rarely capture (issue #96).
@@ -600,6 +601,16 @@ function TTSEngine:isPocketBook()
     local k = io.open("/mnt/ext1/applications/koreader", "r")
     if k then k:close(); return true end
     return false
+end
+
+function TTSEngine:supportsPocketBookSpeaker()
+    return self:isPocketBook() and PocketBookAudio.isEra(Device)
+end
+
+function TTSEngine:getPocketBookAudioDevice()
+    local default = self:supportsPocketBookSpeaker() and "era-speaker"
+        or (self._pb_has_tts_sm and "tts_sm" or "")
+    return self.plugin and self.plugin:getSetting("pb_alsa_device", default) or default
 end
 
 --- Try to load the PocketBook InkView PlayFile FFI library.
@@ -2739,7 +2750,8 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         elseif Device:isKobo() then
             msg = _("No audio output available.\n\nKobo has no built-in speaker.\n\nPlease pair Bluetooth headphones:\nSettings → Bluetooth → Pair\n\nThen try again.")
         elseif self:isPocketBook() then
-            msg = _("No audio output available.\n\nNo working audio path was found on this PocketBook.\n\nTry changing the audio device:\nAudiobook > Audio device settings > System player (InkView)\n\nIf that does not help, generate a bug report (Audiobook > Generate bug report) and share it on GitHub.")
+            msg = self._pb_speaker_error and (_("Built-in speaker unavailable.") .. "\n\n" .. self._pb_speaker_error)
+                or _("No audio output available.\n\nNo working audio path was found on this PocketBook.\n\nGenerate a bug report from Audiobook > Generate bug report.")
         else
             msg = _("No audio output available.\n\nNo supported audio player found (aplay, paplay, mpv, mplayer).\n\nIf using Bluetooth, make sure headphones are paired and connected.")
         end
@@ -2758,6 +2770,18 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     logger.dbg("TTSEngine: Using player:", player)
     logger.dbg("TTSEngine: Audio file:", self.current_audio_file)
     logger.dbg("TTSEngine: play() findPlayer took", time.to_ms(UIManager:getTime() - t0), "ms")
+    if self._pb_speaker_active then
+        local ok, err = self._pb_speaker:prepare()
+        if not ok then
+            logger.err("TTSEngine: Era speaker preparation failed:", err)
+            self.is_speaking = false
+            UIManager:show(InfoMessage:new{
+                text = _("Built-in speaker unavailable.") .. "\n\n" .. err,
+                timeout = 10,
+            })
+            return false
+        end
+    end
     -- Block playback when no real audio output exists and no BT device is
     -- connected.  On single-core Kobos (no speaker), silently looping
     -- through aplay for every sentence wastes CPU and can crash the device.
@@ -2963,7 +2987,8 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         "no_real_audio=", self._no_real_audio_output,
         "player_type=", pt,
         "pt_is_bt_routed=", pt_is_bt_routed)
-    if is_pb and has_bt_adapter and not self._no_real_audio_output then
+    if is_pb and has_bt_adapter and not self._no_real_audio_output
+            and not self._pb_speaker_active then
         local bt_connected = false
         local btm = self.plugin and self.plugin.bt_manager
         if btm then
@@ -3005,7 +3030,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         -- This means audio_player_type cache is stale (e.g. user paired
         -- BT after the first sentence).  Force a re-probe so gst-bt or
         -- bluealsa is selected instead of the dangerous direct-ALSA path.
-        if not pt_is_bt_routed then
+        if bt_connected and not pt_is_bt_routed then
             logger.warn("TTSEngine: BT connected but player_type=", pt,
                 "is not BT-routed; re-probing to switch to gst-bt/bluealsa")
             self._cached_player = nil
@@ -4881,6 +4906,27 @@ Sets self.audio_player_type to "kindle-native-tts", "kindle-lipc", "gst-bt",
 @return string|nil Player command
 --]]
 function TTSEngine:findAudioPlayer()
+    self._pb_speaker_active = false
+    self._pb_speaker_error = nil
+    -- Select the Era speaker BEFORE Bluetooth or generic ALSA discovery.
+    -- Probing must not open the codec or start a BlueALSA daemon.
+    if self:isPocketBook() and self:getPocketBookAudioDevice() == "era-speaker" then
+        if not PocketBookAudio.isEra(Device) then
+            self._pb_speaker_error = "This speaker mode is for the original PocketBook Era (PB700)."
+            return nil
+        end
+        self._pb_speaker = self._pb_speaker or PocketBookAudio:new()
+        local cmd = self._pb_speaker:command(self)
+        if not cmd then
+            self._pb_speaker_error = self._pb_speaker.error
+            return nil
+        end
+        self._pb_speaker_active = true
+        self.audio_player_type = "aplay"
+        self._no_real_audio_output = false
+        logger.info("TTSEngine: Era speaker via firmware loopback:", self._wav_play_device)
+        return cmd
+    end
     -- 0) Android: playback goes through TtsHelper's MediaPlayer or PCM
     -- stream; there is no CLI player to probe.  Do not gate this on
     -- self._android_tts: the helper initializes lazily at first
@@ -6733,6 +6779,26 @@ function TTSEngine:_startProcessWatcher(bt_retry_allowed, skip_on_fail, conv_ret
                     end
                 end
 
+                -- Speaker output must acknowledge that PCM streaming began.
+                -- An ordinary ALSA open/params failure is not an assertion,
+                -- but still must stop read-along instead of skipping in silence.
+                if engine._pb_speaker_active and (crashed or not player_stderr
+                        or player_stderr:find("wav-play: write error:", 1, true)
+                        or not player_stderr:find("PLAYING", 1, true)) then
+                    engine.is_speaking = false
+                    engine.audio_pid = nil
+                    engine.play_generation = (engine.play_generation or 0) + 1
+                    engine._pb_speaker:reset()
+                    logger.err("TTSEngine: Era speaker playback failed:", player_stderr)
+                    UIManager:show(InfoMessage:new{
+                        text = _("Speaker playback failed. Generate an Audiobook bug report.")
+                            .. "\n\n" .. (player_stderr or "No player status received."):sub(1, 300),
+                        timeout = 10,
+                    })
+                    if engine.on_fail_callback then engine.on_fail_callback() end
+                    return
+                end
+
                 if crashed then
                     engine._player_crash_count = (engine._player_crash_count or 0) + 1
                     logger.err("TTSEngine: audio player crashed (count:",
@@ -6979,6 +7045,7 @@ function TTSEngine:stop()
     self:_stopKindleKeepalive()
     self.is_speaking = false
     self.is_paused = false
+    if self._pb_speaker then self._pb_speaker:reset() end
     self.play_generation = (self.play_generation or 0) + 1
 
     -- Cancel any pending launchAndStart so it can't fire after stop()

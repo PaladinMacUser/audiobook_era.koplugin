@@ -765,9 +765,9 @@ function Audiobook:addToMainMenu(menu_items)
                             if not self._init_ok or not self.tts_engine or not self.tts_engine._wav_play_bin then
                                 return _("Audio output (PocketBook): N/A")
                             end
-                            local pb_default = self.tts_engine._pb_has_tts_sm and "tts_sm" or ""
-                            local dev = self:getSetting("pb_alsa_device", pb_default)
+                            local dev = self.tts_engine:getPocketBookAudioDevice()
                             local labels = {
+                                ["era-speaker"] = _("Era built-in speaker"),
                                 ["tts_sm"] = _("PocketBook pipeline"),
                                 [""] = _("Auto"),
                             }

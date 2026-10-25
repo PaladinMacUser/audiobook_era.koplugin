@@ -1,3 +1,23 @@
+# PocketBook Era fork
+
+English read-aloud through the original Era's built-in speaker, targeting
+firmware **U700.6.10.3209** and **KOReader 2026.03**. See
+[installation and device checks](INSTALL-ERA.md) and
+[the Era package workflow](../../actions/workflows/era.yml).
+
+This fork prepares the firmware audio route with `configureAudioOutput()`,
+checks `AUDIO_OUT_SPEAKER`, and sends speech to the firmware's named loopback
+PCM without changing the codec mixer. It does not depend on `PlayFile`, which
+firmware 6.10 removed. Host regression tests pass; physical speaker playback
+is pending verification on an Era.
+
+Build the installable English ZIP with `python3 tools/package-era.py`.
+The in-app updater points to this fork so an upstream update cannot replace
+Era support. The upstream documentation follows; some optional engines and
+audiobook features require the larger upstream runtime bundle.
+
+---
+
 <p align="center">
   <img src="new_audio_logo.svg" alt="Audiobook Read-Along logo" width="200">
 </p>

@@ -495,7 +495,6 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
 end
 
 function MenuBuilder.buildAlsaDeviceMenu(plugin)
-    local pb_default = plugin.tts_engine._pb_has_tts_sm and "tts_sm" or ""
     local devices = {
         { id = "tts_sm",   label = _("PocketBook pipeline - tts_sm (recommended)"),
           help = _("Routes through the PocketBook audio daemon (softvol, dmix, resampling). Best compatibility on devices that expose tts_sm in /etc/asound.conf.") },
@@ -506,6 +505,12 @@ function MenuBuilder.buildAlsaDeviceMenu(plugin)
         { id = "inkview",  label = _("System player (InkView) - experimental"),
           help = _("Uses the PocketBook InkView PlayFile API. Some firmwares (PB740, PB631) export PlayFile but do not actually play audio; if no sound comes out, switch back to tts_sm or Auto.") },
     }
+    if plugin.tts_engine:supportsPocketBookSpeaker() then
+        table.insert(devices, 1, {
+            id = "era-speaker", label = _("Era built-in speaker (firmware audio routing)"),
+            help = _("Plays through the original Era's built-in speaker using the PocketBook audio service. Disconnect Bluetooth headphones and USB audio first. Install the release ZIP to include the speech engine and player."),
+        })
+    end
     -- hwout_mix: daemon-routed dmix without the softvol/nested-plug layers.
     -- Only offered when present in asound.conf; it is the fallback for
     -- devices whose alsa-lib aborts opening tts_sm (issue #49).
@@ -522,14 +527,17 @@ function MenuBuilder.buildAlsaDeviceMenu(plugin)
             text = d.label,
             help_text = d.help,
             checked_func = function()
-                return plugin:getSetting("pb_alsa_device", pb_default) == d.id
+                return plugin.tts_engine:getPocketBookAudioDevice() == d.id
             end,
             callback = function()
-                plugin:setSetting("pb_alsa_device", d.id)
                 -- Invalidate cached player so the next playback uses the new device
                 if plugin.tts_engine then
+                    plugin.tts_engine:stop()
                     plugin.tts_engine._cached_player = nil
+                    plugin.tts_engine._wav_play_force_prefix = nil
+                    plugin.tts_engine._pb_speaker_active = false
                 end
+                plugin:setSetting("pb_alsa_device", d.id)
             end,
         })
     end

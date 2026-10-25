@@ -73,3 +73,6 @@ dev/audioout/.sysroot/
 dev/audioout/.sysroot-debs/
 dev/audioout/out/
 dev/audioout/results/
+
+# Reproducible Era installation bundles
+/dist/

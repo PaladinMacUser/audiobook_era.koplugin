@@ -313,6 +313,13 @@ local function collectPluginInfo(plugin)
             info.android_pcm_auto = tostring(engine._android_pcm_auto or false)
         end
 
+        if engine._pb_speaker then
+            local speaker = engine._pb_speaker
+            info.pb_speaker_pcm = speaker.pcm or "not found"
+            info.pb_speaker_prepared = tostring(speaker.prepared == true)
+            info.pb_speaker_output = tostring(speaker.output or "unknown")
+            info.pb_speaker_error = speaker.error or "none"
+        end
         -- PocketBook pre-flight snapshot from the most recent play() attempt
         -- (BT-adapter gate that prevents direct ALSA on PB632/PB700c).
         if engine._pb_pre_flight_state then
