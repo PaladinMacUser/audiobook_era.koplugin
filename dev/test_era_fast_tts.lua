@@ -41,6 +41,31 @@ check(cmd:find('nice %-n 19 "/reader/sanotts/snt_server"'), "launch the static e
 check(cmd:find('--loader "/reader/espeak%-ng/lib/ld%-linux%-armhf.so.3"'), "retain the loader for the optional espeak child")
 check(cmd:find("--engine int8",1,true) and cmd:find("--g2p nano",1,true), "use fast inference and in-process pronunciation")
 
+e.sanotts_tempo="/reader/tempo/wav-tempo"; e.rate=0.5
+cmd=e._piper:buildBaseCommand()
+check(not cmd:find("--length-scale",1,true), "slow Era speech renders at native model duration")
+check(e._piper:_tempoCommand("'clip.wav'"):find("--speed 0.500 'clip.wav'",1,true), "apply the chosen speed to the waveform")
+local one_shot, input_file=e._piper:buildCommand("reader", "/tmp/selected-word.wav")
+check(one_shot:find("wav-tempo",1,true) and one_shot:find("rm -f '/tmp/selected-word.wav'",1,true), "one-shot words use tempo conversion and reject the fast clip on failure")
+os.remove(input_file)
+e.rate=1
+check(e._piper:_tempoCommand("'clip.wav'")==nil, "native-speed audio is unchanged")
+e.sanotts_voice_name="amy"; e.rate=0.5
+check(e:getSanoTempoSpeed()==nil and e._piper:buildBaseCommand():find("--length-scale 2.00",1,true), "other voices retain their own rate control")
+e.sanotts_voice_name="kristin"
+local original_execute=os.execute
+os.execute=function() return 0 end
+ui.getTime=function() return 0 end
+e._piper:startServers()
+local script_file=assert(real_open("/tmp/piper_server_1.sh","r"))
+local script=script_file:read("*a");script_file:close()
+check(script:find("wav-tempo' --speed 0.500 \"$wav_path\"",1,true), "resident synthesis converts before publishing the done marker")
+check(script:find('rm -f "$wav_path" "${wav_path}.timing"',1,true), "resident conversion failure cannot play unconverted audio")
+check(original_execute("/bin/sh -n /tmp/piper_server_1.sh")==0, "generated resident server shell script is valid")
+os.remove("/tmp/piper_server_1.sh")
+os.execute=original_execute
+ui.scheduled={}
+
 -- A cancelled word's real async synthesis poll must not mutate a newer
 -- request's file or call its completion callback after stop().
 e._piper.buildCommand=function() return "mock-synth", nil end

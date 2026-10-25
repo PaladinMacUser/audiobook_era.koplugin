@@ -1,8 +1,8 @@
 # PocketBook Era: English read-aloud through the built-in speaker
 
 Target: **original Era (PB700), firmware U700.6.10.3209, KOReader 2026.03**.
-Version **0.6.3.4** bundles the **sanoTTS Kristin English neural voice** for
-faster synthesis, plus eSpeak NG. Speaker playback and highlighting fixes
+Version **0.6.3.5** bundles the **sanoTTS Kristin English neural voice** for
+faster synthesis, plus eSpeak NG and pitch-preserving speech tempo. Speaker playback and highlighting fixes
 are retained. On first launch this build switches an existing Era Piper
 setup to sanoTTS/Kristin once; later engine choices remain yours.
 
@@ -16,7 +16,7 @@ emulation in the development check; actual Era speed needs a device test.
 2. If an older `audiobook.koplugin` or `audiobook_era.koplugin` is installed,
    move it outside the `plugins` folder as a backup. Keep only one installed
    copy of this plugin.
-3. Extract **`audiobook-era-v0.6.3.4.zip`**. Copy its **`audiobook.koplugin`**
+3. Extract **`audiobook-era-v0.6.3.5.zip`**. Copy its **`audiobook.koplugin`**
    folder into **`applications/koreader/plugins/`** on the Era's USB drive.
    The device path is `/mnt/ext1/applications/koreader/plugins/audiobook.koplugin/`.
    Do not use GitHub's “Source code” ZIP: it lacks the speech runtime.
@@ -48,6 +48,18 @@ Kristin uses a small int8 model and in-process word pronunciation, avoiding
 Piper's large ONNX model. It trades some naturalness for speed. The default
 package includes Kristin and eSpeak, with no voice download required. The
 larger Piper/Danny alternative can be included by building with `--with-piper`.
+
+### Slower speech without stretching the voice model
+
+If 1.0× speech is too fast, keep **Voice settings → Speech rate** at **0.5×**
+or **0.75×**. On the Era, version 0.6.3.5 renders Kristin at its native pace
+and changes the completed WAV's tempo with Sonic, preserving pitch. It no
+longer doubles the model's phoneme durations for 0.5× playback. The same
+processing applies to **Read word**. Your saved speed is retained.
+
+This may reduce the distortion at slow speeds; it does not make Kristin
+sound like Julie. Highlighting after tempo conversion is estimated from
+the slower clip. Normal 1.0× audio keeps its original waveform and timing.
 
 To investigate reuse of Julie, generate the existing Audiobook bug report.
 Its `pb_stock_tts_files` field lists candidate installed voice/library names;
@@ -81,13 +93,17 @@ or restore your backup. This build does not edit the firmware's audio files.
 
 ## Building the installable ZIP
 
-Run `python3 tools/package-era.py` (Python 3 and curl). It verifies the pinned
+Run `python3 tools/package-era.py` (Python 3, curl and `gcc-arm-linux-gnueabihf`). It verifies the pinned
 upstream runtime checksum, adds this fork's current source, and writes the
 installable ZIP and its SHA256 file under `dist/`. You can reuse a downloaded
 runtime with `--runtime-zip /path/to/audiobook-koplugin-v0.6.3.zip`.
 Add `--with-piper` to include the larger Piper runtime and Danny voice.
+Alternatively pass `--tempo-binary /path/to/static-arm-wav-tempo`; see
+`tempo/README.md` for compiler commands and Sonic provenance.
 
 Run `LUAJIT=luajit sh dev/run_pocketbook_tests.sh` for the native ABI and engine
 regression tests. These require a host C compiler and LuaJIT, not the reader.
-Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.4.zip` with
+Run `python3 dev/test_wav_tempo.py` for pitch, duration, word-ending and
+malformed-input checks of the tempo converter.
+Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.5.zip` with
 `qemu-arm` installed to verify the packaged ARM English engine and player.

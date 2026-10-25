@@ -14,7 +14,7 @@ RUNTIME_SHA256 = "a479409534cea65af60923cab69716a9affcb9357ab160f4bad5c03925d96b
 PREFIX = "audiobook.koplugin/"
 
 
-def package(runtime_zip, output, with_piper=False):
+def package(runtime_zip, output, with_piper=False, tempo_binary=None):
     if hashlib.sha256(runtime_zip.read_bytes()).hexdigest() != RUNTIME_SHA256:
         raise ValueError("Upstream runtime ZIP checksum mismatch")
     content = {}
@@ -37,6 +37,19 @@ def package(runtime_zip, output, with_piper=False):
                      "sanotts/LICENSE-misaki", "sanotts/NOTICE-misaki.md"):
         source = ROOT / relative
         content[PREFIX + relative] = (source.read_bytes(), stat.S_IFREG | (0o755 if relative.endswith(".sh") else 0o644))
+    for source in sorted((ROOT / "tempo").iterdir()):
+        if source.is_file():
+            content[PREFIX + "tempo/" + source.name] = (source.read_bytes(), stat.S_IFREG | 0o644)
+    with tempfile.TemporaryDirectory() as build_dir:
+        if tempo_binary is None:
+            tempo_binary = Path(build_dir) / "wav-tempo"
+            subprocess.run(["arm-linux-gnueabihf-gcc", "-std=c11", "-O2", "-static",
+                            "-I" + str(ROOT / "tempo"), str(ROOT / "tempo/wav-tempo.c"),
+                            str(ROOT / "tempo/sonic.c"), "-lm", "-o", str(tempo_binary)], check=True)
+        binary = tempo_binary.read_bytes()
+        if binary[:4] != b"\x7fELF" or binary[4:6] != b"\x01\x01" or binary[18:20] != b"\x28\x00":
+            raise ValueError("wav-tempo must be a little-endian 32-bit ARM ELF binary")
+        content[PREFIX + "tempo/wav-tempo"] = (binary, stat.S_IFREG | 0o755)
     for source in sorted((ROOT / "l10n").rglob("*")):
         if source.is_file():
             content[PREFIX + source.relative_to(ROOT).as_posix()] = (source.read_bytes(), stat.S_IFREG | 0o644)
@@ -44,7 +57,8 @@ def package(runtime_zip, output, with_piper=False):
                 "espeak-ng/bin/espeak-ng.bin", "espeak-ng/lib/ld-linux-armhf.so.3",
                 "espeak-ng/lib/libespeak-ng.so.1", "espeak-ng/share/espeak-ng-data/en_dict",
                 "wav-play/wav-play.bin", "wav-play/lib/libasound.so.2", "wordreader.lua",
-                "sanotts/snt_server", "sanotts/voice/front_q8.bin", "sanotts/voice/model_q8.bin")
+                "sanotts/snt_server", "sanotts/voice/front_q8.bin", "sanotts/voice/model_q8.bin",
+                "tempo/wav-tempo", "tempo/LICENSE")
     if with_piper:
         required += (
                 "piper/piper.bin", "piper/lib/libonnxruntime.so.1.14.1",
@@ -70,15 +84,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-zip", type=Path, help="Use a previously downloaded v0.6.3 runtime ZIP")
     parser.add_argument("--with-piper", action="store_true", help="Also include the slower Piper engine and Danny voice")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.4.zip")
+    parser.add_argument("--tempo-binary", type=Path, help="Use an already built static ARM wav-tempo")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.5.zip")
     args = parser.parse_args()
     if args.runtime_zip:
-        package(args.runtime_zip, args.output, args.with_piper)
+        package(args.runtime_zip, args.output, args.with_piper, args.tempo_binary)
     else:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary) / "upstream.zip"
             subprocess.run(["curl", "--fail", "--location", "--retry", "3", "--output", str(runtime), RUNTIME_URL], check=True)
-            package(runtime, args.output, args.with_piper)
+            package(runtime, args.output, args.with_piper, args.tempo_binary)
 
 
 if __name__ == "__main__":

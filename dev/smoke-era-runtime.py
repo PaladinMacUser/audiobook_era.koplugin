@@ -76,6 +76,18 @@ def main():
                 assert wav.getnframes() > 1000 and any(wav.readframes(wav.getnframes()))
         assert "espeak_fb=1" in result.stderr, "Verify the out-of-vocabulary espeak child"
         print(f"sanoTTS ARM check: two sentences, one word and OOV fallback in {time.monotonic()-started:.2f}s under emulation")
+        tempo_started = time.monotonic()
+        for path in neural_audio:
+            with wave.open(str(path)) as wav:
+                native_frames = wav.getnframes()
+            subprocess.run([args.qemu, str(plugin / "tempo/wav-tempo"), "--speed", "0.5", str(path)],
+                           check=True, timeout=15)
+            with wave.open(str(path)) as wav:
+                assert wav.getframerate() == 22050 and wav.getsampwidth() == 2 and wav.getnchannels() == 1
+                assert 1.8 < wav.getnframes() / native_frames < 2.1, "Half-speed speech duration"
+                assert any(wav.readframes(wav.getnframes()))
+            assert not path.with_suffix(".wav.timing").exists(), "Native timing must not survive tempo conversion"
+        print(f"ARM tempo check: four clips at half speed in {time.monotonic()-tempo_started:.2f}s under emulation")
         # The optional larger build keeps the slow Piper alternative tested.
         piper = plugin / "piper"
         if (piper / "piper.bin").exists():

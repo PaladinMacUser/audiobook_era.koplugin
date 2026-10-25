@@ -80,6 +80,7 @@ sentence arrives after one synthesis instead of a full multi-sentence batch.
 --]]
 function PiperQueue:_batchSize()
     local engine = self.engine
+    if engine.getSanoTempoSpeed and engine:getSanoTempoSpeed() then return 1 end
     if engine._piperLowResource and engine:_piperLowResource() then
         return 1
     end
@@ -383,7 +384,11 @@ function PiperQueue:buildBaseCommand()
         local rate = engine.rate or 1.0
         local ls = 1.0 / math.max(0.25, rate)
         local length_flag = ""
-        if math.abs(ls - 1.0) > 0.01 then
+        -- On the Era, render Kristin at its native scale. Slow playback is
+        -- applied to the finished audio by Sonic, preserving pitch instead
+        -- of asking this small model to generate elongated phonemes.
+        local tempo = engine.getSanoTempoSpeed and engine:getSanoTempoSpeed()
+        if not tempo and math.abs(ls - 1.0) > 0.01 then
             length_flag = string.format(" --length-scale %.2f", ls)
         end
         if vengine == "int8" then
@@ -492,6 +497,16 @@ Build the shell command for per-process Piper synthesis.
 @param audio_file string
 @return string cmd, string text_file
 --]]
+-- audio_argument is an already quoted shell argument (or "$wav_path" in
+-- the resident server script). Book text is never part of this command.
+function PiperQueue:_tempoCommand(audio_argument)
+    local engine = self.engine
+    local speed = engine.getSanoTempoSpeed and engine:getSanoTempoSpeed()
+    if not speed or math.abs(speed - 1.0) < 0.001 then return nil end
+    local binary = "'" .. engine.sanotts_tempo:gsub("'", "'\\''") .. "'"
+    return string.format("%s --speed %.3f %s", binary, speed, audio_argument)
+end
+
 function PiperQueue:buildCommand(text, audio_file)
     local base = self:buildBaseCommand()
     local engine = self.engine
@@ -509,6 +524,12 @@ function PiperQueue:buildCommand(text, audio_file)
             tf:close()
         end
         cmd = string.format('%s < "%s" 2>&1', base, text_file)
+        local audio_arg = "'" .. audio_file:gsub("'", "'\\''") .. "'"
+        local tempo = self:_tempoCommand(audio_arg)
+        if tempo then
+            cmd = cmd .. " && (" .. tempo .. " || { rm -f " .. audio_arg
+                .. "; exit 1; })"
+        end
     else
         if tf then
             tf:write(self:_cleanText(text) .. "\n")
@@ -681,7 +702,13 @@ PIPER_INNER_PID_FILE="${FIFO}.piper_pid"
 } | while IFS= read -r wav_path; do
   wav_path=$(echo "$wav_path" | tr -d '\r\n')
   if [ -n "$wav_path" ]; then
-    echo "0" > "${wav_path}.done"
+    if %s; then
+      echo "0" > "${wav_path}.done"
+    else
+      # Never play the native-speed clip after failed tempo conversion.
+      rm -f "$wav_path" "${wav_path}.timing"
+      echo "1" > "${wav_path}.done"
+    fi
   fi
 done &
 PIPE_PID=$!
@@ -700,7 +727,7 @@ trap cleanup EXIT TERM
 wait $PIPE_PID 2>/dev/null
 exec 3>&-
 rm -f "$FIFO" "${FIFO}.pid" "${FIFO}.piper_pid"
-]=], fifo, log_file, base_cmd)
+]=], fifo, log_file, base_cmd, self:_tempoCommand('"$wav_path"') or "true")
 
         local sf = io.open(script_path, "w")
         if sf then

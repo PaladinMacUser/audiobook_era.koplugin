@@ -1,8 +1,12 @@
 # PocketBook Era fork
 
 Offline English read-aloud through the original Era's built-in speaker,
-targeting **U700.6.10.3209** and **KOReader 2026.03**. Version **0.6.3.4**
+targeting **U700.6.10.3209** and **KOReader 2026.03**. Version **0.6.3.5**
 includes the fast **sanoTTS/Kristin** neural voice, eSpeak NG and **Read word**.
+At slower speeds it now uses pitch-preserving audio tempo conversion: Kristin
+renders at its native pace, then Sonic slows the finished clip. Existing
+speed preferences, including 0.5×, are retained. This addresses the duration
+model's stretched-phoneme distortion; the underlying voice remains Kristin.
 See [installation and device checks](INSTALL-ERA.md) and
 [the Era package workflow](../../actions/workflows/era.yml).
 
@@ -14,9 +18,11 @@ subsequent user choices. **Read word** speaks one selected word and stops;
 The stock PocketBook Julie voice is not integrated yet: InkView exposes
 routing but no public synthesis API. The bug report now lists candidate
 stock-engine voice/library paths for further investigation. The included
-Kristin voice is a separate faster engine; its Era speed needs a device check.
+Kristin voice is a separate faster engine, confirmed reading through the
+speaker on the Era. The new slower-speech processing needs a listening check.
 
-Build with `python3 tools/package-era.py`; add `--with-piper` for the larger
+Build with `python3 tools/package-era.py` (requires `gcc-arm-linux-gnueabihf`,
+or pass an already built static ARM `--tempo-binary`); add `--with-piper` for the larger
 Piper/Danny alternative. The in-app updater points to this fork. The upstream
 documentation follows; some optional engines and audiobook features require
 the larger upstream runtime bundle.

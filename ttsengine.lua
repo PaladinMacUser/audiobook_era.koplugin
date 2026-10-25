@@ -433,6 +433,10 @@ function TTSEngine:detectBackend()
                 found_sanotts = true
                 self.sanotts_dir = sanotts_dir
                 self.sanotts_server = sanotts_server
+                local tempo = plugin_dir .. "/tempo/wav-tempo"
+                if ensureBinary(tempo) and binaryRunsOnHost(tempo) then
+                    self.sanotts_tempo = tempo
+                end
                 self.sanotts_voice_name = voice_name
                 self.sanotts_voice_dir = self.sanotts_voices[voice_name]
                 self.sanotts_voice_cfg = self.sanotts_voice_defs[voice_name]
@@ -7486,6 +7490,14 @@ end
 function TTSEngine:preferPiperVoice()
     return self.backend == self.BACKENDS.PIPER and self.plugin
         and self.plugin:getSetting("piper_keep_voice", self:supportsPocketBookSpeaker()) or false
+end
+
+-- Kristin on the Era uses native synthesis plus pitch-preserving WAV tempo.
+function TTSEngine:getSanoTempoSpeed()
+    if self.backend == self.BACKENDS.SANOTTS and self.sanotts_voice_name == "kristin"
+            and self.sanotts_tempo and self:supportsPocketBookSpeaker() then
+        return self.rate or 1.0
+    end
 end
 
 -- Apply the fast English default once when the new Era package arrives.

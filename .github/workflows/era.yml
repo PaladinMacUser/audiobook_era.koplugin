@@ -12,16 +12,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y luajit qemu-user
+        run: sudo apt-get update && sudo apt-get install -y luajit qemu-user gcc-arm-linux-gnueabihf
       - name: Check Lua syntax
         run: luajit -e 'for f in io.popen("find . -maxdepth 1 -name \"*.lua\""):lines() do assert(loadfile(f), f) end'
       - name: Test PocketBook routing and playback
         run: sh dev/run_pocketbook_tests.sh
+      - name: Test pitch-preserving speech tempo
+        run: python3 dev/test_wav_tempo.py
       - name: Assemble installable English package
         run: python3 tools/package-era.py
       - name: Verify bundled ARM English speech and WAV playback
-        run: python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.4.zip
+        run: python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.5.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: audiobook-era-v0.6.3.4
+          name: audiobook-era-v0.6.3.5
           path: dist/*

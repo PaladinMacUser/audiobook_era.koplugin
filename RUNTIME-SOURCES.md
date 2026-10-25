@@ -11,6 +11,14 @@ MBROLA databases and audiobook decoders. `--with-piper` adds the original
 Piper runtime and Danny model. No PocketBook Julie voice/library/license
 payloads are distributed. All included speech engines work offline.
 
+Version 0.6.3.5 adds a small static ARM `wav-tempo` tool built from the
+vendored Sonic source, to slow Kristin speech while preserving pitch.
+Sonic is pinned to
+[b93885dcb70aae50c6f76b0fe4e0868f029a077e](https://github.com/waywardgeek/sonic/tree/b93885dcb70aae50c6f76b0fe4e0868f029a077e),
+Apache-2.0; its source, license and adapter are included under `tempo/`.
+The packaging script builds it with `arm-linux-gnueabihf-gcc -static`, or
+accepts a prebuilt static ARM binary through `--tempo-binary`.
+
 Runtime source and build recipes:
 
 - [Upstream source at 94d9f6472c383b98d3a8a82ad1696c9721f420c3](https://github.com/stradichenko/audiobook.koplugin/tree/94d9f6472c383b98d3a8a82ad1696c9721f420c3)
