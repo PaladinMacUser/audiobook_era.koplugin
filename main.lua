@@ -173,6 +173,12 @@ function Audiobook:init()
     -- loaded. Handle it now that we have a document.
     self:_checkPendingAlignedStart()
 
+    self:_registerHighlightButtons()
+    self:_registerDictButtons()
+end
+
+function Audiobook:_registerHighlightButtons()
+
     -- Add "Read aloud from here" to the text selection / highlight popup.
     -- This appears when the user selects a paragraph or multiple words
     -- (as opposed to the single-word dictionary popup, which is handled
@@ -207,6 +213,16 @@ function Audiobook:init()
                 end,
             }
         end)
+        self.ui.highlight:addToHighlightDialog("15_read_word", function(this)
+            return {
+                text = _("Read word"),
+                callback = function()
+                    local text = this.selected_text and this.selected_text.text
+                    this:onClose()
+                    UIManager:scheduleIn(0.3, function() self:readSelectedWord(text) end)
+                end,
+            }
+        end)
         self.ui.highlight:addToHighlightDialog("16_play_aligned", function(this)
             return {
                 text = _("Play aligned audiobook from here"),
@@ -225,11 +241,6 @@ function Audiobook:init()
         end)
     end
 
-    -- Single-word dictionary popup buttons.  KOReader 2026.07
-    -- (koreader/koreader#15184) removed the DictButtonsReady broadcast in
-    -- favor of a registration API; on older releases onDictButtonsReady()
-    -- below still receives the event and appends the same buttons.
-    self:_registerDictButtons()
 end
 
 --[[--
@@ -246,6 +257,18 @@ function Audiobook:_registerDictButtons()
         return
     end
     local plugin = self
+
+    self.ui.dictionary:addToDictButtons({
+        id = "audiobook_read_word",
+        text = _("Read word"), font_bold = false, conditional = true,
+        show_func = function(popup)
+            return plugin._init_ok and not popup.is_wiki and not popup.is_wiki_fullpage
+        end,
+        callback = function(popup)
+            local WordReader = dofile(PLUGIN_PATH .. "wordreader.lua")
+            plugin:readSelectedWord(WordReader.dictionaryText(popup))
+        end,
+    })
 
     self.ui.dictionary:addToDictButtons({
         id = "audiobook_read",
@@ -329,7 +352,8 @@ function Audiobook:_initSubmodules()
                 plugin = self,
                 plugin_dir = Utils.normalizeDirPath(pp),
             }
-            local saved_backend = self:getSetting("tts_backend", nil)
+            self.word_reader = dofile(pp .. "wordreader.lua"):new{engine = self.tts_engine}
+            local saved_backend = self.tts_engine:applyEraFastVoiceDefault(self:getSetting("tts_backend", nil))
             if saved_backend then
                 self.tts_engine:setBackend(saved_backend)
             end
@@ -1257,6 +1281,13 @@ function Audiobook:onDictButtonsReady(dict_popup, buttons)
     end
     
     local plugin = self
+    table.insert(buttons, {{
+        id = "audiobook_read_word", text = _("Read word"), font_bold = false,
+        callback = function()
+            local WordReader = dofile(PLUGIN_PATH .. "wordreader.lua")
+            plugin:readSelectedWord(WordReader.dictionaryText(dict_popup))
+        end,
+    }})
     
     -- Add "Read aloud from here" button at the end (below Wikipedia/Search/Close)
     table.insert(buttons, {{
@@ -1306,8 +1337,17 @@ function Audiobook:onDictButtonsReady(dict_popup, buttons)
     }})
 end
 
+function Audiobook:readSelectedWord(text)
+    if not self._init_ok then self:_showInitError(); return end
+    if not self.word_reader or not self.word_reader.selectedWord(text) then return end
+    if not self:_audioOutputReady() then return end
+    self:stopReadAlong()
+    self.word_reader:read(text)
+end
+
 function Audiobook:startReadAlong(text, start_pos, anchor_xp)
     if not self._init_ok then self:_showInitError(); return end
+    if self.word_reader then self.word_reader:stop() end
     if not self:_audioOutputReady() then return end
     local page_text = text or self:getCurrentPageText()
     if not page_text or page_text == "" then
@@ -3516,6 +3556,7 @@ end
 function Audiobook:stopReadAlong(opts)
     opts = opts or {}
     if not self._init_ok then return end
+    if self.word_reader then self.word_reader:stop() end
     logger.warn("Audiobook: stopReadAlong() called")
     -- Save media playback position before stopping
     if self.media_sync and self.media_sync.state ~= "stopped" then
@@ -4126,6 +4167,7 @@ end
 -- leaves them holding audio hardware resources, which can crash the
 -- entire device on some Kobo models.
 function Audiobook:onSuspend()
+    if self.word_reader then self.word_reader:stop() end
     if self.session_recorder then
         pcall(function() self.session_recorder:stop() end)
     end

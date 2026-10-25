@@ -14,11 +14,12 @@ local _ = require("audiobook_gettext")
 
 return {
     name = "audiobook",
-    version = "0.6.3.3",
+    version = "0.6.3.4",
     fullname = _("Audiobook Read-Along"),
     description = _([[Text-to-Speech with synchronized word highlighting. Also plays pre-recorded audiobooks (mp3, m4b, m4a) with a seekable scrubber and EPUB 3 Media Overlays (Storyteller format).
 
 Features:
+• Read just a selected word from the dictionary or selection menu
 • Word-by-word highlighting as text is read
 • Sentence highlighting option
 • Multiple TTS engine support (espeak-ng, Piper neural, sanoTTS neural, Pico, Flite, Festival, Android, platform-native helper)

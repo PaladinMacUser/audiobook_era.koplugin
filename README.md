@@ -1,28 +1,25 @@
 # PocketBook Era fork
 
-English read-aloud through the original Era's built-in speaker, with
-**Piper neural TTS + the bundled English Danny voice** and eSpeak NG, targeting
-firmware **U700.6.10.3209** and **KOReader 2026.03**. See
-[installation and device checks](INSTALL-ERA.md) and
+Offline English read-aloud through the original Era's built-in speaker,
+targeting **U700.6.10.3209** and **KOReader 2026.03**. Version **0.6.3.4**
+includes the fast **sanoTTS/Kristin** neural voice, eSpeak NG and **Read word**.
+See [installation and device checks](INSTALL-ERA.md) and
 [the Era package workflow](../../actions/workflows/era.yml).
 
-This fork prepares the firmware audio route with `configureAudioOutput()`,
-checks `AUDIO_OUT_SPEAKER`, and sends speech to the firmware's named loopback
-PCM without changing the codec mixer. It does not depend on `PlayFile`, which
-firmware 6.10 removed. Speaker playback and word highlighting are confirmed
-working in 0.6.3.2. Version 0.6.3.3 adds the Piper runtime and voice, limits
-Piper to one resident model on the Era, and defaults to waiting for the
-neural voice instead of switching to eSpeak when loading or slow.
+The speaker route and word-highlighting fixes are retained. This build
+switches an existing Era Piper setup to sanoTTS/Kristin once, then preserves
+subsequent user choices. **Read word** speaks one selected word and stops;
+**Read aloud from here** continues reading as before.
 
-After installing, select **Voice settings → TTS engine → Piper** and keep
-**Era built-in speaker** selected. Piper works offline; startup and pauses
-can take longer than eSpeak on the reader. Its on-device performance still
-needs verification.
+The stock PocketBook Julie voice is not integrated yet: InkView exposes
+routing but no public synthesis API. The bug report now lists candidate
+stock-engine voice/library paths for further investigation. The included
+Kristin voice is a separate faster engine; its Era speed needs a device check.
 
-Build the installable English ZIP with `python3 tools/package-era.py`.
-The in-app updater points to this fork so an upstream update cannot replace
-Era support. The upstream documentation follows; some optional engines and
-audiobook features require the larger upstream runtime bundle.
+Build with `python3 tools/package-era.py`; add `--with-piper` for the larger
+Piper/Danny alternative. The in-app updater points to this fork. The upstream
+documentation follows; some optional engines and audiobook features require
+the larger upstream runtime bundle.
 
 ---
 

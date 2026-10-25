@@ -554,6 +554,9 @@ local function collectAudioInfo(plugin, skip_intensive)
         end
         -- Device config (model, variant, BT name)
         info.pb_device_cfg = readFileLines("/ebrmain/config/device.cfg", 30) or "not found"
+        -- Discover native voice/library names without loading unknown ABIs
+        -- or reading proprietary voice/license payloads.
+        info.pb_stock_tts_files = shellCapture([[find /mnt/ext1/system/tts /ebrmain/tts /ebrmain/lib /usr/lib -maxdepth 7 \( -iname '*julie*' -o -iname '*readspeaker*' -o -iname '*voicetext*' -o -iname '*tts*.so*' \) 2>/dev/null | head -60]], 4) or "not found"
     end
 
     -- Bluetooth

@@ -14,7 +14,7 @@ RUNTIME_SHA256 = "a479409534cea65af60923cab69716a9affcb9357ab160f4bad5c03925d96b
 PREFIX = "audiobook.koplugin/"
 
 
-def package(runtime_zip, output):
+def package(runtime_zip, output, with_piper=False):
     if hashlib.sha256(runtime_zip.read_bytes()).hexdigest() != RUNTIME_SHA256:
         raise ValueError("Upstream runtime ZIP checksum mismatch")
     content = {}
@@ -24,14 +24,17 @@ def package(runtime_zip, output):
             if info.is_dir() or not name.startswith(PREFIX):
                 continue
             relative = name[len(PREFIX):]
-            if (relative.startswith(("espeak-ng/lib/", "espeak-ng/share/espeak-ng-data/", "wav-play/", "piper/"))
-                    or relative == "espeak-ng/bin/espeak-ng.bin"):
+            if (relative.startswith(("espeak-ng/lib/", "espeak-ng/share/espeak-ng-data/", "wav-play/", "sanotts/voice/"))
+                    or relative in ("espeak-ng/bin/espeak-ng.bin", "sanotts/snt_server")
+                    or with_piper and relative.startswith("piper/")):
                 content[name] = (upstream.read(info), info.external_attr >> 16)
     # Current source always replaces upstream Lua, including the fork updater.
     for source in sorted(ROOT.glob("*.lua")):
         content[PREFIX + source.name] = (source.read_bytes(), stat.S_IFREG | 0o644)
     for relative in ("LICENSE", "INSTALL-ERA.md", "RUNTIME-SOURCES.md", "generate-report.sh",
-                     "cross-build-espeak.nix", "cross-build-wav-play.nix", "wav-play.c"):
+                     "cross-build-espeak.nix", "cross-build-wav-play.nix", "cross-build-snt-server.nix", "wav-play.c",
+                     "sanotts/README.md", "sanotts/LICENSE-sanoTTS", "sanotts/LICENSE-sanoTTS-MIT",
+                     "sanotts/LICENSE-misaki", "sanotts/NOTICE-misaki.md"):
         source = ROOT / relative
         content[PREFIX + relative] = (source.read_bytes(), stat.S_IFREG | (0o755 if relative.endswith(".sh") else 0o644))
     for source in sorted((ROOT / "l10n").rglob("*")):
@@ -40,7 +43,10 @@ def package(runtime_zip, output):
     required = ("pocketbookaudio.lua", "ttsengine.lua", "main.lua", "updater.lua",
                 "espeak-ng/bin/espeak-ng.bin", "espeak-ng/lib/ld-linux-armhf.so.3",
                 "espeak-ng/lib/libespeak-ng.so.1", "espeak-ng/share/espeak-ng-data/en_dict",
-                "wav-play/wav-play.bin", "wav-play/lib/libasound.so.2",
+                "wav-play/wav-play.bin", "wav-play/lib/libasound.so.2", "wordreader.lua",
+                "sanotts/snt_server", "sanotts/voice/front_q8.bin", "sanotts/voice/model_q8.bin")
+    if with_piper:
+        required += (
                 "piper/piper.bin", "piper/lib/libonnxruntime.so.1.14.1",
                 "piper/lib/libpiper_phonemize.so.1", "piper/espeak-ng-data/phontab",
                 "piper/en_US-danny-low.onnx", "piper/en_US-danny-low.onnx.json")
@@ -63,15 +69,16 @@ def package(runtime_zip, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-zip", type=Path, help="Use a previously downloaded v0.6.3 runtime ZIP")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.3.zip")
+    parser.add_argument("--with-piper", action="store_true", help="Also include the slower Piper engine and Danny voice")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.4.zip")
     args = parser.parse_args()
     if args.runtime_zip:
-        package(args.runtime_zip, args.output)
+        package(args.runtime_zip, args.output, args.with_piper)
     else:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary) / "upstream.zip"
             subprocess.run(["curl", "--fail", "--location", "--retry", "3", "--output", str(runtime), RUNTIME_URL], check=True)
-            package(runtime, args.output)
+            package(runtime, args.output, args.with_piper)
 
 
 if __name__ == "__main__":

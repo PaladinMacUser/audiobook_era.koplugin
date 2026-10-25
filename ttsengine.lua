@@ -738,6 +738,7 @@ Synthesize text and return timing metadata.
 @return boolean Success
 --]]
 function TTSEngine:synthesize(text, callback)
+    self.synthesis_generation = (self.synthesis_generation or 0) + 1
     if not self.backend then
         logger.err("TTSEngine: No TTS backend available")
         -- Show error to user
@@ -896,9 +897,14 @@ function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
     os.execute(bg_cmd)
 
     local engine = self
+    local generation = self.synthesis_generation
     local poll_count = 0
     local max_polls = 120
     local function pollNativeDone()
+        if engine.synthesis_generation ~= generation then
+            os.remove(done_marker); os.remove(input_file); os.remove(audio_file)
+            return
+        end
         poll_count = poll_count + 1
         local mf = io.open(done_marker, "r")
         if mf then
@@ -1008,9 +1014,14 @@ function TTSEngine:_synthesizeNativeDaemon(text, audio_file, speed, callback)
     logger.dbg("TTSEngine: native daemon request:", request:gsub("%s+$", ""))
 
     local engine = self
+    local generation = self.synthesis_generation
     local poll_count = 0
     local max_polls = 120
     local function pollNativeDone()
+        if engine.synthesis_generation ~= generation then
+            os.remove(done_marker); os.remove(input_file); os.remove(audio_file)
+            return
+        end
         poll_count = poll_count + 1
         local mf = io.open(done_marker, "r")
         if mf then
@@ -1344,9 +1355,15 @@ function TTSEngine:synthesizeCommand(text, callback)
         local piper_text_file = self._piper_text_file
         self._piper_text_file = nil  -- prevent premature cleanup
         local engine = self
+        local generation = self.synthesis_generation
         local poll_count = 0
         local max_polls = 120  -- 60 seconds max (120 × 0.5s)
         local function pollPiperDone()
+            if engine.synthesis_generation ~= generation then
+                os.remove(done_marker); os.remove(audio_file)
+                if piper_text_file then os.remove(piper_text_file) end
+                return
+            end
             poll_count = poll_count + 1
             -- Check if the done marker file exists
             local mf = io.open(done_marker, "r")
@@ -7036,6 +7053,7 @@ end
 Stop playback.
 --]]
 function TTSEngine:stop()
+    self.synthesis_generation = (self.synthesis_generation or 0) + 1
     -- Always bump generation and clear state, even if not speaking.
     -- This ensures stale scheduled callbacks (launchAndStart, checkProcess,
     -- updateTiming) exit immediately regardless of what state we were in.
@@ -7156,6 +7174,7 @@ Uses SIGTERM (not SIGKILL) so GStreamer can close the BT audio sink
 gracefully and not leave the BT firmware in a bad state.
 --]]
 function TTSEngine:forceKillAll()
+    self.synthesis_generation = (self.synthesis_generation or 0) + 1
     self._socket_clean = false
     -- Cancel any pending launchAndStart
     if self._pending_launch_fn then
@@ -7467,6 +7486,24 @@ end
 function TTSEngine:preferPiperVoice()
     return self.backend == self.BACKENDS.PIPER and self.plugin
         and self.plugin:getSetting("piper_keep_voice", self:supportsPocketBookSpeaker()) or false
+end
+
+-- Apply the fast English default once when the new Era package arrives.
+-- An explicit espeak/custom choice is preserved; later user changes win.
+function TTSEngine:applyEraFastVoiceDefault(saved_backend)
+    if not self:supportsPocketBookSpeaker() or not self.plugin
+            or not (self.sanotts_voices and self.sanotts_voices.kristin)
+            or self.plugin:getSetting("_era_fast_voice_default_applied", false) then
+        return saved_backend
+    end
+    if not saved_backend or saved_backend == self.BACKENDS.PIPER then
+        saved_backend = self.BACKENDS.SANOTTS
+        self.plugin:setSetting("tts_backend", saved_backend)
+        self.plugin:setSetting("sanotts_voice", "kristin")
+        self.plugin:setSetting("espeak_only_mode", false)
+    end
+    self.plugin:setSetting("_era_fast_voice_default_applied", true)
+    return saved_backend
 end
 
 return TTSEngine

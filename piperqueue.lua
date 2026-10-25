@@ -344,21 +344,10 @@ function PiperQueue:buildBaseCommand()
     end
     -- sanoTTS engine: same FIFO/JSON protocol, different binary and args.
     if engine.backend == engine.BACKENDS.SANOTTS and engine.sanotts_server then
-        local exec_prefix = ""
         local plugin_dir = engine.plugin_dir
             or "/mnt/onboard/.adds/koreader/plugins/audiobook.koplugin"
-        local espeak_lib = plugin_dir .. "/espeak-ng/lib"
-        local ld_linux = espeak_lib .. "/ld-linux-armhf.so.3"
-        local ld_f = io.open(ld_linux, "r")
-        if ld_f then
-            ld_f:close()
-            local lib_path = espeak_lib .. ":/usr/lib:/lib"
-            exec_prefix = string.format('"%s" --library-path "%s" ',
-                ld_linux, lib_path)
-        else
-            exec_prefix = string.format('LD_LIBRARY_PATH="%s:/usr/lib:/lib" ',
-                espeak_lib)
-        end
+        -- The bundled snt_server is static musl: execute it directly.
+        -- Only its optional espeak child needs the glibc loader below.
         local espeak_bin = engine.espeak_bin
             or (plugin_dir .. "/espeak-ng/bin/espeak-ng")
         local espeak_data = engine.espeak_data_path
@@ -425,8 +414,8 @@ function PiperQueue:buildBaseCommand()
         -- for the one core.
         local threads_prefix = _cpu_cores > 1 and "SNT_THREADS=2 " or ""
         return string.format(
-            '%snice -n 19 %s%s --model "%s" --espeak-bin "%s" --espeak-data "%s"%s%s%s%s%s',
-            threads_prefix, exec_prefix, engine.sanotts_server, engine.sanotts_voice_dir,
+            '%snice -n 19 "%s" --model "%s" --espeak-bin "%s" --espeak-data "%s"%s%s%s%s%s',
+            threads_prefix, engine.sanotts_server, engine.sanotts_voice_dir,
             espeak_bin, espeak_data, loader_flag, engine_args,
             g2p_flag, espeak_voice_flag, phoneme_flag)
     end

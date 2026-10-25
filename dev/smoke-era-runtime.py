@@ -4,8 +4,10 @@ import argparse
 import json
 import os
 import shutil
+import shlex
 import subprocess
 import tempfile
+import time
 import wave
 from pathlib import Path
 from zipfile import ZipFile
@@ -49,23 +51,46 @@ def main():
             assert wav.getframerate() == 22050 and wav.getsampwidth() == 2 and wav.getnchannels() == 1
             samples = wav.readframes(wav.getnframes())
             assert len(samples) > 44000 and any(samples), "Expected non-silent English PCM"
-        # Exercise the actual ARM neural runtime, its English model and a
-        # resident JSON-input process delivering more than one sentence.
-        piper = plugin / "piper"
-        phonemes = Path(data_directory) / "piper-data"
-        shutil.copytree(piper / "espeak-ng-data", phonemes)
-        neural_audio = [root / "piper-1.wav", root / "piper-2.wav"]
+        # Static sanoTTS runs directly. Its OOV phonemizer child is itself
+        # ARM, so QEMU needs a host wrapper where the reader uses --loader.
+        wrapper = root / "espeak-wrapper"
+        wrapper.write_text("#!/bin/sh\nexec " + shlex.join([
+            args.qemu, str(loader), "--library-path", str(libraries),
+            str(plugin / "espeak-ng/bin/espeak-ng.bin")]) + ' "$@"\n')
+        wrapper.chmod(0o755)
+        neural_audio = [root / ("sano-" + str(i) + ".wav") for i in range(4)]
+        texts = ["Hello from the reader.", "Welcome to your book.", "reader", "Hello qxzvabcdef"]
         requests = "".join(json.dumps({"text": text, "output_file": str(path)}) + "\n"
-                           for text, path in zip(["Hello from Piper.", "Welcome to your book."], neural_audio))
-        result = subprocess.run([args.qemu, str(loader), "--library-path",
+                           for text, path in zip(texts, neural_audio))
+        env["SNT_THREADS"] = "2"
+        started = time.monotonic()
+        result = subprocess.run([args.qemu, str(plugin / "sanotts/snt_server"), "--model",
+                                 str(plugin / "sanotts/voice"), "--engine", "int8", "--g2p", "nano",
+                                 "--espeak-bin", str(wrapper), "--espeak-data", str(share)],
+                                env=env, input=requests, capture_output=True, text=True,
+                                check=True, timeout=60)
+        for path in neural_audio:
+            assert str(path) in result.stdout, "sanoTTS must deliver each sentence/word"
+            with wave.open(str(path)) as wav:
+                assert wav.getframerate() == 22050 and wav.getsampwidth() == 2 and wav.getnchannels() == 1
+                assert wav.getnframes() > 1000 and any(wav.readframes(wav.getnframes()))
+        assert "espeak_fb=1" in result.stderr, "Verify the out-of-vocabulary espeak child"
+        print(f"sanoTTS ARM check: two sentences, one word and OOV fallback in {time.monotonic()-started:.2f}s under emulation")
+        # The optional larger build keeps the slow Piper alternative tested.
+        piper = plugin / "piper"
+        if (piper / "piper.bin").exists():
+            phonemes = Path(data_directory) / "piper-data"
+            shutil.copytree(piper / "espeak-ng-data", phonemes)
+            piper_audio = root / "piper.wav"
+            requests = json.dumps({"text": "Hello from Piper.", "output_file": str(piper_audio)}) + "\n"
+            result = subprocess.run([args.qemu, str(loader), "--library-path",
                                  str(piper / "lib") + ":" + str(libraries),
                                  str(piper / "piper.bin"), "--model", str(piper / "en_US-danny-low.onnx"),
                                  "--espeak_data", str(phonemes), "--json-input", "--sentence_silence", "0"],
                                 env=env, input=requests, capture_output=True, text=True,
                                 check=True, timeout=180)
-        for path in neural_audio:
-            assert str(path) in result.stdout, "Piper must acknowledge each generated sentence"
-            with wave.open(str(path)) as wav:
+            assert str(piper_audio) in result.stdout
+            with wave.open(str(piper_audio)) as wav:
                 assert wav.getframerate() == 16000 and wav.getsampwidth() == 2 and wav.getnchannels() == 1
                 samples = wav.readframes(wav.getnframes())
                 assert len(samples) > 8000 and any(samples), "Expected non-silent neural speech"
@@ -78,7 +103,7 @@ def main():
                                  "--rate", "48000", "--channels", "2", str(neural_audio[-1])],
                                 env=env, capture_output=True, text=True, check=True, timeout=30)
         assert "PLAYING\n" in result.stderr and "write error:" not in result.stderr
-        print("ARM runtime OK: espeak, resident Piper English synthesis, PCM conversion, ALSA null playback")
+        print("ARM runtime OK: espeak, resident sanoTTS, selected-word synthesis, PCM conversion, ALSA null playback")
 
 
 if __name__ == "__main__":

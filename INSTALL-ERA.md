@@ -1,19 +1,22 @@
 # PocketBook Era: English read-aloud through the built-in speaker
 
 Target: **original Era (PB700), firmware U700.6.10.3209, KOReader 2026.03**.
-Version 0.6.3.3 includes **Piper neural TTS with the offline English Danny
-voice**, plus eSpeak NG. The speaker output and highlighting fixes from
-0.6.3.2 have been confirmed working on the device. Piper still needs an
-on-device speed and playback check.
+Version **0.6.3.4** bundles the **sanoTTS Kristin English neural voice** for
+faster synthesis, plus eSpeak NG. Speaker playback and highlighting fixes
+are retained. On first launch this build switches an existing Era Piper
+setup to sanoTTS/Kristin once; later engine choices remain yours.
 
-If upgrading, replace the old plugin folder and keep **Era built-in speaker**
-selected, then choose Piper as described below. No model download is needed.
+The stock PocketBook **English (American) Julie** engine is not connected
+in this build: the public InkView SDK has no speech-synthesis API, and its
+firmware-specific entry point has not been verified. Kristin is a separate
+bundled engine. It generated a short phrase in about 0.22 seconds under
+emulation in the development check; actual Era speed needs a device test.
 
 1. Quit KOReader. Connect the Era to your computer by USB.
 2. If an older `audiobook.koplugin` or `audiobook_era.koplugin` is installed,
    move it outside the `plugins` folder as a backup. Keep only one installed
    copy of this plugin.
-3. Extract **`audiobook-era-v0.6.3.3.zip`**. Copy its **`audiobook.koplugin`**
+3. Extract **`audiobook-era-v0.6.3.4.zip`**. Copy its **`audiobook.koplugin`**
    folder into **`applications/koreader/plugins/`** on the Era's USB drive.
    The device path is `/mnt/ext1/applications/koreader/plugins/audiobook.koplugin/`.
    Do not use GitHub's “Source code” ZIP: it lacks the speech runtime.
@@ -21,29 +24,35 @@ selected, then choose Piper as described below. No model download is needed.
 5. Open an English EPUB. Under **Tools → Audiobook Read-Along**, choose
    **Audio output (PocketBook) → Era built-in speaker (firmware audio routing)**.
    This is the default on a fresh installation of an original Era. Select
-   **Voice settings → TTS engine → Piper (neural, natural-sounding)**.
-   The bundled `en_US-danny-low` English voice is selected automatically if
-   no other model is saved. If needed, pick Danny in the Piper voice menu.
+   **Voice settings → TTS engine → sanoTTS (neural, lightweight)**.
+   Under **sanoTTS voice**, choose **kristin (English, 700 KB, fast)** if needed.
 6. Long-press a word and tap **Read aloud from here**. Speech starts at that
    word and continues through the book. Use pause or close on the player bar
-   to pause or stop. Set **Voice settings → Voice → English** if needed.
+   to pause or stop.
 
 No Wi-Fi, Bluetooth speaker, root access, or external TTS service is needed.
 The stock PocketBook TTS voice packages are separate from this plugin's voice.
 
-## Piper on the Era
+## Read just a selected word
 
-Piper sounds more natural than eSpeak but takes longer to generate speech.
-Expect an initial wait and possible pauses between sentences. The package
-uses one resident model process, one sentence per batch, and shorter text
-chunks by default on the Era to limit memory use.
+Long-press a word, then tap **Read word** in the dictionary popup. The popup
+stays open so you can repeat it. The text-selection menu has the same action.
+It speaks one selected word and stops, without advancing to the next sentence
+or page. With several words selected, it speaks the first one. Choosing
+another word, starting read-along, closing the book, or suspending cancels
+any previous word request.
 
-**Voice settings → Keep Piper voice (wait for synthesis)** is on by default
-on the Era. It waits for Piper instead of playing robotic eSpeak sentences
-while the model loads or when synthesis is slower than playback. If Piper
-actually fails or times out, playback stops with an error so no text is
-silently skipped. For faster speech, select eSpeak NG explicitly, or turn
-off Keep Piper voice to restore the upstream automatic fallback behavior.
+## Faster neural speech
+
+Kristin uses a small int8 model and in-process word pronunciation, avoiding
+Piper's large ONNX model. It trades some naturalness for speed. The default
+package includes Kristin and eSpeak, with no voice download required. The
+larger Piper/Danny alternative can be included by building with `--with-piper`.
+
+To investigate reuse of Julie, generate the existing Audiobook bug report.
+Its `pb_stock_tts_files` field lists candidate installed voice/library names;
+it does not copy voice or license contents. Those firmware details are needed
+before a stock-engine helper can be implemented and tested.
 
 ## First device check
 
@@ -76,8 +85,9 @@ Run `python3 tools/package-era.py` (Python 3 and curl). It verifies the pinned
 upstream runtime checksum, adds this fork's current source, and writes the
 installable ZIP and its SHA256 file under `dist/`. You can reuse a downloaded
 runtime with `--runtime-zip /path/to/audiobook-koplugin-v0.6.3.zip`.
+Add `--with-piper` to include the larger Piper runtime and Danny voice.
 
 Run `LUAJIT=luajit sh dev/run_pocketbook_tests.sh` for the native ABI and engine
 regression tests. These require a host C compiler and LuaJIT, not the reader.
-Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.3.zip` with
+Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.4.zip` with
 `qemu-arm` installed to verify the packaged ARM English engine and player.
