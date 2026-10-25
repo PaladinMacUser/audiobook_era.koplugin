@@ -1,10 +1,10 @@
 # PocketBook Era: English read-aloud through the built-in speaker
 
 Target: **original Era (PB700), firmware U700.6.10.3209, KOReader 2026.03**.
-Version **0.6.3.5** bundles the **sanoTTS Kristin English neural voice** for
-faster synthesis, plus eSpeak NG and pitch-preserving speech tempo. Speaker playback and highlighting fixes
-are retained. On first launch this build switches an existing Era Piper
-setup to sanoTTS/Kristin once; later engine choices remain yours.
+Version **0.6.3.6** adds **RHVoice/SLT (American English)** as another offline
+engine. It also includes sanoTTS/Kristin, eSpeak NG, pitch-preserving tempo
+and **Read word**. Your existing engine choice is retained when upgrading
+from the previous Era package; select RHVoice explicitly to try it.
 
 The stock PocketBook **English (American) Julie** engine is not connected
 in this build: the public InkView SDK has no speech-synthesis API, and its
@@ -16,7 +16,7 @@ emulation in the development check; actual Era speed needs a device test.
 2. If an older `audiobook.koplugin` or `audiobook_era.koplugin` is installed,
    move it outside the `plugins` folder as a backup. Keep only one installed
    copy of this plugin.
-3. Extract **`audiobook-era-v0.6.3.5.zip`**. Copy its **`audiobook.koplugin`**
+3. Extract **`audiobook-era-v0.6.3.6.zip`**. Copy its **`audiobook.koplugin`**
    folder into **`applications/koreader/plugins/`** on the Era's USB drive.
    The device path is `/mnt/ext1/applications/koreader/plugins/audiobook.koplugin/`.
    Do not use GitHub's “Source code” ZIP: it lacks the speech runtime.
@@ -24,14 +24,31 @@ emulation in the development check; actual Era speed needs a device test.
 5. Open an English EPUB. Under **Tools → Audiobook Read-Along**, choose
    **Audio output (PocketBook) → Era built-in speaker (firmware audio routing)**.
    This is the default on a fresh installation of an original Era. Select
-   **Voice settings → TTS engine → sanoTTS (neural, lightweight)**.
-   Under **sanoTTS voice**, choose **kristin (English, 700 KB, fast)** if needed.
+   **Voice settings → TTS engine → RHVoice (SLT, American English)** to try
+   the new engine. Your saved rate, such as 0.5×, and volume still apply.
+   To return to Kristin, select **sanoTTS (neural, lightweight)** and choose
+   **kristin (English, 700 KB, fast)** under **sanoTTS voice**.
 6. Long-press a word and tap **Read aloud from here**. Speech starts at that
    word and continues through the book. Use pause or close on the player bar
    to pause or stop.
 
 No Wi-Fi, Bluetooth speaker, root access, or external TTS service is needed.
 The stock PocketBook TTS voice packages are separate from this plugin's voice.
+
+## Additional RHVoice engine
+
+SLT is an American English female voice. It uses statistical parametric
+synthesis, independently of sanoTTS and Piper, and renders 24 kHz audio.
+It is an alternative to compare, not modern large-model neural speech.
+Both **Read aloud from here** and **Read word** use the selected engine.
+No voice download is needed after installing the complete ZIP.
+
+The development ARM-emulation check generated a short sentence in about
+0.9 seconds and a word at half speed in about 0.7 seconds, including startup.
+Actual Era performance is unmeasured. RHVoice loads for each request and
+does not prefetch in this build, so short gaps between sentences are possible.
+Failed synthesis stops reading instead of silently changing the voice or
+skipping content. Word timing is estimated. See `rhvoice/README.md`.
 
 ## Read just a selected word
 
@@ -46,13 +63,13 @@ any previous word request.
 
 Kristin uses a small int8 model and in-process word pronunciation, avoiding
 Piper's large ONNX model. It trades some naturalness for speed. The default
-package includes Kristin and eSpeak, with no voice download required. The
+package includes Kristin, RHVoice/SLT and eSpeak, with no voice download required. The
 larger Piper/Danny alternative can be included by building with `--with-piper`.
 
 ### Slower speech without stretching the voice model
 
 If 1.0× speech is too fast, keep **Voice settings → Speech rate** at **0.5×**
-or **0.75×**. On the Era, version 0.6.3.5 renders Kristin at its native pace
+or **0.75×**. On the Era, version 0.6.3.6 renders Kristin at its native pace
 and changes the completed WAV's tempo with Sonic, preserving pitch. It no
 longer doubles the model's phoneme durations for 0.5× playback. The same
 processing applies to **Read word**. Your saved speed is retained.
@@ -93,17 +110,20 @@ or restore your backup. This build does not edit the firmware's audio files.
 
 ## Building the installable ZIP
 
-Run `python3 tools/package-era.py` (Python 3, curl and `gcc-arm-linux-gnueabihf`). It verifies the pinned
+Run `python3 tools/package-era.py` (Python 3, Git, curl, CMake and `g++-arm-linux-gnueabihf`). It verifies the pinned
 upstream runtime checksum, adds this fork's current source, and writes the
 installable ZIP and its SHA256 file under `dist/`. You can reuse a downloaded
 runtime with `--runtime-zip /path/to/audiobook-koplugin-v0.6.3.zip`.
 Add `--with-piper` to include the larger Piper runtime and Danny voice.
 Alternatively pass `--tempo-binary /path/to/static-arm-wav-tempo`; see
 `tempo/README.md` for compiler commands and Sonic provenance.
+RHVoice source and English/SLT data are fetched at pinned revisions and built
+statically. Use `--rhvoice-dir /path/to/runtime` to reuse a runtime built by
+`tools/build-rhvoice.py`; the package includes corresponding source.
 
 Run `LUAJIT=luajit sh dev/run_pocketbook_tests.sh` for the native ABI and engine
 regression tests. These require a host C compiler and LuaJIT, not the reader.
 Run `python3 dev/test_wav_tempo.py` for pitch, duration, word-ending and
 malformed-input checks of the tempo converter.
-Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.5.zip` with
+Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.6.zip` with
 `qemu-arm` installed to verify the packaged ARM English engine and player.

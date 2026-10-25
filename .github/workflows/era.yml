@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install test dependencies
-        run: sudo apt-get update && sudo apt-get install -y luajit qemu-user gcc-arm-linux-gnueabihf
+        run: sudo apt-get update && sudo apt-get install -y luajit qemu-user gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf cmake
       - name: Check Lua syntax
         run: luajit -e 'for f in io.popen("find . -maxdepth 1 -name \"*.lua\""):lines() do assert(loadfile(f), f) end'
       - name: Test PocketBook routing and playback
@@ -22,8 +22,8 @@ jobs:
       - name: Assemble installable English package
         run: python3 tools/package-era.py
       - name: Verify bundled ARM English speech and WAV playback
-        run: python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.5.zip
+        run: python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.6.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: audiobook-era-v0.6.3.5
+          name: audiobook-era-v0.6.3.6
           path: dist/*

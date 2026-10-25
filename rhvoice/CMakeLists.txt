@@ -1,0 +1,27 @@
+cmake_minimum_required(VERSION 3.16)
+project(era_rhvoice LANGUAGES C CXX)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT RHVOICE_SOURCE)
+  message(FATAL_ERROR "Set RHVOICE_SOURCE to the pinned RHVoice checkout")
+endif()
+set(CONFIG_PATH "")
+set(DATA_PATH "")
+set(VERSION "1.18.4-era")
+set(ENABLE_SONIC ON)
+set(ENABLE_PKG OFF)
+configure_file(${RHVOICE_SOURCE}/src/core/config.h.in ${RHVOICE_SOURCE}/src/core/config.h @ONLY)
+configure_file(${RHVOICE_SOURCE}/src/include/core/config.h.in ${RHVOICE_SOURCE}/src/include/core/config.h)
+file(GLOB core ${RHVOICE_SOURCE}/src/core/*.cpp)
+list(FILTER core EXCLUDE REGEX "/(emoji_data|unidata)\\.cpp$")
+file(GLOB hts ${RHVOICE_SOURCE}/src/hts_engine/HTS_*.c)
+add_executable(rhvoice-slt cli.cpp ${core} ${hts}
+  ${RHVOICE_SOURCE}/src/lib/lib.cpp ../tempo/sonic.c)
+target_include_directories(rhvoice-slt PRIVATE
+  ${RHVOICE_SOURCE}/src/include ${RHVOICE_SOURCE}/src/hts_engine
+  ${RHVOICE_SOURCE}/src/third-party/rapidxml ${RHVOICE_SOURCE}/src/third-party/utf8
+  ../tempo)
+target_compile_options(rhvoice-slt PRIVATE -O2 -Wno-deprecated-declarations)
+target_link_options(rhvoice-slt PRIVATE -static -s)
+target_link_libraries(rhvoice-slt PRIVATE m pthread)

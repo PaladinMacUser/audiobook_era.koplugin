@@ -1,8 +1,11 @@
 # PocketBook Era fork
 
 Offline English read-aloud through the original Era's built-in speaker,
-targeting **U700.6.10.3209** and **KOReader 2026.03**. Version **0.6.3.5**
-includes the fast **sanoTTS/Kristin** neural voice, eSpeak NG and **Read word**.
+targeting **U700.6.10.3209** and **KOReader 2026.03**. Version **0.6.3.6**
+adds **RHVoice/SLT (American English)** as another offline TTS engine,
+alongside **sanoTTS/Kristin**, eSpeak NG and **Read word**. Your current
+engine remains selected. To try SLT, choose **Tools → Audiobook Read-Along →
+Voice settings → TTS engine → RHVoice (SLT, American English)**.
 At slower speeds it now uses pitch-preserving audio tempo conversion: Kristin
 renders at its native pace, then Sonic slows the finished clip. Existing
 speed preferences, including 0.5×, are retained. This addresses the duration
@@ -19,13 +22,21 @@ The stock PocketBook Julie voice is not integrated yet: InkView exposes
 routing but no public synthesis API. The bug report now lists candidate
 stock-engine voice/library paths for further investigation. The included
 Kristin voice is a separate faster engine, confirmed reading through the
-speaker on the Era. The new slower-speech processing needs a listening check.
+speaker on the Era. The user reports the slower-speech change helped but
+Kristin's quality remains limited; RHVoice is a separate voice to compare.
 
-Build with `python3 tools/package-era.py` (requires `gcc-arm-linux-gnueabihf`,
-or pass an already built static ARM `--tempo-binary`); add `--with-piper` for the larger
+Build with `python3 tools/package-era.py` (Python 3, Git, curl, CMake and
+`g++-arm-linux-gnueabihf`); add `--with-piper` for the larger
 Piper/Danny alternative. The in-app updater points to this fork. The upstream
 documentation follows; some optional engines and audiobook features require
 the larger upstream runtime bundle.
+
+RHVoice renders SLT at 24 kHz, supports the saved speech rate and volume,
+and works with both read-along and selected-word playback. It is a classic
+statistical voice, not a large neural narrator. A short sentence took about
+0.9 seconds including startup under ARM emulation; actual Era speed and
+preferred voice quality need a listening check. See [RHVoice details and
+source](rhvoice/README.md).
 
 ---
 

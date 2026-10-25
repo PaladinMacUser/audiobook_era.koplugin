@@ -65,6 +65,7 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
                 espeak = _("espeak-ng"),
                 piper = _("Piper (neural)"),
                 sanotts = _("sanoTTS (neural)"),
+                rhvoice = _("RHVoice (SLT, American English)"),
                 pico = _("Pico TTS"),
                 flite = _("Flite"),
                 festival = _("Festival"),
@@ -441,6 +442,11 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
             sub_item_table_func = function()
                 return MenuBuilder.buildSanottsVoiceMenu(plugin)
             end,
+        })
+    elseif plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.RHVOICE then
+        table.insert(menu, {
+            text = _("Voice: SLT (American English)"),
+            enabled = false,
         })
     elseif plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.SANOTTS_JP then
         table.insert(menu, {
@@ -982,6 +988,13 @@ function MenuBuilder.buildEngineSelectMenu(plugin)
         })
     end
 
+    if engine.rhvoice_bin then
+        table.insert(available, {
+            id = engine.BACKENDS.RHVOICE,
+            label = _("RHVoice (SLT, American English)"),
+        })
+    end
+
     -- sanoTTS-jp: Japanese, bring-your-own-weights.  Selectable only once
     -- the weights and dictionary are downloaded (getSntJpStatus().complete).
     if engine:getSntJpStatus().complete then
@@ -1025,6 +1038,10 @@ function MenuBuilder.buildEngineSelectMenu(plugin)
                 return engine.backend == backend.id
             end,
             callback = function(touchmenu_instance)
+                if (backend.id == engine.BACKENDS.RHVOICE or engine.backend == engine.BACKENDS.RHVOICE)
+                        and plugin.stopReadAlong then
+                    plugin:stopReadAlong()
+                end
                 engine:setBackend(backend.id)
                 plugin:setSetting("tts_backend", backend.id)
                 -- An explicit engine choice clears the espeak-only mode

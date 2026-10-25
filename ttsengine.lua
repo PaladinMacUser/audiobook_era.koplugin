@@ -71,6 +71,7 @@ local TTSEngine = {
         ANDROID = "android",
         PIPER = "piper",
         SANOTTS = "sanotts",
+        RHVOICE = "rhvoice",
         SANOTTS_JP = "sanotts-jp",
         KINDLE_NATIVE = "kindle-native",
         NATIVE = "platform-native",
@@ -483,6 +484,22 @@ function TTSEngine:detectBackend()
             self.snt_jp_dict = nil
         end
 
+        -- RHVoice is an optional addition. Detect its runtime without
+        -- changing the current/default engine or any saved voice choice.
+        local rhvoice_bin = plugin_dir .. "/rhvoice/rhvoice-slt"
+        self.rhvoice_bin = nil
+        local rhvoice_complete = true
+        for _, relative in ipairs({
+            "data/languages/English/language.info", "data/languages/English/cmulex.fst",
+            "data/voices/slt/voice.info", "data/voices/slt/24000/voice.data",
+        }) do
+            local f = io.open(plugin_dir .. "/rhvoice/" .. relative, "rb")
+            if f then f:close() else rhvoice_complete = false end
+        end
+        if rhvoice_complete and ensureBinary(rhvoice_bin) and binaryRunsOnHost(rhvoice_bin) then
+            self.rhvoice_bin = rhvoice_bin
+        end
+
         -- Pick default backend: espeak-ng first (lighter, existing default),
         -- then sanoTTS (neural, ~700KB voice, runs on 512MB devices), then
         -- Piper (best quality).  The automatic quality-tier selection
@@ -890,8 +907,12 @@ function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
         audio_file:gsub("'", "'\\''"),
         speed
     )
+    if self.backend == self.BACKENDS.RHVOICE then
+        cmd = cmd .. string.format(" --volume '%.3f'", self.volume or 1.0)
+    end
     local done_marker = audio_file .. ".done"
-    local log_file = "/tmp/.native_tts_last.log"
+    local log_file = self.backend == self.BACKENDS.RHVOICE
+        and "/tmp/.rhvoice_last.log" or "/tmp/.native_tts_last.log"
     local bg_cmd = string.format(
         '(%s > "%s" 2>&1; echo $? > "%s") &',
         cmd, log_file, done_marker
@@ -925,7 +946,7 @@ function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
                 af:close()
             end
 
-            if size > 0 then
+            if exit_code == "0" and size > 44 then
                 engine.current_audio_file = audio_file
                 engine:generateTimingEstimates(engine._native_tts_text or text)
                 os.remove(log_file)
@@ -1326,6 +1347,11 @@ function TTSEngine:synthesizeCommand(text, callback)
     elseif self.backend == self.BACKENDS.NATIVE then
         -- Platform-native TTS via user-supplied helper binary/script.
         return self:_synthesizeNative(text, audio_file, callback)
+    elseif self.backend == self.BACKENDS.RHVOICE then
+        -- The bundled static adapter uses the same file-in/file-out
+        -- protocol, independently of user-supplied native helper settings.
+        return self:_synthesizeNativeOneshot(text, audio_file,
+            string.format("%.3f", self.rate or 1.0), callback)
     end
     if not cmd then
         logger.err("TTSEngine: Cannot create command for backend:", self.backend)
@@ -2106,6 +2132,9 @@ function TTSEngine:prefetch(text, use_espeak)
     if not self.backend or not text or text == "" then
         return false
     end
+    -- RHVoice runs asynchronously. The generic prefetch slot assumes a
+    -- synchronous callback and would overwrite the playing clip on return.
+    if self.backend == self.BACKENDS.RHVOICE then return false end
     -- Android TTS: dedicated async lookahead (issue #96).  The generic
     -- synchronous slot fill below cannot be used (synthesizeAndroid is async
     -- and would clobber current_audio_file), so prefetchAndroid fills the
@@ -7375,6 +7404,8 @@ function TTSEngine:setBackend(backend)
     -- Restore correct backend_cmd for the selected backend
     if backend == self.BACKENDS.PIPER then
         self.backend_cmd = self.piper_cmd or "piper"
+    elseif backend == self.BACKENDS.RHVOICE then
+        self.backend_cmd = self.rhvoice_bin
     elseif backend == self.BACKENDS.SANOTTS then
         -- snt_server needs no backend_cmd (the queue builds its own command);
         -- sample rate is fixed at 22050 for the int8 voice.

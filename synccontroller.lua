@@ -1223,8 +1223,10 @@ function SyncController:readNextSentence()
         if not synth_success then
             logger.warn("SyncController: Synthesis failed for sentence", controller.reading_sentence_idx)
             -- Piper failure: degrade the voice rather than drop book content
-            if controller.tts_engine.backend == controller.tts_engine.BACKENDS.PIPER or controller.tts_engine.backend == controller.tts_engine.BACKENDS.SANOTTS then
-                controller:_playViaEspeakOrSkip(sentence, "piper synthesize failed")
+            if controller.tts_engine.backend == controller.tts_engine.BACKENDS.PIPER
+                    or controller.tts_engine.backend == controller.tts_engine.BACKENDS.SANOTTS
+                    or controller.tts_engine.backend == controller.tts_engine.BACKENDS.RHVOICE then
+                controller:_playViaEspeakOrSkip(sentence, "synthesize failed")
             elseif controller.tts_engine.backend == controller.tts_engine.BACKENDS.ANDROID then
                 -- Neural Android engines (VoxSherpa/Kokoro) get force-stopped
                 -- for RAM. One miss can be a page-turn race: retry the same
@@ -1247,7 +1249,11 @@ function SyncController:readNextSentence()
 
     if success == false then
         -- synthesize() returned false immediately (no backend, etc.)
-        if self.tts_engine.backend == self.tts_engine.BACKENDS.ANDROID then
+        if self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE then
+            if self.state ~= self.STATE.STOPPED then
+                self:_playViaEspeakOrSkip(sentence, "synthesize returned false")
+            end
+        elseif self.tts_engine.backend == self.tts_engine.BACKENDS.ANDROID then
             self:_onAndroidSynthFailed("synthesize returned false")
         else
             self:readNextSentence()
@@ -3052,6 +3058,16 @@ through to readNextSentence() only when espeak is unavailable or fails.
 @return boolean  true when the sentence is being played via espeak
 --]]
 function SyncController:_playViaEspeakOrSkip(sentence, reason)
+    if self.tts_engine and self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE then
+        logger.err("SyncController: RHVoice synthesis failed:", reason)
+        self:stop()
+        local InfoMessage = require("ui/widget/infomessage")
+        UIManager:show(InfoMessage:new{
+            text = _("RHVoice could not generate this sentence.\n\nTry again, choose another TTS engine, or generate a bug report."),
+            timeout = 10,
+        })
+        return false
+    end
     if self.tts_engine and self.tts_engine:preferPiperVoice() then
         logger.err("SyncController: Piper voice could not be generated:", reason)
         self:stop()

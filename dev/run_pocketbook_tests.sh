@@ -18,3 +18,4 @@ LD_LIBRARY_PATH="$test_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "${LUAJIT:-luaj
 "${LUAJIT:-luajit}" dev/test_era_piper.lua
 "${LUAJIT:-luajit}" dev/test_word_reader.lua
 "${LUAJIT:-luajit}" dev/test_era_fast_tts.lua
+"${LUAJIT:-luajit}" dev/test_rhvoice.lua

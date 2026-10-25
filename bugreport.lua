@@ -215,6 +215,8 @@ local function collectPluginInfo(plugin)
         info.tts_backend = engine.backend or "nil (none detected)"
         info.tts_backend_cmd = engine.backend_cmd and sanitizePath(engine.backend_cmd) or "nil"
         info.tts_backend_error = engine.backend_error or "none"
+        info.rhvoice_binary = engine.rhvoice_bin and sanitizePath(engine.rhvoice_bin) or "not available"
+        info.rhvoice_voice = engine.backend == engine.BACKENDS.RHVOICE and "SLT (American English)" or "not active"
         info.sanotts_voice_active = engine.sanotts_voice_name or "not set"
         info.sanotts_tempo_binary = engine.sanotts_tempo and sanitizePath(engine.sanotts_tempo) or "not available"
         info.sanotts_rate_mode = engine.getSanoTempoSpeed and engine:getSanoTempoSpeed()

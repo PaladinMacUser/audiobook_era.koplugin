@@ -688,6 +688,9 @@ function Audiobook:addToMainMenu(menu_items)
                         local model_label = self:getSetting("piper_model_label", "default")
                         return T(_("Voice settings (Piper - %1)"), model_label)
                     end
+                    if self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE then
+                        return _("Voice settings (RHVoice - SLT)")
+                    end
                     local voice_label = self:getSetting("tts_voice_label", "English (GB)")
                     local variant_label = self:getSetting("tts_variant_label", "")
                     if variant_label ~= "" and variant_label ~= "Default (male)" then
@@ -1243,6 +1246,7 @@ function Audiobook:addToMainMenu(menu_items)
                         local backend_labels = {
                             espeak = "espeak-ng",
                             piper = "Piper",
+                            rhvoice = "RHVoice (SLT, American English)",
                             pico = "Pico",
                             flite = "Flite",
                             festival = "Festival",

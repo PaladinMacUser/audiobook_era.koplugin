@@ -11,6 +11,14 @@ MBROLA databases and audiobook decoders. `--with-piper` adds the original
 Piper runtime and Danny model. No PocketBook Julie voice/library/license
 payloads are distributed. All included speech engines work offline.
 
+Version 0.6.3.6 adds an optional, separately selectable RHVoice/SLT engine.
+`tools/build-rhvoice.py` pins RHVoice 1.18.4 and its English/SLT data, builds
+a static ARM adapter with Sonic, and includes the exact patched corresponding
+source in `rhvoice/corresponding-source.tar.gz`. Revision identifiers,
+licenses, the one standard-library portability patch and offline rebuild
+instructions are documented in `rhvoice/README.md` and `rhvoice/SOURCES.json`.
+The SLT data's upstream CMU notice and readme files are retained.
+
 Version 0.6.3.5 adds a small static ARM `wav-tempo` tool built from the
 vendored Sonic source, to slow Kristin speech while preserving pitch.
 Sonic is pinned to

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -14,7 +15,7 @@ RUNTIME_SHA256 = "a479409534cea65af60923cab69716a9affcb9357ab160f4bad5c03925d96b
 PREFIX = "audiobook.koplugin/"
 
 
-def package(runtime_zip, output, with_piper=False, tempo_binary=None):
+def package(runtime_zip, output, with_piper=False, tempo_binary=None, rhvoice_dir=None):
     if hashlib.sha256(runtime_zip.read_bytes()).hexdigest() != RUNTIME_SHA256:
         raise ValueError("Upstream runtime ZIP checksum mismatch")
     content = {}
@@ -50,6 +51,20 @@ def package(runtime_zip, output, with_piper=False, tempo_binary=None):
         if binary[:4] != b"\x7fELF" or binary[4:6] != b"\x01\x01" or binary[18:20] != b"\x28\x00":
             raise ValueError("wav-tempo must be a little-endian 32-bit ARM ELF binary")
         content[PREFIX + "tempo/wav-tempo"] = (binary, stat.S_IFREG | 0o755)
+    if rhvoice_dir is None:
+        subprocess.run([sys.executable, str(ROOT / "tools/build-rhvoice.py")], check=True)
+        rhvoice_dir = ROOT / ".cache/rhvoice-runtime"
+    rh_binary = (rhvoice_dir / "rhvoice-slt").read_bytes()
+    if rh_binary[:6] != b"\x7fELF\x01\x01" or rh_binary[18:20] != b"\x28\x00":
+        raise ValueError("RHVoice must be a little-endian 32-bit ARM ELF binary")
+    for source in sorted(rhvoice_dir.rglob("*")):
+        if source.is_file():
+            relative = source.relative_to(rhvoice_dir).as_posix()
+            content[PREFIX + "rhvoice/" + relative] = (source.read_bytes(), stat.S_IFREG | (0o755 if relative == "rhvoice-slt" else 0o644))
+    for source in sorted((ROOT / "rhvoice").iterdir()):
+        if source.is_file():
+            content[PREFIX + "rhvoice/" + source.name] = (source.read_bytes(), stat.S_IFREG | 0o644)
+    content[PREFIX + "tools/build-rhvoice.py"] = ((ROOT / "tools/build-rhvoice.py").read_bytes(), stat.S_IFREG | 0o644)
     for source in sorted((ROOT / "l10n").rglob("*")):
         if source.is_file():
             content[PREFIX + source.relative_to(ROOT).as_posix()] = (source.read_bytes(), stat.S_IFREG | 0o644)
@@ -58,7 +73,9 @@ def package(runtime_zip, output, with_piper=False, tempo_binary=None):
                 "espeak-ng/lib/libespeak-ng.so.1", "espeak-ng/share/espeak-ng-data/en_dict",
                 "wav-play/wav-play.bin", "wav-play/lib/libasound.so.2", "wordreader.lua",
                 "sanotts/snt_server", "sanotts/voice/front_q8.bin", "sanotts/voice/model_q8.bin",
-                "tempo/wav-tempo", "tempo/LICENSE")
+                "tempo/wav-tempo", "tempo/LICENSE", "rhvoice/rhvoice-slt",
+                "rhvoice/data/languages/English/cmulex.fst", "rhvoice/data/voices/slt/24000/voice.data",
+                "rhvoice/data/config/RHVoice.conf", "rhvoice/corresponding-source.tar.gz")
     if with_piper:
         required += (
                 "piper/piper.bin", "piper/lib/libonnxruntime.so.1.14.1",
@@ -85,15 +102,16 @@ def main():
     parser.add_argument("--runtime-zip", type=Path, help="Use a previously downloaded v0.6.3 runtime ZIP")
     parser.add_argument("--with-piper", action="store_true", help="Also include the slower Piper engine and Danny voice")
     parser.add_argument("--tempo-binary", type=Path, help="Use an already built static ARM wav-tempo")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.5.zip")
+    parser.add_argument("--rhvoice-dir", type=Path, help="Use a runtime already built by tools/build-rhvoice.py")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.6.zip")
     args = parser.parse_args()
     if args.runtime_zip:
-        package(args.runtime_zip, args.output, args.with_piper, args.tempo_binary)
+        package(args.runtime_zip, args.output, args.with_piper, args.tempo_binary, args.rhvoice_dir)
     else:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary) / "upstream.zip"
             subprocess.run(["curl", "--fail", "--location", "--retry", "3", "--output", str(runtime), RUNTIME_URL], check=True)
-            package(runtime, args.output, args.with_piper, args.tempo_binary)
+            package(runtime, args.output, args.with_piper, args.tempo_binary, args.rhvoice_dir)
 
 
 if __name__ == "__main__":

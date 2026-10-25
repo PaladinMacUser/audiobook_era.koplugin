@@ -88,6 +88,40 @@ def main():
                 assert any(wav.readframes(wav.getnframes()))
             assert not path.with_suffix(".wav.timing").exists(), "Native timing must not survive tempo conversion"
         print(f"ARM tempo check: four clips at half speed in {time.monotonic()-tempo_started:.2f}s under emulation")
+        # Copy the RHVoice runtime to tmpfs for ARM's 32-bit directory API.
+        # Omit --data: this also checks relocation beside the executable.
+        rh = Path(data_directory) / "rhvoice"
+        shutil.copytree(plugin / "rhvoice/data", rh / "data")
+        shutil.copy2(plugin / "rhvoice/rhvoice-slt", rh / "rhvoice-slt")
+        rh_started = time.monotonic()
+        rh_text = root / "rhvoice-input.txt"
+        rh_durations = []
+        rh_paths = []
+        for i, (text, speed) in enumerate([
+            ("Hello from your PocketBook reader.", "1.0"),
+            ("Hello from your PocketBook reader.", "0.5"),
+            ("reader", "0.5"),
+            ("Don't panic—it's 10:30.", "0.75"),
+        ]):
+            rh_text.write_text(text)
+            path = root / f"rhvoice-{i}.wav"
+            result = subprocess.run([args.qemu, str(rh / "rhvoice-slt"), "--input", str(rh_text),
+                                    "--output", str(path), "--speed", speed],
+                                   capture_output=True, text=True, check=True, timeout=30)
+            with wave.open(str(path)) as wav:
+                assert wav.getframerate() == 24000 and wav.getsampwidth() == 2 and wav.getnchannels() == 1
+                assert wav.getnframes() > 1000 and any(wav.readframes(wav.getnframes()))
+                rh_durations.append(wav.getnframes() / wav.getframerate())
+            rh_paths.append(path)
+            assert not list(root.glob(path.name + ".rhvoice.*")), "RHVoice must not leave partial WAVs"
+        assert 1.8 < rh_durations[1] / rh_durations[0] < 2.2, "RHVoice honors the selected half speed"
+        failed = root / "rhvoice-missing-data.wav"
+        result = subprocess.run([args.qemu, str(rh / "rhvoice-slt"), "--data", str(root / "missing-data"),
+                                 "--input", str(rh_text), "--output", str(failed), "--speed", "0.5"],
+                                capture_output=True, check=False, timeout=15)
+        assert result.returncode and not failed.exists(), "Missing RHVoice data must fail without publishing a WAV"
+        assert not list(root.glob("*.rhvoice.*")), "No partial RHVoice outputs after failure"
+        print(f"RHVoice ARM check: four English clips, half-speed duration and failure handling in {time.monotonic()-rh_started:.2f}s under emulation")
         # The optional larger build keeps the slow Piper alternative tested.
         piper = plugin / "piper"
         if (piper / "piper.bin").exists():
@@ -112,10 +146,10 @@ def main():
         result = subprocess.run([args.qemu, str(loader), "--library-path",
                                  str(plugin / "wav-play/lib") + ":" + str(libraries),
                                  str(plugin / "wav-play/wav-play.bin"), "--no-mixer", "-D", "hwout_mix",
-                                 "--rate", "48000", "--channels", "2", str(neural_audio[-1])],
+                                 "--rate", "48000", "--channels", "2", str(rh_paths[1])],
                                 env=env, capture_output=True, text=True, check=True, timeout=30)
         assert "PLAYING\n" in result.stderr and "write error:" not in result.stderr
-        print("ARM runtime OK: espeak, resident sanoTTS, selected-word synthesis, PCM conversion, ALSA null playback")
+        print("ARM runtime OK: espeak, resident sanoTTS, RHVoice/SLT, selected-word synthesis, PCM conversion, ALSA null playback")
 
 
 if __name__ == "__main__":
