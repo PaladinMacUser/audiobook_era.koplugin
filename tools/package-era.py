@@ -73,7 +73,7 @@ def package(runtime_zip, output, with_piper=False, tempo_binary=None, rhvoice_di
                 "espeak-ng/lib/libespeak-ng.so.1", "espeak-ng/share/espeak-ng-data/en_dict",
                 "wav-play/wav-play.bin", "wav-play/lib/libasound.so.2", "wordreader.lua",
                 "sanotts/snt_server", "sanotts/voice/front_q8.bin", "sanotts/voice/model_q8.bin",
-                "tempo/wav-tempo", "tempo/LICENSE", "rhvoice/rhvoice-slt",
+                "tempo/wav-tempo", "tempo/LICENSE", "rhvoice/rhvoice-slt", "gestureguard.lua",
                 "rhvoice/data/languages/English/cmulex.fst", "rhvoice/data/voices/slt/24000/voice.data",
                 "rhvoice/data/config/RHVoice.conf", "rhvoice/corresponding-source.tar.gz")
     if with_piper:
@@ -103,7 +103,7 @@ def main():
     parser.add_argument("--with-piper", action="store_true", help="Also include the slower Piper engine and Danny voice")
     parser.add_argument("--tempo-binary", type=Path, help="Use an already built static ARM wav-tempo")
     parser.add_argument("--rhvoice-dir", type=Path, help="Use a runtime already built by tools/build-rhvoice.py")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.7.zip")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.8.zip")
     args = parser.parse_args()
     if args.runtime_zip:
         package(args.runtime_zip, args.output, args.with_piper, args.tempo_binary, args.rhvoice_dir)

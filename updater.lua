@@ -35,6 +35,7 @@ local CRITICAL_FILES = {
     "mediaaligner.lua",
     "ttsengine.lua",
     "wordreader.lua",
+    "gestureguard.lua",
     "pocketbookaudio.lua",
     "synccontroller.lua",
     "menubuilder.lua",

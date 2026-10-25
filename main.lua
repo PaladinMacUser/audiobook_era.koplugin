@@ -86,6 +86,18 @@ function Audiobook:init()
         _utils_dir = _utils_dir:gsub("//+", "/"):gsub("/+$", "") .. "/"
         PLUGIN_PATH = _utils_dir
 
+        -- Install before document initialization: the reported crash happens
+        -- in KOReader's input loop as the book finishes opening.
+        if Device.model == "PB700" then
+            local ok_guard, err_guard = pcall(function()
+                local Version = require("version")
+                local revision = Version.getCurrentRevision and Version:getCurrentRevision()
+                dofile(_utils_dir .. "gestureguard.lua").install(
+                    require("device/gesturedetector"), Device, revision)
+            end)
+            if not ok_guard then logger.warn("Audiobook: gesture compatibility guard unavailable:", err_guard) end
+        end
+
         -- Load each submodule independently so a failure in one
         -- (e.g. btui.lua) doesn't prevent BugReport from loading.
         local function try_dofile(path)
