@@ -60,7 +60,7 @@ def package(runtime_zip, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-zip", type=Path, help="Use a previously downloaded v0.6.3 runtime ZIP")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.1.zip")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.6.3.2.zip")
     args = parser.parse_args()
     if args.runtime_zip:
         package(args.runtime_zip, args.output)

@@ -8,8 +8,10 @@ firmware **U700.6.10.3209** and **KOReader 2026.03**. See
 This fork prepares the firmware audio route with `configureAudioOutput()`,
 checks `AUDIO_OUT_SPEAKER`, and sends speech to the firmware's named loopback
 PCM without changing the codec mixer. It does not depend on `PlayFile`, which
-firmware 6.10 removed. Host regression tests pass; physical speaker playback
-is pending verification on an Era.
+firmware 6.10 removed. Initial speaker speech has been confirmed on this
+firmware. Version 0.6.3.2 fixes the reported word-highlighting crash and
+starts with the working `hwout_mix` route. Continuous playback still needs
+a device retest.
 
 Build the installable English ZIP with `python3 tools/package-era.py`.
 The in-app updater points to this fork so an upstream update cannot replace

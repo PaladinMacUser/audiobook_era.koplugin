@@ -14,3 +14,4 @@ int get_audio_status(audio_output_info *s) { s->type=output; return status_ok; }
 EOF
 ${CC:-cc} -Wall -Wextra -Werror -shared -fPIC "$test_dir/inkview.c" -o "$test_dir/libinkview.so"
 LD_LIBRARY_PATH="$test_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "${LUAJIT:-luajit}" dev/test_pocketbook_audio.lua
+"${LUAJIT:-luajit}" dev/test_word_highlighting.lua

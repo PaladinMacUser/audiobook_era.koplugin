@@ -49,6 +49,7 @@ local files = {
     ["/ebrmain/config/device.cfg"] = "bluetooth_device_name=PocketBook",
     ["/sys/class/bluetooth/hci0/address"] = "01:02:03:04:05:06",
 }
+local era_alsa_conf = files["/etc/asound.conf"]
 io.open = function(path, mode)
     if files[path] ~= nil and (not mode or mode == "r") then
         return {read=function() return files[path] end, close=function() end}
@@ -73,7 +74,8 @@ end
 local paths = enginePaths()
 local command = assert(a:command(paths))
 check(command:find("--no-mixer", 1, true), "never change codec mixer")
-check(command:find(" -D tts_sm", 1, true), "explicit firmware PCM disables hardware fallback")
+check(command:find("-D hwout_mix --rate 48000 --channels 2", 1, true), "start with working Era route and software conversion")
+check(not command:find("-D tts_sm", 1, true), "skip the Era's crashing tts_sm chain")
 check(not command:find("plughw", 1, true), "no physical codec fallback")
 check(command:find("'\\''", 1, true), "shell quote paths including apostrophes")
 files["/etc/asound.conf"] = 'pcm.hwout_mix { type dmix }'
@@ -82,10 +84,13 @@ check(command:find("-D hwout_mix --rate 48000 --channels 2", 1, true), "dmix fal
 files["/etc/asound.conf"] = '# pcm.tts_sm { type hw }'
 check(not a:command(paths), "commented-out PCMs must not qualify")
 files["/etc/asound.conf"] = 'pcm.tts_sm { type softvol }'
+command = assert(a:command(paths))
+check(command:find(" -D tts_sm", 1, true), "keep tts_sm fallback on firmware without hwout_mix")
 files["/usr/share/alsa/alsa.conf"] = nil
 check(not a:command(paths), "reject missing ALSA base configuration")
 files["/usr/share/alsa/alsa.conf"] = "base config"
 check(not a:command({}), "reject missing bundled player")
+files["/etc/asound.conf"] = era_alsa_conf
 
 -- Load the actual TTSEngine with lightweight KOReader UI shims.
 local device = {model="PB700", isPocketBook=function() return true end,
@@ -132,7 +137,7 @@ check(not e.is_speaking and #ui.shown == 1, "show actionable speaker error")
 lib.pb_test_set(1, 1, 3)
 check(e:play(), "speaker works without connected Bluetooth despite BT hardware")
 check(e.audio_pid == 42424, "real play path launches selected player")
-check(e._last_pid_cmd:find(" -D tts_sm", 1, true), "launch keeps strict loopback device")
+check(e._last_pid_cmd:find("-D hwout_mix --rate 48000 --channels 2", 1, true), "launch starts with the working Era loopback device")
 check(not e._last_pid_cmd:find("bluealsa", 1, true), "speaker does not start Bluetooth output")
 
 -- Exercise the real process watcher: open errors stop, PLAYING can advance.

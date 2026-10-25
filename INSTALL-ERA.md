@@ -1,14 +1,20 @@
 # PocketBook Era: English read-aloud through the built-in speaker
 
 Target: **original Era (PB700), firmware U700.6.10.3209, KOReader 2026.03**.
-This build includes offline English speech with eSpeak NG. Device playback
-still needs verification on a physical Era; host tests cannot verify sound.
+This build includes offline English speech with eSpeak NG. Initial speaker
+speech has been confirmed on this firmware. Version 0.6.3.2 fixes the reported
+word-highlighting crash; continuous playback needs a device retest.
+
+If upgrading from 0.6.3.1, replace its plugin folder with this build and keep
+**Era built-in speaker** selected. This build also starts with `hwout_mix`,
+the firmware audio route that produced speech, avoiding the `tts_sm` crashes
+seen in the device log.
 
 1. Quit KOReader. Connect the Era to your computer by USB.
 2. If an older `audiobook.koplugin` or `audiobook_era.koplugin` is installed,
    move it outside the `plugins` folder as a backup. Keep only one installed
    copy of this plugin.
-3. Extract **`audiobook-era-v0.6.3.1.zip`**. Copy its **`audiobook.koplugin`**
+3. Extract **`audiobook-era-v0.6.3.2.zip`**. Copy its **`audiobook.koplugin`**
    folder into **`applications/koreader/plugins/`** on the Era's USB drive.
    The device path is `/mnt/ext1/applications/koreader/plugins/audiobook.koplugin/`.
    Do not use GitHub's “Source code” ZIP: it lacks the speech runtime.
@@ -58,5 +64,5 @@ runtime with `--runtime-zip /path/to/audiobook-koplugin-v0.6.3.zip`.
 
 Run `LUAJIT=luajit sh dev/run_pocketbook_tests.sh` for the native ABI and engine
 regression tests. These require a host C compiler and LuaJIT, not the reader.
-Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.1.zip` with
+Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.6.3.2.zip` with
 `qemu-arm` installed to verify the packaged ARM English engine and player.

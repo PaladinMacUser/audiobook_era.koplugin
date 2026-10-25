@@ -61,7 +61,10 @@ function Audio:command(engine)
     self.has_hwout_mix = declared("hwout_mix") ~= nil
     -- Both names are firmware loopback PCMs. A non-default -D also makes
     -- wav-play's device selection strict: no plughw:0 / hw:0 fallback.
-    self.pcm = self.has_tts_sm and "tts_sm" or self.has_hwout_mix and "hwout_mix" or nil
+    -- Era 6.10 can abort in tts_sm's nested plug/softvol negotiation, even
+    -- after software conversion. The device report confirms hwout_mix
+    -- succeeds: start there with 48 kHz stereo instead of crashing twice.
+    self.pcm = self.has_hwout_mix and "hwout_mix" or self.has_tts_sm and "tts_sm" or nil
     if not self.pcm then
         self.error = "The firmware's tts_sm / hwout_mix audio route is missing. Generate a bug report."
         return nil

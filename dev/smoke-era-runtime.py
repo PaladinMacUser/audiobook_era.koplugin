@@ -49,11 +49,11 @@ def main():
             samples = wav.readframes(wav.getnframes())
             assert len(samples) > 44000 and any(samples), "Expected non-silent English PCM"
         config = root / "alsa-null.conf"
-        config.write_text("pcm.tts_sm { type null }\n")
+        config.write_text("pcm.hwout_mix { type null }\n")
         env["ALSA_CONFIG_PATH"] = str(config)
         result = subprocess.run([args.qemu, str(loader), "--library-path",
                                  str(plugin / "wav-play/lib") + ":" + str(libraries),
-                                 str(plugin / "wav-play/wav-play.bin"), "--no-mixer", "-D", "tts_sm",
+                                 str(plugin / "wav-play/wav-play.bin"), "--no-mixer", "-D", "hwout_mix",
                                  "--rate", "48000", "--channels", "2", str(audio)],
                                 env=env, capture_output=True, text=True, check=True, timeout=30)
         assert "PLAYING\n" in result.stderr and "write error:" not in result.stderr

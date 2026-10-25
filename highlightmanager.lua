@@ -1123,32 +1123,38 @@ function HighlightManager:_wordScreenBoxes(c0, c1)
     if line0 == line1 then
         local box = ctx.sboxes[line0]
         local lo_c = ctx.cum[line0 - 1] or 0
+        local hi_c = ctx.cum[line0]
         local y = box.y + math.floor(box.h / 2)
         local right = box.x + box.w
         local target0 = c0 - lo_c
         local target1 = c1 - lo_c
         if right > box.x + 2 and hi_c > lo_c then
             local lo, hi = box.x, right
+            local refined
             for _ = 1, 7 do
                 if hi - lo < 2 then break end
                 local mid = math.floor((lo + hi) / 2)
                 local len = selLen(box.x, y, mid, y)
                 if len == nil then break end
                 if len <= target0 then lo = mid else hi = mid end
+                refined = lo
             end
-            sx = lo
+            sx = refined or sx
             lo, hi = sx, right
+            refined = nil
             for _ = 1, 7 do
                 if hi - lo < 2 then break end
                 local mid = math.floor((lo + hi) / 2)
                 local len = selLen(box.x, y, mid, y)
                 if len == nil then break end
                 if len <= target1 then lo = mid else hi = mid end
+                refined = lo
             end
-            ex = lo
+            ex = refined or ex
         end
     end
-    if ex <= sx then return nil end
+    -- End coordinates on the next line can lie left of the start point.
+    if line0 == line1 and ex <= sx then return nil end
     local ok, r = pcall(doc.getTextFromPositions, doc,
         {x = sx, y = ctx.sboxes[line0].y + math.floor(ctx.sboxes[line0].h / 2)},
         {x = ex, y = ctx.sboxes[line1].y + math.floor(ctx.sboxes[line1].h / 2)},
@@ -1169,14 +1175,13 @@ function HighlightManager:_wordScreenBoxes(c0, c1)
     local out = {}
     for i = line0, line1 do
         local box = ctx.sboxes[i]
-        local lo_c = ctx.cum[i - 1] or 0
         local bx, bw = box.x, box.w
         if i == line0 and i == line1 then
             bx, bw = sx, ex - sx
         elseif i == line0 then
             bx, bw = sx, (box.x + box.w) - sx
         elseif i == line1 then
-            bx, bw = ex - box.x
+            bw = ex - box.x
         end
         if bw > 0 and box.h > 0 then
             table.insert(out, {x = bx, y = box.y, w = bw, h = box.h})
@@ -1214,7 +1219,9 @@ function HighlightManager:highlightWord(word, parsed_data)
     if not off then off = ctx.sent_text:find(nw, 1, true) end
     if not off then return end
     self._word_scan = off + #nw
-    local c0 = ctx.vis_start + off - 1
+    -- Lua find() returns a 1-based position; the screen map uses a 0-based
+    -- start and exclusive end. Keep the last word inside its line's range.
+    local c0 = ctx.vis_start + off - 2
     local c1 = c0 + #nw
     local boxes = self:_wordScreenBoxes(c0, c1)
     if not boxes then return end
