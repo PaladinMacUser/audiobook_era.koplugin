@@ -2877,7 +2877,7 @@ end
 
 -- Continuous RHVoice playback uses one firmware-routed ALSA stream. Single
 -- words and previews keep the established per-clip player and wake-up guard.
-function TTSEngine:_playEraRHVoice()
+function TTSEngine:_playEraRHVoice(on_word,on_complete,on_fail)
     local binary=(self.plugin_dir or ""):gsub("/+$","").."/rhvoice/era-player"
     local file=io.open(binary,"rb")
     if not file then self:recordAudioFailure("Era speaker","Persistent player is missing; reinstall the complete Era package");return false end
@@ -2907,8 +2907,15 @@ function TTSEngine:_playEraRHVoice()
             if ok then self:onPlaybackComplete()
             else
                 self:recordAudioFailure("Era speaker",reason or "Continuous playback failed")
+                local acknowledged=self._era_playing_at~=nil
                 self.is_speaking=false
-                if self.on_fail_callback then self.on_fail_callback() end
+                self._era_failed_session=true
+                self:_stopEraPlayer()
+                if not acknowledged then
+                    -- No audio was acknowledged: replay the same complete WAV
+                    -- through the established clip player, preserving the voice.
+                    if not self:play(on_word,on_complete,on_fail) and on_fail then on_fail() end
+                elseif on_fail then on_fail() end
             end
         end,{no_output=true,label="Era speaker",timeout=math.max(60,duration/1000+15),on_playing=function(lead)
             self.playback_latency_ms=lead+80
@@ -3016,8 +3023,11 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         end
     end
     if self.backend==self.BACKENDS.RHVOICE and self._rhvoice_continuous and self._pb_speaker_active
-            and (not self.plugin or self.plugin:getSetting("rhvoice_keep_speaker",true)) then
-        return self:_playEraRHVoice()
+            and not self._era_failed_session
+            and self.plugin and self.plugin:getSetting("rhvoice_keep_speaker",false) then
+        if self:_playEraRHVoice(on_word,on_complete,on_fail) then return true end
+        self._era_failed_session=true
+        self:_stopEraPlayer()
     end
     -- Block playback when no real audio output exists and no BT device is
     -- connected.  On single-core Kobos (no speaker), silently looping

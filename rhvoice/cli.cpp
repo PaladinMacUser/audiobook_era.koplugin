@@ -21,6 +21,7 @@
 
 struct Output {
     FILE *file;
+    double volume = 1;
     uint32_t rate = 0, samples = 0;
     uint32_t lead_ms = 0, lead_samples = 0;
     std::string cancel;
@@ -57,7 +58,19 @@ static int speech(const short *samples, unsigned count, void *userdata) {
     Output *out = static_cast<Output *>(userdata);
     if (!running || (!out->cancel.empty() && access(out->cancel.c_str(), F_OK) == 0)) return 0;
     if (count > (UINT32_MAX - 36) / 2 - out->samples) return 0;
-    if (fwrite(samples, 2, count, out->file) != count) return 0;
+    if (out->volume == 1) {
+        if (fwrite(samples, 2, count, out->file) != count) return 0;
+    } else {
+        // RHVoice clamps its relative gain to the voice's minimum. Apply
+        // the user's attenuation after synthesis so 0 really means mute.
+        short scaled[1024];
+        for (unsigned offset=0; offset<count;) {
+            unsigned n=count-offset; if(n>1024)n=1024;
+            for(unsigned i=0;i<n;i++) scaled[i]=static_cast<short>(std::lround(samples[offset+i]*out->volume));
+            if(fwrite(scaled,2,n,out->file)!=n)return 0;
+            offset+=n;
+        }
+    }
     out->samples += count;
     return 1;
 }
@@ -83,6 +96,7 @@ static bool render(RHVoice_tts_engine engine, const std::string &input,
     if ((!source.eof() && source.fail()) || (!cancel.empty() && access(cancel.c_str(), F_OK) == 0)) return false;
     Output out;
     out.lead_ms = static_cast<uint32_t>(lead_ms);
+    out.volume = volume;
     out.cancel = cancel;
     std::string temporary = output + ".rhvoice.XXXXXX";
     int fd = mkstemp(&temporary[0]);
@@ -94,7 +108,7 @@ static bool render(RHVoice_tts_engine engine, const std::string &input,
     params.voice_profile = voice.c_str();
     params.relative_rate = speed;
     params.relative_pitch = pitch;
-    params.relative_volume = volume;
+    params.relative_volume = 1;
     params.punctuation_mode = RHVoice_punctuation_none;
     RHVoice_message message = engine ? RHVoice_new_message(engine, text.data(), text.size(),
         ssml ? RHVoice_message_ssml : RHVoice_message_text, &params, &out) : NULL;

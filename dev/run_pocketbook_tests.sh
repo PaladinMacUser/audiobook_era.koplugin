@@ -25,6 +25,7 @@ LD_LIBRARY_PATH="$test_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "${LUAJIT:-luaj
 "${LUAJIT:-luajit}" dev/test_rhvoice_client.lua koreader-first
 "${LUAJIT:-luajit}" dev/test_rhvoice_client.lua plugin-first
 "${LUAJIT:-luajit}" dev/test_speech_tools.lua
+"${LUAJIT:-luajit}" dev/test_speech_controls.lua
 "${LUAJIT:-luajit}" dev/test_rhvoice_settings.lua
 ${CC:-cc} -std=c99 -O2 -Wall -Wextra -Werror rhvoice/era-player.c -ldl -o "$test_dir/era-player"
 ${CC:-cc} -shared -fPIC -Wall -Wextra -Werror dev/fixtures/alsa_pcm.c -o "$test_dir/libasound.so.2"

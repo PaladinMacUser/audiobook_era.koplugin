@@ -340,7 +340,7 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
     -- Volume submenu
     table.insert(menu, {
         text_func = function()
-            return T(_("Volume: %1%%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100))
+            return T(_("Volume: %1%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100))
         end,
         sub_item_table = MenuBuilder.buildVolumeMenu(plugin),
     })
@@ -583,8 +583,11 @@ function MenuBuilder.buildSpeechRateMenu(plugin)
                 return plugin:getSetting("speech_rate", 1.0) == rate
             end,
             callback = function()
-                plugin:setSetting("speech_rate", rate)
-                plugin.tts_engine:setRate(rate)
+                if plugin.sync_controller then plugin.sync_controller:setSpeechRate(rate)
+                else
+                    plugin:setSetting("speech_rate", rate)
+                    plugin.tts_engine:setRate(rate)
+                end
             end,
         })
     end
@@ -602,7 +605,6 @@ function MenuBuilder.buildPronunciationMenu(plugin)
     return {
         {text_func=function() return T(_("Pronunciation speed: %1x"),plugin:getSetting("word_speech_rate",0.75)) end,
             sub_item_table=rates},
-        {text=_("Repeat last word"),callback=function() plugin:repeatLastWord() end},
         {text=_("Cache word pronunciations"),checked_func=function() return plugin:getSetting("word_cache_enabled",true) end,
             callback=function() plugin:toggleSetting("word_cache_enabled",true) end},
         {text=_("Clear pronunciation cache"),callback=function() plugin:clearWordCache() end},
@@ -654,8 +656,11 @@ function MenuBuilder.buildVolumeMenu(plugin)
                 return plugin:getSetting("speech_volume", 1.0) == v
             end,
             callback = function()
-                plugin:setSetting("speech_volume", v)
-                plugin.tts_engine:setVolume(v)
+                if plugin.sync_controller then plugin.sync_controller:setSpeechVolumePct(v*100)
+                else
+                    plugin:setSetting("speech_volume", v)
+                    plugin.tts_engine:setVolume(v)
+                end
             end,
         })
     end
@@ -2465,14 +2470,17 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
         })
     end
     table.insert(items, {
-        text = T(_("Volume: %1%%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100)),
+        text = T(_("Volume: %1%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100)),
         callback = function()
             _valuePicker(_("Volume"), {0.25, 0.5, 0.75, 1.0},
                 plugin:getSetting("speech_volume", 1.0),
                 function(v) return string.format("%d%%", math.floor(v * 100)) end,
                 function(v)
-                    plugin:setSetting("speech_volume", v)
-                    if plugin.tts_engine then plugin.tts_engine:setVolume(v) end
+                    if plugin.sync_controller then plugin.sync_controller:setSpeechVolumePct(v*100)
+                    else
+                        plugin:setSetting("speech_volume", v)
+                        if plugin.tts_engine then plugin.tts_engine:setVolume(v) end
+                    end
                     if plugin.sync_controller and plugin.sync_controller.playback_bar
                         and plugin.sync_controller.playback_bar.updateVolume then
                         pcall(function()
@@ -2480,7 +2488,7 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
                         end)
                     end
                     UIManager:show(InfoMessage:new{
-                        text = T(_("Volume: %1%%"), math.floor(v * 100)),
+                        text = T(_("Volume: %1%"), math.floor(v * 100)),
                         timeout = 1.5,
                     })
                 end)
@@ -2533,8 +2541,8 @@ function MenuBuilder.buildRHVoiceMenu(plugin)
         {text=_("Pronunciation corrections"),sub_item_table_func=function() return MenuBuilder.buildRHCorrectionsMenu(plugin) end},
         {text=_("Pre-synthesize next sentence"),checked_func=function() return plugin:getSetting("rhvoice_prefetch",true) end,
             callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_prefetch",true) end},
-        {text=_("Keep Era speaker open between sentences"),checked_func=function() return plugin:getSetting("rhvoice_keep_speaker",true) end,
-            callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_keep_speaker",true) end,
+        {text=_("Keep Era speaker open between sentences"),checked_func=function() return plugin:getSetting("rhvoice_keep_speaker",false) end,
+            callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_keep_speaker",false) end,
             enabled_func=function() return plugin.tts_engine:supportsPocketBookSpeaker() end},
     }
 end

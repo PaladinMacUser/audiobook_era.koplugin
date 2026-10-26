@@ -85,4 +85,10 @@ function Settings.applyPreset(plugin,preset)
         plugin:setSetting("rhvoice_"..k,v)
     end
 end
+function Settings.migrateOutput(plugin,engine)
+    if engine:supportsPocketBookSpeaker() and not plugin:getSetting("_era_clip_default_081",false) then
+        plugin:setSetting("rhvoice_keep_speaker",false)
+        plugin:setSetting("_era_clip_default_081",true)
+    end
+end
 return Settings

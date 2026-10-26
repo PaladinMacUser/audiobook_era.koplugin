@@ -3,7 +3,12 @@
 Offline English read-aloud through the original Era's built-in speaker,
 targeting **U700.6.10.3209** and **KOReader 2026.03**.
 
-Version **0.8.0** includes four offline RHVoice voices: **SLT** and **CLB**
+Version **0.8.1** restores the established clip player as the default for
+continuous reading after an Era report of silence. Persistent speaker mode
+is opt-in; startup failures retry the same WAV through the clip player and
+retain the failure in diagnostics. Speed and volume controls regenerate the current
+sentence, or apply on resume when paused. Volume labels show one percent sign,
+and the Repeat last word menu entries have been removed. It includes four offline RHVoice voices: **SLT** and **CLB**
 (American English, female), **BDL** (American English, male), and **Alan**
 (Scottish English, male). Open **Tools → Audiobook Read-Along → Voice settings
 → RHVoice voices and tuning** to select or preview a voice.
@@ -12,7 +17,7 @@ The same menu provides gentle pitch adjustment, separate comma/sentence/
 paragraph pauses, saved pronunciation corrections, and the **Slow and clear**,
 **Everyday reading**, and **Word practice** presets. Corrections apply to
 continuous reading and **Read word**. Voice previews preserve the selected
-reading voice and last word for Repeat.
+reading voice.
 
 RHVoice pre-synthesizes one upcoming sentence while the current one plays.
 Continuous reading can keep one firmware-routed speaker stream open between
@@ -21,7 +26,7 @@ release it; the player also unloads after ten idle seconds. Fresh playback
 retains the 350 ms guard that protects word beginnings. Single-word playback
 and previews use the established guarded clip player.
 
-The earlier word cache, independent pronunciation speed, Repeat last word,
+The earlier word cache, independent pronunciation speed,
 persistent RHVoice engine, audio test and saved-failure diagnostics remain
 included, together with Kristin, eSpeak, pitch-preserving slow speech,
 speaker routing and highlighting fixes, and the KOReader 2026.03 gesture

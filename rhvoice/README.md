@@ -108,7 +108,12 @@ Only complete WAVs reach playback, and a cancelled request cannot deliver
 late audio. Missing/dead workers fail promptly; the next request can restart
 one. Lua also terminates a worker whose request exceeds 60 seconds.
 
-The ARM smoke test covers worker reuse, changed speed, exact speaker lead-in,
+Volume is applied as linear PCM attenuation after synthesis, bypassing the
+voice minimum that prevented zero from muting. The synthesis gain stays at
+its normal level, preserving the selected voice and pitch.
+
+The ARM smoke test covers worker reuse, changed SSML speed and PCM volume
+(including mute), exact speaker lead-in,
 cancellation followed by another request, invalid input, idle exit and restart.
 
 Version 0.7.1 fixes a Preview crash when KOReader has already declared

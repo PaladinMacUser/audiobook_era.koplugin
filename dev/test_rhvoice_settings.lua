@@ -44,6 +44,11 @@ for _,v in ipairs(Settings.voices) do
     f=assert(io.open(p..'/24000/voice.data','w'));f:write('test');f:close()
 end
 engine.plugin_dir=root
+Settings.migrateOutput(plugin,engine)
+check(settings.rhvoice_keep_speaker==false,'Era upgrade restores the established clip output')
+settings.rhvoice_keep_speaker=true;Settings.migrateOutput(plugin,engine)
+check(settings.rhvoice_keep_speaker==true,'later explicit opt-in is retained')
+settings.rhvoice_keep_speaker=nil
 local menu=Menu.buildRHVoiceMenu(plugin);local voices=menu[1].sub_item_table
 check(#voices==8 and voices[1].checked_func(),'all four installed voices have selection and preview rows')
 voices[4].callback();check(preview[1]=='rhvoice' and preview[3]=='Bdl' and settings.rhvoice_voice=='Slt','voice preview passes temporary voice without selecting it')
@@ -69,7 +74,7 @@ menu[2].sub_item_table[1].callback()
 check(settings.speech_rate==.5 and settings.word_speech_rate==.5 and settings.rhvoice_comma_pause==.25 and settings.rhvoice_paragraph_pause==1.2,'slow preset applies speed and independent prosody together')
 check(settings.rhvoice_voice=='Bdl' and settings.tts_backend=='rhvoice' and settings.pb_alsa_device=='era-speaker','presets retain voice, engine and speaker choice')
 menu[8].callback();check(settings.rhvoice_prefetch==false,'prefetch toggle is available')
-menu[9].callback();check(settings.rhvoice_keep_speaker==false,'persistent speaker toggle is available')
+menu[9].callback();check(settings.rhvoice_keep_speaker==true,'persistent speaker toggle is available')
 settings.rhvoice_pitch=99;settings.rhvoice_comma_pause=-5
 check(Settings.options(plugin).pitch==1.15 and Settings.options(plugin).comma==0,'saved prosody settings are clamped')
 local function remove(p) for name in lfs.dir(p) do if name~='.' and name~='..' then local c=p..'/'..name;if lfs.attributes(c,'mode')=='directory' then remove(c) else os.remove(c) end end end;lfs.rmdir(p) end

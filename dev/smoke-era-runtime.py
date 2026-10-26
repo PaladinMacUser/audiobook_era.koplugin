@@ -32,10 +32,10 @@ def check_resident_rhvoice(binary, qemu):
                 ready = Path(str(endpoint) + ".ready")
                 wait(ready.exists)
                 assert int(ready.read_text()) == worker.pid
-                def submit(index, text, speed=.5, lead=350, voice="Slt", pitch=1, mode="text"):
+                def submit(index, text, speed=.5, lead=350, voice="Slt", pitch=1, mode="text", volume=1):
                     job, src, dest = (root / f"{index}.{suffix}" for suffix in ("req", "txt", "wav"))
                     src.write_text(text)
-                    job.write_text(f"{src}\n{dest}\n{speed}\n1\n{lead}\n{voice}\n{pitch}\n{mode}\n")
+                    job.write_text(f"{src}\n{dest}\n{speed}\n{volume}\n{lead}\n{voice}\n{pitch}\n{mode}\n")
                     sender.sendto(str(job).encode(), str(endpoint))
                     return job, dest
                 durations = []
@@ -51,6 +51,20 @@ def check_resident_rhvoice(binary, qemu):
                         assert any(wav.readframes(wav.getnframes()))
                         durations.append(wav.getnframes() - 8400)
                 assert 1.8 < durations[1] / durations[0] < 2.2, "One resident engine honors changed rate"
+                # Exercise the SSML path used by the plugin, changing settings
+                # on the same resident process rather than merely checking flags.
+                import array
+                amplitudes, ssml_lengths = [], []
+                for index, speed, volume in ((40,1,1),(41,1,.25),(42,.5,1),(43,1,0)):
+                    job, audio=submit(index,"<speak>Hello from your PocketBook reader.</speak>",speed,mode="ssml",volume=volume)
+                    wait(lambda: Path(str(job)+".done").exists())
+                    assert Path(str(job)+".done").read_text().strip()=="OK"
+                    with wave.open(str(audio)) as wav:
+                        pcm=array.array('h',wav.readframes(wav.getnframes()))
+                        ssml_lengths.append(len(pcm)-8400)
+                        amplitudes.append(sum(v*v for v in pcm)/len(pcm))
+                assert amplitudes[1]<amplitudes[0]*.2 and amplitudes[3]==0,"SSML volume changes actual PCM, including mute"
+                assert 1.8<ssml_lengths[2]/ssml_lengths[0]<2.2,"SSML rate changes actual duration"
                 waveforms = []
                 for index, voice in enumerate(("Slt", "Bdl", "Clb", "Alan"),20):
                     job, audio = submit(index,"Hello from your PocketBook reader.",voice=voice)

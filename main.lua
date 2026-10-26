@@ -251,12 +251,7 @@ function Audiobook:_registerHighlightButtons()
                 end,
             }
         end)
-        self.ui.highlight:addToHighlightDialog("15_repeat_word",function(this)
-            return {text=_("Repeat last word"),callback=function()
-                this:onClose()
-                UIManager:scheduleIn(0.3,function() self:repeatLastWord() end)
-            end}
-        end)
+
     end
 
 end
@@ -276,11 +271,6 @@ function Audiobook:_registerDictButtons()
     end
     local plugin = self
 
-    self.ui.dictionary:addToDictButtons({
-        id="audiobook_repeat_word",text=_("Repeat last word"),font_bold=false,conditional=true,
-        show_func=function(popup) return plugin._init_ok and not popup.is_wiki and not popup.is_wiki_fullpage end,
-        callback=function() plugin:repeatLastWord() end,
-    })
     self.ui.dictionary:addToDictButtons({
         id = "audiobook_read_word",
         text = _("Read word"), font_bold = false, conditional = true,
@@ -385,6 +375,7 @@ function Audiobook:_initSubmodules()
                and self.tts_engine:_nativeHelperConfigured() then
                 self.tts_engine.backend_cmd = self:getSetting("native_helper_path", "")
             end
+            dofile(PLUGIN_PATH.."rhvoicesettings.lua").migrateOutput(self,self.tts_engine)
             self.tts_engine:setRate(self:getSetting("speech_rate", 1.0))
             if self:getSetting("word_speech_rate",nil)==nil then
                 self:setSetting("word_speech_rate",self.tts_engine.rate)
@@ -1322,8 +1313,7 @@ function Audiobook:onDictButtonsReady(dict_popup, buttons)
             plugin:readSelectedWord(WordReader.dictionaryText(dict_popup))
         end,
     }})
-    table.insert(buttons,{{id="audiobook_repeat_word",text=_("Repeat last word"),font_bold=false,
-        callback=function() plugin:repeatLastWord() end}})
+
     
     -- Add "Read aloud from here" button at the end (below Wikipedia/Search/Close)
     table.insert(buttons, {{

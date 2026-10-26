@@ -194,6 +194,25 @@ e.on_complete_callback=function() completed=completed+1 end
 played.callback(true);played.callback(true)
 check(completed==1 and not e.is_speaking,"speaker completion advances exactly once")
 e:_stopEraPlayer();check(shutdown==1 and not e._era_service,"stop releases the persistent speaker service")
+
+local legacy_plays,failures=0,0
+local real_play=e.play
+e.play=function(self,word,complete,fail)
+    legacy_plays=legacy_plays+1
+    check(self.current_audio_file=="guarded.wav" and self._era_failed_session and not self._era_service,
+        "recovery retains the exact WAV and releases the failed persistent player")
+    return true
+end
+e._era_service=player;e.is_speaking=true;e.current_audio_file="guarded.wav"
+e:_playEraRHVoice(nil,nil,function() failures=failures+1 end)
+played.callback(false,"Cannot open firmware PCM")
+check(legacy_plays==1 and failures==0,"unacknowledged player failure retries the same voice through the working clip player")
+check(settings.last_audio_failure.message=="Cannot open firmware PCM","successful recovery retains the original output failure")
+e._era_service=player;e.is_speaking=true;e.current_audio_file="guarded.wav"
+e:_playEraRHVoice(nil,nil,function() failures=failures+1 end);played.options.on_playing(0)
+played.callback(false,"Late output failure")
+check(legacy_plays==1 and failures==1,"acknowledged playback is never replayed automatically")
+e.play=real_play
 io.open=real_open
 os.execute=real_execute
 print("ok - "..checks.." RHVoice selection, async synthesis and failure checks passed")

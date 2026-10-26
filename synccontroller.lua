@@ -2908,6 +2908,11 @@ function SyncController:resume(auto)
             self.sentence_sync_start = self.sentence_sync_start + pause_duration
         end
 
+        if self._speech_settings_dirty then
+            self._speech_settings_dirty=nil
+            self:_restartFromCurrentSentence()
+            return
+        end
         self.tts_engine:resume()
         self:_ttsMarkPlay()
 
@@ -3251,6 +3256,7 @@ end
 Stop playback completely.
 --]]
 function SyncController:stop(opts)
+    self._speech_settings_dirty=nil
     -- Log at WARN level with traceback when stopping from an active state
     -- so we can diagnose unexpected stops (e.g. "Chain BLOCKED" on Kindle).
     -- Mirror the reason into the plugin debug log: bug reports usually
@@ -3578,9 +3584,7 @@ function SyncController:setSpeechRate(speed)
     -- the user hears no change for a long time and the control looks dead.
     -- Re-read the current sentence at the new rate instead.  Only while
     -- playing: restarting a paused session would start playback again.
-    if self.state == self.STATE.PLAYING then
-        pcall(function() self:_restartFromCurrentSentence() end)
-    end
+    self:_applySpeechSettingsChange()
     return speed
 end
 
@@ -3600,7 +3604,7 @@ function SyncController:_restartFromCurrentSentence()
     if not target or target < 1 then return end
     if target > self.total_sentences then target = self.total_sentences end
     logger.warn("SyncController: restarting at sentence", target,
-        "to apply the new speech rate")
+        "to apply the new speech settings")
     self:_cleanConcatFiles()
     pcall(function() self.tts_engine:stop() end)
     if self.highlight_manager then
@@ -3627,6 +3631,17 @@ function SyncController:cycleSpeechRate()
     self:setSpeechRate(next_speed)
 end
 
+-- RHVoice bakes volume and rate into each WAV. Rebuild current speech,
+-- or defer until explicit resume so a settings dialog cannot unpause it.
+function SyncController:_applySpeechSettingsChange()
+    if self.state==self.STATE.PAUSED then
+        self._speech_settings_dirty=true
+    elseif self.state==self.STATE.PLAYING or self.state==self.STATE.LOADING then
+        self._speech_settings_dirty=nil
+        self:_restartFromCurrentSentence()
+    end
+end
+
 function SyncController:setSpeechVolumePct(pct)
     pct = tonumber(pct) or 100
     if pct < 0 then pct = 0 end
@@ -3637,6 +3652,9 @@ function SyncController:setSpeechVolumePct(pct)
     end
     if self.tts_engine and self.tts_engine.setVolume then
         self.tts_engine:setVolume(vol)
+    end
+    if self.tts_engine and self.tts_engine.backend=="rhvoice" then
+        self:_applySpeechSettingsChange()
     end
 end
 
