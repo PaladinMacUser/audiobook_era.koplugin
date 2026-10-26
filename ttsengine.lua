@@ -50,6 +50,7 @@ local Utils = dofile(_utils_dir .. "utils.lua")
 local WavUtils = dofile(_utils_dir .. "wavutils.lua")
 local PiperQueue = dofile(_utils_dir .. "piperqueue.lua")
 local AndroidTts = dofile(_utils_dir .. "androidtts.lua")
+local PocketBookAudio = dofile(_utils_dir .. "pocketbookaudio.lua")
 
 -- Plugin debug log (the file bug reports attach); logger.* goes to logcat,
 -- which Android reporters rarely capture (issue #96).
@@ -70,6 +71,8 @@ local TTSEngine = {
         ANDROID = "android",
         PIPER = "piper",
         SANOTTS = "sanotts",
+        RHVOICE = "rhvoice",
+        ITO = "ito",
         SANOTTS_JP = "sanotts-jp",
         KINDLE_NATIVE = "kindle-native",
         NATIVE = "platform-native",
@@ -116,8 +119,10 @@ local CP1252_UNICODE = {
     [0x0178] = 0x9F, -- Ÿ
 }
 
+local instance_sequence=0
 function TTSEngine:new(o)
     o = o or {}
+    instance_sequence=instance_sequence+1;o._instance_id=instance_sequence
     setmetatable(o, self)
     self.__index = self
     o.rate = o.rate or self.DEFAULT_RATE
@@ -432,6 +437,10 @@ function TTSEngine:detectBackend()
                 found_sanotts = true
                 self.sanotts_dir = sanotts_dir
                 self.sanotts_server = sanotts_server
+                local tempo = plugin_dir .. "/tempo/wav-tempo"
+                if ensureBinary(tempo) and binaryRunsOnHost(tempo) then
+                    self.sanotts_tempo = tempo
+                end
                 self.sanotts_voice_name = voice_name
                 self.sanotts_voice_dir = self.sanotts_voices[voice_name]
                 self.sanotts_voice_cfg = self.sanotts_voice_defs[voice_name]
@@ -476,6 +485,29 @@ function TTSEngine:detectBackend()
             self.snt_jp_server = nil
             self.snt_jp_weights = nil
             self.snt_jp_dict = nil
+        end
+
+        self.ito_bin=nil
+        local ito_bin=plugin_dir.."/ito/ito-speak"
+        local ito_model=io.open(plugin_dir.."/ito/ito_female_esp32s3.bin","rb")
+        local ito_ready=ito_model and ito_model:seek("end")==3806656
+        if ito_model then ito_model:close() end
+        if ito_ready and found_espeak and fileAccessible(plugin_dir.."/ito/phonemize.sh") and ensureBinary(ito_bin) and binaryRunsOnHost(ito_bin) then self.ito_bin=ito_bin end
+
+        -- RHVoice is an optional addition. Detect its runtime without
+        -- changing the current/default engine or any saved voice choice.
+        local rhvoice_bin = plugin_dir .. "/rhvoice/rhvoice-slt"
+        self.rhvoice_bin = nil
+        local rhvoice_complete = true
+        for _, relative in ipairs({
+            "data/languages/English/language.info", "data/languages/English/cmulex.fst",
+            "data/voices/slt/voice.info", "data/voices/slt/24000/voice.data",
+        }) do
+            local f = io.open(plugin_dir .. "/rhvoice/" .. relative, "rb")
+            if f then f:close() else rhvoice_complete = false end
+        end
+        if rhvoice_complete and ensureBinary(rhvoice_bin) and binaryRunsOnHost(rhvoice_bin) then
+            self.rhvoice_bin = rhvoice_bin
         end
 
         -- Pick default backend: espeak-ng first (lighter, existing default),
@@ -600,6 +632,16 @@ function TTSEngine:isPocketBook()
     local k = io.open("/mnt/ext1/applications/koreader", "r")
     if k then k:close(); return true end
     return false
+end
+
+function TTSEngine:supportsPocketBookSpeaker()
+    return self:isPocketBook() and PocketBookAudio.isEra(Device)
+end
+
+function TTSEngine:getPocketBookAudioDevice()
+    local default = self:supportsPocketBookSpeaker() and "era-speaker"
+        or (self._pb_has_tts_sm and "tts_sm" or "")
+    return self.plugin and self.plugin:getSetting("pb_alsa_device", default) or default
 end
 
 --- Try to load the PocketBook InkView PlayFile FFI library.
@@ -727,6 +769,15 @@ Synthesize text and return timing metadata.
 @return boolean Success
 --]]
 function TTSEngine:synthesize(text, callback)
+    self.synthesis_generation = (self.synthesis_generation or 0) + 1
+    local generation=self.synthesis_generation
+    local original_callback=callback
+    callback=function(ok,timing)
+        if not ok and generation==self.synthesis_generation and self._failure_recorded_generation~=generation then
+            self:recordAudioFailure("synthesis","The selected engine could not generate audio")
+        end
+        if original_callback then original_callback(ok,timing) end
+    end
     if not self.backend then
         logger.err("TTSEngine: No TTS backend available")
         -- Show error to user
@@ -848,7 +899,7 @@ Runs the helper once per sentence and polls a .done marker.
 function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
     local temp_dir = "/tmp"
     self.file_counter = (self.file_counter or 0) + 1
-    local input_file = temp_dir .. "/audiobook_native_" .. os.time() .. "_" .. self.file_counter .. ".txt"
+    local input_file = temp_dir .. "/audiobook_native_" .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".txt"
 
     local f = io.open(input_file, "wb")
     if not f then
@@ -874,8 +925,16 @@ function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
         audio_file:gsub("'", "'\\''"),
         speed
     )
+    if self.backend == self.BACKENDS.RHVOICE then
+        cmd = cmd .. string.format(" --volume '%.3f'", self.volume or 1.0)
+    end
+    local lead_in_ms = self.backend == self.BACKENDS.RHVOICE
+        and self:supportsPocketBookSpeaker() and self:getPocketBookAudioDevice() == "era-speaker"
+        and 350 or 0
+    if lead_in_ms > 0 then cmd = cmd .. " --lead-in-ms " .. lead_in_ms end
     local done_marker = audio_file .. ".done"
-    local log_file = "/tmp/.native_tts_last.log"
+    local log_file = self.backend == self.BACKENDS.RHVOICE
+        and "/tmp/.rhvoice_last.log" or "/tmp/.native_tts_last.log"
     local bg_cmd = string.format(
         '(%s > "%s" 2>&1; echo $? > "%s") &',
         cmd, log_file, done_marker
@@ -885,9 +944,14 @@ function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
     os.execute(bg_cmd)
 
     local engine = self
+    local generation = self.synthesis_generation
     local poll_count = 0
     local max_polls = 120
     local function pollNativeDone()
+        if engine.synthesis_generation ~= generation then
+            os.remove(done_marker); os.remove(input_file); os.remove(audio_file)
+            return
+        end
         poll_count = poll_count + 1
         local mf = io.open(done_marker, "r")
         if mf then
@@ -904,8 +968,10 @@ function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
                 af:close()
             end
 
-            if size > 0 then
+            if exit_code == "0" and size > 44 then
                 engine.current_audio_file = audio_file
+                engine._audio_lead_in_file = audio_file
+                engine._audio_lead_in_ms = lead_in_ms
                 engine:generateTimingEstimates(engine._native_tts_text or text)
                 os.remove(log_file)
                 if callback then callback(true, engine.timing_data) end
@@ -938,9 +1004,123 @@ function TTSEngine:_synthesizeNativeOneshot(text, audio_file, speed, callback)
     return nil
 end
 
---[[--
-Return the configured FIFO path for the native TTS daemon.
---]]
+-- Preserve the latest synthesis/output failure across restarts.
+function TTSEngine:recordAudioFailure(stage,message)
+    self._failure_recorded_generation=self.synthesis_generation
+    self._failure_serial=(self._failure_serial or 0)+1
+    local Diagnostics=dofile(_utils_dir.."speechdiagnostics.lua")
+    return Diagnostics.record(self.plugin,self,stage,message)
+end
+
+function TTSEngine:getRHVoiceOptions()
+    local options=dofile(_utils_dir.."rhvoicesettings.lua").options(self.plugin,self.rhvoice_voice_override)
+    if self.backend=="ito" then
+        options.voice="ItoFemale";options.pitch=1;options.comma=0
+    end
+    return options
+end
+
+function TTSEngine:_rhvoiceSignature(text)
+    local Settings=dofile(_utils_dir.."rhvoicesettings.lua")
+    return text.."\0"..Settings.signature(self:getRHVoiceOptions()).."|"..tostring(self.rate).."|"..tostring(self.volume)
+end
+
+function TTSEngine:_getRHVoiceClient()
+    local owner=self.plugin or self
+    local client=owner._rhvoice_service
+    local binary=self.rhvoice_bin
+    if self.backend=="ito" then binary=self.ito_bin end
+    if not client or client.closed or client.binary~=binary then
+        if client then client:shutdown() end
+        local Client=dofile(_utils_dir.."rhvoiceclient.lua")
+        client=binary and Client:new{binary=binary}
+        owner._rhvoice_service=client
+    end
+    return client
+end
+
+function TTSEngine:_requestRHVoice(text,audio_file,current,callback)
+    local client=self:_getRHVoiceClient()
+    if not client then callback(false,"Cannot create the resident speech session");return nil end
+    local Settings=dofile(_utils_dir.."rhvoicesettings.lua")
+    local options=self:getRHVoiceOptions()
+    local lead=self:supportsPocketBookSpeaker() and self:getPocketBookAudioDevice()=="era-speaker" and 350 or 0
+    options.label=self.backend=="ito" and "Ito" or "RHVoice"
+    options.format=self.backend=="ito" and "text" or "ssml"
+    local prepared
+    if self.backend=="ito" then prepared=dofile(_utils_dir.."itosettings.lua").prepare(text,options)
+    else prepared=Settings.ssml(text,options,self.rate) end
+    local job=client:request(prepared,audio_file,self.rate or 1,self.volume or 1,lead,current,
+        function(ok,reason)
+            if not current() then return end
+            if ok and WavUtils.getDurationMs(audio_file)<=lead then
+                ok=false;reason="Speech engine returned an invalid or empty WAV";os.remove(audio_file)
+            end
+            callback(ok,reason,lead)
+        end,options)
+    return job
+end
+
+function TTSEngine:_adoptRHVoice(text,file,lead)
+    self.current_audio_file=file
+    self._audio_lead_in_file=file;self._audio_lead_in_ms=lead
+    self:generateTimingEstimates(text)
+end
+
+function TTSEngine:_synthesizeRHVoice(text,audio_file,callback)
+    local generation=self.synthesis_generation
+    local function current() return self.synthesis_generation==generation end
+    local function complete(ok,reason,lead,file)
+        if not current() then return end
+        self._rhvoice_pending=nil
+        if ok then self:_adoptRHVoice(text,file or audio_file,lead)
+        else self:recordAudioFailure(self.backend=="ito" and "Ito" or "RHVoice",reason or "Resident synthesis failed") end
+        if callback then callback(ok,ok and self.timing_data or nil) end
+    end
+    local slot=self._rhvoice_slot
+    if slot and slot.signature==self:_rhvoiceSignature(text) then
+        if slot.state=="ready" then
+            self._rhvoice_slot=nil;complete(true,nil,slot.lead,slot.file)
+        elseif slot.state=="pending" then
+            slot.waiter=function(ok,reason)
+                if self._rhvoice_slot==slot then self._rhvoice_slot=nil end
+                complete(ok,reason,slot.lead,slot.file)
+            end
+            self._rhvoice_pending=slot.job
+        else self._rhvoice_slot=nil;complete(false,slot.reason) end
+        return nil
+    end
+    self:_cancelRHVoicePrefetch()
+    if self._rhvoice_pending then self._rhvoice_pending:cancel() end
+    self._rhvoice_pending=self:_requestRHVoice(text,audio_file,current,complete)
+    return nil
+end
+
+function TTSEngine:_cancelRHVoicePrefetch()
+    local slot=self._rhvoice_slot;self._rhvoice_slot=nil
+    if slot then
+        if slot.job then slot.job:cancel() end
+        os.remove(slot.file)
+    end
+end
+
+function TTSEngine:prefetchRHVoice(text)
+    if self.plugin and not self.plugin:getSetting("rhvoice_prefetch",true) then return false end
+    local signature=self:_rhvoiceSignature(text)
+    if self._rhvoice_slot and self._rhvoice_slot.signature==signature then return true end
+    self:_cancelRHVoicePrefetch()
+    self.file_counter=(self.file_counter or 0)+1
+    local slot={text=text,signature=signature,state="pending",
+        file=string.format("/tmp/audiobook_rh_prefetch_%d_%d_%d.wav",os.time(),self._instance_id or 0,self.file_counter)}
+    self._rhvoice_slot=slot
+    slot.job=self:_requestRHVoice(text,slot.file,function() return self._rhvoice_slot==slot end,
+        function(ok,reason,lead)
+            slot.state=ok and "ready" or "failed";slot.reason=reason;slot.lead=lead
+            if slot.waiter then slot.waiter(ok,reason) end
+        end)
+    return true
+end
+
 function TTSEngine:_nativeFifoPath()
     local configured = self.plugin:getSetting("native_fifo_path", "")
     if configured and configured ~= "" then
@@ -964,7 +1144,7 @@ function TTSEngine:_synthesizeNativeDaemon(text, audio_file, speed, callback)
 
     local temp_dir = "/tmp"
     self.file_counter = (self.file_counter or 0) + 1
-    local input_file = temp_dir .. "/audiobook_native_" .. os.time() .. "_" .. self.file_counter .. ".txt"
+    local input_file = temp_dir .. "/audiobook_native_" .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".txt"
     local f = io.open(input_file, "wb")
     if not f then
         logger.err("TTSEngine: cannot write native daemon input file")
@@ -997,9 +1177,14 @@ function TTSEngine:_synthesizeNativeDaemon(text, audio_file, speed, callback)
     logger.dbg("TTSEngine: native daemon request:", request:gsub("%s+$", ""))
 
     local engine = self
+    local generation = self.synthesis_generation
     local poll_count = 0
     local max_polls = 120
     local function pollNativeDone()
+        if engine.synthesis_generation ~= generation then
+            os.remove(done_marker); os.remove(input_file); os.remove(audio_file)
+            return
+        end
         poll_count = poll_count + 1
         local mf = io.open(done_marker, "r")
         if mf then
@@ -1138,7 +1323,7 @@ function TTSEngine:synthesizeCommand(text, callback)
     -- Use Android cache dir when running on Android (no /tmp); otherwise /tmp
     local temp_dir = self._android_tts and self._android_tts:getTempDir() or "/tmp"
     self.file_counter = (self.file_counter or 0) + 1
-    local audio_file = temp_dir .. "/audiobook_tts_" .. os.time() .. "_" .. self.file_counter .. ".wav"
+    local audio_file = temp_dir .. "/audiobook_tts_" .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".wav"
     local timing_file = temp_dir .. "/audiobook_timing_" .. os.time() .. ".txt"
     local cmd
     -- Limit text length to avoid command line issues and MBROLA phoneme
@@ -1255,7 +1440,7 @@ function TTSEngine:synthesizeCommand(text, callback)
             safe_text = '<speak>' .. safe_text .. '</speak>'
             -- Write SSML to a temp file (avoids shell escaping entirely)
             self.file_counter = (self.file_counter or 0) + 1
-            local ssml_file = temp_dir .. "/audiobook_ssml_" .. os.time() .. "_" .. self.file_counter .. ".xml"
+            local ssml_file = temp_dir .. "/audiobook_ssml_" .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".xml"
             local sf = io.open(ssml_file, "w")
             if sf then
                 sf:write(safe_text)
@@ -1300,6 +1485,8 @@ function TTSEngine:synthesizeCommand(text, callback)
     elseif self.backend == self.BACKENDS.NATIVE then
         -- Platform-native TTS via user-supplied helper binary/script.
         return self:_synthesizeNative(text, audio_file, callback)
+    elseif self.backend == self.BACKENDS.RHVOICE or self.backend=="ito" then
+        return self:_synthesizeRHVoice(text,audio_file,callback)
     end
     if not cmd then
         logger.err("TTSEngine: Cannot create command for backend:", self.backend)
@@ -1333,9 +1520,15 @@ function TTSEngine:synthesizeCommand(text, callback)
         local piper_text_file = self._piper_text_file
         self._piper_text_file = nil  -- prevent premature cleanup
         local engine = self
+        local generation = self.synthesis_generation
         local poll_count = 0
         local max_polls = 120  -- 60 seconds max (120 × 0.5s)
         local function pollPiperDone()
+            if engine.synthesis_generation ~= generation then
+                os.remove(done_marker); os.remove(audio_file)
+                if piper_text_file then os.remove(piper_text_file) end
+                return
+            end
             poll_count = poll_count + 1
             -- Check if the done marker file exists
             local mf = io.open(done_marker, "r")
@@ -1994,7 +2187,7 @@ function TTSEngine:espeakSynthesizeFallback(text)
     if not self.espeak_bin then return nil end
     local temp_dir = self._android_tts and self._android_tts:getTempDir() or "/tmp"
     self.file_counter = (self.file_counter or 0) + 1
-    local audio_file = temp_dir .. "/audiobook_espeak_fb_" .. os.time() .. "_" .. self.file_counter .. ".wav"
+    local audio_file = temp_dir .. "/audiobook_espeak_fb_" .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".wav"
     local exec_prefix = ""
     local esp_data = self:_resolveEspeakDataPath()
     if self.espeak_static then
@@ -2074,6 +2267,7 @@ function TTSEngine:prefetch(text, use_espeak)
     if not self.backend or not text or text == "" then
         return false
     end
+    if self.backend == self.BACKENDS.RHVOICE or self.backend=="ito" then return self:prefetchRHVoice(text) end
     -- Android TTS: dedicated async lookahead (issue #96).  The generic
     -- synchronous slot fill below cannot be used (synthesizeAndroid is async
     -- and would clobber current_audio_file), so prefetchAndroid fills the
@@ -2255,7 +2449,7 @@ end
 function TTSEngine:_androidDispatchPrefetch(atts, text, slot_no)
     self.file_counter = (self.file_counter or 0) + 1
     local slot_path = atts:getTempDir() .. "/audiobook_prefetch_"
-        .. os.time() .. "_" .. self.file_counter .. ".wav"
+        .. os.time() .. "_" .. (self._instance_id or 0) .. "_" .. self.file_counter .. ".wav"
     -- Voice/language for THIS text, same selection the on-demand path uses.
     self:_androidSelectLanguage(atts, text)
     -- Dispatch with the same not-ready retry shape as the playback path:
@@ -2378,6 +2572,13 @@ Check if prefetched audio matches the given text and swap it in.
 @return boolean true if prefetch was used
 --]]
 function TTSEngine:usePrefetched(text)
+    if self.backend==self.BACKENDS.RHVOICE or self.backend=="ito" then
+        local slot=self._rhvoice_slot
+        if slot and slot.state=="ready" and slot.signature==self:_rhvoiceSignature(text) then
+            self._rhvoice_slot=nil;self:_adoptRHVoice(text,slot.file,slot.lead);return true
+        end
+        return false
+    end
     -- Check single-slot prefetch (espeak-ng)
     if self._prefetch_file and self._prefetch_text == text then
         if self.current_audio_file then
@@ -2476,6 +2677,7 @@ end
 Clean up prefetch state.
 --]]
 function TTSEngine:_cleanPrefetch()
+    self:_cancelRHVoicePrefetch()
     if self._prefetch_file then
         if not self._prefetch_in_use then
             os.remove(self._prefetch_file)
@@ -2690,6 +2892,62 @@ function TTSEngine:_releaseAudioout()
     if self._audioout_client then self._audioout_client:release() end
 end
 
+-- Continuous RHVoice playback uses one firmware-routed ALSA stream. Single
+-- words and previews keep the established per-clip player and wake-up guard.
+function TTSEngine:_playEraRHVoice(on_word,on_complete,on_fail)
+    local binary=(self.plugin_dir or ""):gsub("/+$","").."/rhvoice/era-player"
+    local file=io.open(binary,"rb")
+    if not file then self:recordAudioFailure("Era speaker","Persistent player is missing; reinstall the complete Era package");return false end
+    file:close()
+    local Client=dofile(_utils_dir.."rhvoiceclient.lua")
+    if not self._era_service or self._era_service.closed then
+        local function quote(value) return "'"..value:gsub("'","'\\''").."'" end
+        local prefix=""
+        if self.espeak_linker and self.espeak_lib_path then
+            prefix=quote(self.espeak_linker).." --library-path "..quote((self.plugin_dir or "").."/wav-play/lib:"..self.espeak_lib_path).." "
+        end
+        self._era_service=Client:new{binary=binary,launch_prefix=prefix,idle_seconds=10,arguments={"--device",self._pb_speaker.pcm}}
+    end
+    if not self._era_service then self:recordAudioFailure("Era speaker","Cannot create the continuous playback session");return false end
+    self.play_generation=(self.play_generation or 0)+1
+    local generation=self.play_generation
+    local duration=self:getAudioDurationMs()
+    self._current_audio_duration_ms=duration
+    self.playback_latency_ms=self:getAudioLeadInMs()+80
+    self:startTimingLoop()
+    self._era_playing_at=nil
+    self._audio_launched_at=UIManager:getTime()
+    self._era_pending=self._era_service:request(self.current_audio_file,"/tmp/audiobook_unused.wav",1,1,self:getAudioLeadInMs(),
+        function() return self.is_speaking and self.play_generation==generation end,
+        function(ok,reason)
+            self._era_pending=nil
+            if ok then self:onPlaybackComplete()
+            else
+                self:recordAudioFailure("Era speaker",reason or "Continuous playback failed")
+                local acknowledged=self._era_playing_at~=nil
+                self.is_speaking=false
+                self._era_failed_session=true
+                self:_stopEraPlayer()
+                if not acknowledged then
+                    -- No audio was acknowledged: replay the same complete WAV
+                    -- through the established clip player, preserving the voice.
+                    if not self:play(on_word,on_complete,on_fail) and on_fail then on_fail() end
+                elseif on_fail then on_fail() end
+            end
+        end,{no_output=true,label="Era speaker",timeout=math.max(60,duration/1000+15),on_playing=function(lead)
+            self.playback_latency_ms=lead+80
+            self._audio_launched_at=UIManager:getTime();self.playback_start_time=self._audio_launched_at
+            self._era_playing_at=self._audio_launched_at
+        end})
+    return true
+end
+
+function TTSEngine:_stopEraPlayer()
+    self._era_playing_at=nil
+    if self._era_pending then self._era_pending:cancel();self._era_pending=nil end
+    if self._era_service then self._era_service:shutdown();self._era_service=nil end
+end
+
 function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     local t0 = UIManager:getTime()
     -- Register the TTS audio file with the session recorder, if active.
@@ -2708,6 +2966,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     logger.dbg("TTSEngine: play() called, audio_file=", self.current_audio_file,
         "is_speaking=", self.is_speaking)
     if not self.current_audio_file then
+        self:recordAudioFailure("playback","No audio file to play")
         logger.err("TTSEngine: No audio file to play")
         UIManager:show(InfoMessage:new{
             text = _("No audio file to play."),
@@ -2717,7 +2976,14 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     end
     self.on_word_callback = on_word
     self.on_complete_callback = on_complete
-    self.on_fail_callback = on_fail
+    local failure_serial=self._failure_serial or 0
+    self.on_fail_callback = function()
+        if (self._failure_serial or 0)==failure_serial then
+            self:recordAudioFailure("playback","The selected audio player failed")
+        end
+        if on_fail then on_fail() end
+    end
+    if self.plugin then self.plugin._last_audio_engine=self.backend;self.plugin._last_audio_instance=self end
     self.is_speaking = true
     self.is_paused = false
     -- Start playback using system player (cached after first probe)
@@ -2729,6 +2995,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         self._cached_player = nil
     end
     if not player then
+        self:recordAudioFailure("audio output",self._pb_speaker_error or "No audio player found")
         logger.err("TTSEngine: No audio player found")
         self.player_error = true
         local msg
@@ -2739,7 +3006,8 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         elseif Device:isKobo() then
             msg = _("No audio output available.\n\nKobo has no built-in speaker.\n\nPlease pair Bluetooth headphones:\nSettings → Bluetooth → Pair\n\nThen try again.")
         elseif self:isPocketBook() then
-            msg = _("No audio output available.\n\nNo working audio path was found on this PocketBook.\n\nTry changing the audio device:\nAudiobook > Audio device settings > System player (InkView)\n\nIf that does not help, generate a bug report (Audiobook > Generate bug report) and share it on GitHub.")
+            msg = self._pb_speaker_error and (_("Built-in speaker unavailable.") .. "\n\n" .. self._pb_speaker_error)
+                or _("No audio output available.\n\nNo working audio path was found on this PocketBook.\n\nGenerate a bug report from Audiobook > Generate bug report.")
         else
             msg = _("No audio output available.\n\nNo supported audio player found (aplay, paplay, mpv, mplayer).\n\nIf using Bluetooth, make sure headphones are paired and connected.")
         end
@@ -2758,6 +3026,26 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     logger.dbg("TTSEngine: Using player:", player)
     logger.dbg("TTSEngine: Audio file:", self.current_audio_file)
     logger.dbg("TTSEngine: play() findPlayer took", time.to_ms(UIManager:getTime() - t0), "ms")
+    if self._pb_speaker_active then
+        local ok, err = self._pb_speaker:prepare()
+        if not ok then
+            self:recordAudioFailure("Era speaker",err)
+            logger.err("TTSEngine: Era speaker preparation failed:", err)
+            self.is_speaking = false
+            UIManager:show(InfoMessage:new{
+                text = _("Built-in speaker unavailable.") .. "\n\n" .. err,
+                timeout = 10,
+            })
+            return false
+        end
+    end
+    if self.backend==self.BACKENDS.RHVOICE and self._rhvoice_continuous and self._pb_speaker_active
+            and not self._era_failed_session
+            and self.plugin and self.plugin:getSetting("rhvoice_keep_speaker",false) then
+        if self:_playEraRHVoice(on_word,on_complete,on_fail) then return true end
+        self._era_failed_session=true
+        self:_stopEraPlayer()
+    end
     -- Block playback when no real audio output exists and no BT device is
     -- connected.  On single-core Kobos (no speaker), silently looping
     -- through aplay for every sentence wastes CPU and can crash the device.
@@ -2963,7 +3251,8 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         "no_real_audio=", self._no_real_audio_output,
         "player_type=", pt,
         "pt_is_bt_routed=", pt_is_bt_routed)
-    if is_pb and has_bt_adapter and not self._no_real_audio_output then
+    if is_pb and has_bt_adapter and not self._no_real_audio_output
+            and not self._pb_speaker_active then
         local bt_connected = false
         local btm = self.plugin and self.plugin.bt_manager
         if btm then
@@ -3005,7 +3294,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
         -- This means audio_player_type cache is stale (e.g. user paired
         -- BT after the first sentence).  Force a re-probe so gst-bt or
         -- bluealsa is selected instead of the dangerous direct-ALSA path.
-        if not pt_is_bt_routed then
+        if bt_connected and not pt_is_bt_routed then
             logger.warn("TTSEngine: BT connected but player_type=", pt,
                 "is not BT-routed; re-probing to switch to gst-bt/bluealsa")
             self._cached_player = nil
@@ -3788,6 +4077,7 @@ function TTSEngine:play(on_word, on_complete, on_fail, concat_files)
     else
         self.playback_latency_ms = 0
     end
+    self.playback_latency_ms = self.playback_latency_ms + self:getAudioLeadInMs()
     -- Scale timing data to match real audio duration
     if real_duration_ms > 0 and #self.timing_data > 0 then
         local estimated_total = self.timing_data[#self.timing_data].end_time
@@ -4881,6 +5171,27 @@ Sets self.audio_player_type to "kindle-native-tts", "kindle-lipc", "gst-bt",
 @return string|nil Player command
 --]]
 function TTSEngine:findAudioPlayer()
+    self._pb_speaker_active = false
+    self._pb_speaker_error = nil
+    -- Select the Era speaker BEFORE Bluetooth or generic ALSA discovery.
+    -- Probing must not open the codec or start a BlueALSA daemon.
+    if self:isPocketBook() and self:getPocketBookAudioDevice() == "era-speaker" then
+        if not PocketBookAudio.isEra(Device) then
+            self._pb_speaker_error = "This speaker mode is for the original PocketBook Era (PB700)."
+            return nil
+        end
+        self._pb_speaker = self._pb_speaker or PocketBookAudio:new()
+        local cmd = self._pb_speaker:command(self)
+        if not cmd then
+            self._pb_speaker_error = self._pb_speaker.error
+            return nil
+        end
+        self._pb_speaker_active = true
+        self.audio_player_type = "aplay"
+        self._no_real_audio_output = false
+        logger.info("TTSEngine: Era speaker via firmware loopback:", self._wav_play_device)
+        return cmd
+    end
     -- 0) Android: playback goes through TtsHelper's MediaPlayer or PCM
     -- stream; there is no CLI player to probe.  Do not gate this on
     -- self._android_tts: the helper initializes lazily at first
@@ -6416,7 +6727,12 @@ Get actual audio duration from the current WAV file.
 @return number Duration in milliseconds, or 0 on error
 --]]
 function TTSEngine:getAudioDurationMs()
-    return self:getWavDurationMs(self.current_audio_file)
+    return math.max(0, self:getWavDurationMs(self.current_audio_file) - self:getAudioLeadInMs())
+end
+
+function TTSEngine:getAudioLeadInMs()
+    return self.current_audio_file and self.current_audio_file == self._audio_lead_in_file
+        and (self._audio_lead_in_ms or 0) or 0
 end
 
 --[[--
@@ -6733,6 +7049,27 @@ function TTSEngine:_startProcessWatcher(bt_retry_allowed, skip_on_fail, conv_ret
                     end
                 end
 
+                -- Speaker output must acknowledge that PCM streaming began.
+                -- An ordinary ALSA open/params failure is not an assertion,
+                -- but still must stop read-along instead of skipping in silence.
+                if engine._pb_speaker_active and (crashed or not player_stderr
+                        or player_stderr:find("wav-play: write error:", 1, true)
+                        or not player_stderr:find("PLAYING", 1, true)) then
+                    engine.is_speaking = false
+                    engine.audio_pid = nil
+                    engine.play_generation = (engine.play_generation or 0) + 1
+                    engine._pb_speaker:reset()
+                    logger.err("TTSEngine: Era speaker playback failed:", player_stderr)
+                    engine:recordAudioFailure("Era speaker",player_stderr or "No player status received")
+                    UIManager:show(InfoMessage:new{
+                        text = _("Speaker playback failed. Generate an Audiobook bug report.")
+                            .. "\n\n" .. (player_stderr or "No player status received."):sub(1, 300),
+                        timeout = 10,
+                    })
+                    if engine.on_fail_callback then engine.on_fail_callback() end
+                    return
+                end
+
                 if crashed then
                     engine._player_crash_count = (engine._player_crash_count or 0) + 1
                     logger.err("TTSEngine: audio player crashed (count:",
@@ -6899,8 +7236,10 @@ function TTSEngine:pause()
     if self.is_speaking and not self.is_paused then
         self.is_paused = true
         self.pause_time = UIManager:getTime()
+        -- The Era player feeds silence while paused, preserving its PCM.
+        if self._era_pending then self._era_pending:pause()
         -- Android: pause via MediaPlayer API
-        if self.audio_player_type == "android" and self._android_tts then
+        elseif self.audio_player_type == "android" and self._android_tts then
             self._android_tts:pausePlayback()
         -- PocketBook InkView: no direct pause API; audio plays to natural
         -- end but word-highlighting and sentence advance are suspended.
@@ -6935,11 +7274,13 @@ function TTSEngine:resume()
         local pause_duration = UIManager:getTime() - self.pause_time
         local pause_ms = time.to_ms(pause_duration)
         self.playback_start_time = self.playback_start_time + pause_duration
+        if self._era_playing_at then self._era_playing_at=self._era_playing_at+pause_duration end
         -- Accumulate total pause time so the completion timer knows how
         -- much real playback time has actually elapsed.
         self._total_pause_ms = (self._total_pause_ms or 0) + pause_ms
         -- Android: resume via MediaPlayer API
-        if self.audio_player_type == "android" and self._android_tts then
+        if self._era_pending then self._era_pending:resume()
+        elseif self.audio_player_type == "android" and self._android_tts then
             self._android_tts:resumePlayback()
         -- PocketBook InkView: no direct resume API; timing loop resumes
         -- automatically when is_paused is cleared above.
@@ -6970,6 +7311,10 @@ end
 Stop playback.
 --]]
 function TTSEngine:stop()
+    self:_stopEraPlayer()
+    self._rhvoice_continuous=false
+    if self._rhvoice_pending then self._rhvoice_pending:cancel();self._rhvoice_pending=nil end
+    self.synthesis_generation = (self.synthesis_generation or 0) + 1
     -- Always bump generation and clear state, even if not speaking.
     -- This ensures stale scheduled callbacks (launchAndStart, checkProcess,
     -- updateTiming) exit immediately regardless of what state we were in.
@@ -6979,6 +7324,7 @@ function TTSEngine:stop()
     self:_stopKindleKeepalive()
     self.is_speaking = false
     self.is_paused = false
+    if self._pb_speaker then self._pb_speaker:reset() end
     self.play_generation = (self.play_generation or 0) + 1
 
     -- Cancel any pending launchAndStart so it can't fire after stop()
@@ -7089,6 +7435,9 @@ Uses SIGTERM (not SIGKILL) so GStreamer can close the BT audio sink
 gracefully and not leave the BT firmware in a bad state.
 --]]
 function TTSEngine:forceKillAll()
+    self:_stopEraPlayer()
+    if self._rhvoice_pending then self._rhvoice_pending:cancel();self._rhvoice_pending=nil end
+    self.synthesis_generation = (self.synthesis_generation or 0) + 1
     self._socket_clean = false
     -- Cancel any pending launchAndStart
     if self._pending_launch_fn then
@@ -7285,6 +7634,10 @@ function TTSEngine:setBackend(backend)
     -- Restore correct backend_cmd for the selected backend
     if backend == self.BACKENDS.PIPER then
         self.backend_cmd = self.piper_cmd or "piper"
+    elseif backend == self.BACKENDS.ITO then
+        self.backend_cmd = self.ito_bin
+    elseif backend == self.BACKENDS.RHVOICE then
+        self.backend_cmd = self.rhvoice_bin
     elseif backend == self.BACKENDS.SANOTTS then
         -- snt_server needs no backend_cmd (the queue builds its own command);
         -- sample rate is fixed at 22050 for the int8 voice.
@@ -7373,7 +7726,8 @@ setting, or for the session by the RTF auto-degrade escalation.
 --]]
 function TTSEngine:_piperLowResource()
     if self._session_low_resource then return true end
-    if self.plugin and self.plugin:getSetting("piper_low_resource", false) then
+    local era_piper = self.backend == self.BACKENDS.PIPER and self:supportsPocketBookSpeaker()
+    if self.plugin and self.plugin:getSetting("piper_low_resource", era_piper) then
         return true
     end
     return false
@@ -7387,10 +7741,44 @@ by the RTF auto-degrade escalation.
 --]]
 function TTSEngine:_piperAggressiveSplit()
     if self._session_split_long then return true end
-    if self.plugin and self.plugin:getSetting("piper_aggressive_split", false) then
+    local era_piper = self.backend == self.BACKENDS.PIPER and self:supportsPocketBookSpeaker()
+    if self.plugin and self.plugin:getSetting("piper_aggressive_split", era_piper) then
         return true
     end
     return false
+end
+
+-- On the Era an explicit Piper choice favors the neural voice over instant
+-- playback. Genuine synthesis failures still stop with an actionable error.
+function TTSEngine:preferPiperVoice()
+    return self.backend == self.BACKENDS.PIPER and self.plugin
+        and self.plugin:getSetting("piper_keep_voice", self:supportsPocketBookSpeaker()) or false
+end
+
+-- Kristin on the Era uses native synthesis plus pitch-preserving WAV tempo.
+function TTSEngine:getSanoTempoSpeed()
+    if self.backend == self.BACKENDS.SANOTTS and self.sanotts_voice_name == "kristin"
+            and self.sanotts_tempo and self:supportsPocketBookSpeaker() then
+        return self.rate or 1.0
+    end
+end
+
+-- Apply the fast English default once when the new Era package arrives.
+-- An explicit espeak/custom choice is preserved; later user changes win.
+function TTSEngine:applyEraFastVoiceDefault(saved_backend)
+    if not self:supportsPocketBookSpeaker() or not self.plugin
+            or not (self.sanotts_voices and self.sanotts_voices.kristin)
+            or self.plugin:getSetting("_era_fast_voice_default_applied", false) then
+        return saved_backend
+    end
+    if not saved_backend or saved_backend == self.BACKENDS.PIPER then
+        saved_backend = self.BACKENDS.SANOTTS
+        self.plugin:setSetting("tts_backend", saved_backend)
+        self.plugin:setSetting("sanotts_voice", "kristin")
+        self.plugin:setSetting("espeak_only_mode", false)
+    end
+    self.plugin:setSetting("_era_fast_voice_default_applied", true)
+    return saved_backend
 end
 
 return TTSEngine

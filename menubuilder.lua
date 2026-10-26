@@ -65,6 +65,7 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
                 espeak = _("espeak-ng"),
                 piper = _("Piper (neural)"),
                 sanotts = _("sanoTTS (neural)"),
+                rhvoice = _("RHVoice (English voices)"),
                 pico = _("Pico TTS"),
                 flite = _("Flite"),
                 festival = _("Festival"),
@@ -176,6 +177,7 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
     -- while Piper warms up.  Only relevant when both backends are usable.
     if plugin.tts_engine
        and plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.PIPER
+       and not plugin.tts_engine:preferPiperVoice()
        and plugin.tts_engine.espeak_bin then
         table.insert(menu, {
             text = _("Quick start with espeak (while Piper loads)"),
@@ -189,17 +191,25 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
     end
 
     -- Piper mitigations for underpowered devices (single-core, low RAM).
-    -- Both are OFF by default; the RTF auto-degrade can also enable them
-    -- for a session when Piper measurably cannot keep up with playback.
+    -- Enabled by default on Era; elsewhere the RTF mitigation can enable
+    -- them for a session when Piper cannot keep up with playback.
     if plugin.tts_engine
        and plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.PIPER then
         table.insert(menu, {
+            text = _("Keep Piper voice (wait for synthesis)"),
+            checked_func = function() return plugin.tts_engine:preferPiperVoice() end,
+            callback = function()
+                plugin:setSetting("piper_keep_voice", not plugin.tts_engine:preferPiperVoice())
+            end,
+            help_text = _("Wait for the selected neural voice instead of using espeak while Piper loads or synthesizes slowly. Enabled by default on the PocketBook Era. Initial speech and pauses between sentences can take longer."),
+        })
+        table.insert(menu, {
             text = _("Low-resource mode (slow devices)"),
             checked_func = function()
-                return plugin:getSetting("piper_low_resource", false)
+                return plugin.tts_engine:_piperLowResource()
             end,
             callback = function()
-                plugin:toggleSetting("piper_low_resource", false)
+                plugin:toggleSetting("piper_low_resource", plugin.tts_engine:supportsPocketBookSpeaker())
             end,
             help_text = _(
                 "Synthesizes one sentence at a time and prioritizes the "
@@ -210,10 +220,10 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
         table.insert(menu, {
             text = _("Split sentences aggressively for Piper"),
             checked_func = function()
-                return plugin:getSetting("piper_aggressive_split", false)
+                return plugin.tts_engine:_piperAggressiveSplit()
             end,
             callback = function()
-                plugin:toggleSetting("piper_aggressive_split", false)
+                plugin:toggleSetting("piper_aggressive_split", plugin.tts_engine:supportsPocketBookSpeaker())
             end,
             help_text = _(
                 "Limits synthesis chunks to about 150 characters instead "
@@ -296,7 +306,26 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
         })
     end
 
+    if plugin.tts_engine.backend==plugin.tts_engine.BACKENDS.RHVOICE then
+        table.insert(menu,{text=_("RHVoice voices and tuning"),
+            sub_item_table_func=function() return MenuBuilder.buildRHVoiceMenu(plugin) end})
+    end
+
+    if plugin.tts_engine.backend=="ito" then
+        table.insert(menu,{text=_("Ito voice and pronunciation"),sub_item_table_func=function()
+            return MenuBuilder.buildItoMenu(plugin)
+        end})
+    end
+
     -- Speech rate submenu
+    table.insert(menu,{
+        text=_("Word pronunciation"),
+        sub_item_table_func=function() return MenuBuilder.buildPronunciationMenu(plugin) end,
+    })
+    table.insert(menu,{
+        text=_("Audio diagnostics and test"),
+        sub_item_table_func=function() return MenuBuilder.buildAudioDiagnosticsMenu(plugin) end,
+    })
     table.insert(menu, {
         text_func = function()
             return T(_("Speech rate: %1x"), plugin:getSetting("speech_rate", 1.0))
@@ -317,7 +346,7 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
     -- Volume submenu
     table.insert(menu, {
         text_func = function()
-            return T(_("Volume: %1%%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100))
+            return T(_("Volume: %1%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100 + 0.5))
         end,
         sub_item_table = MenuBuilder.buildVolumeMenu(plugin),
     })
@@ -433,6 +462,13 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
                 return MenuBuilder.buildSanottsVoiceMenu(plugin)
             end,
         })
+    elseif plugin.tts_engine.backend=="ito" then
+        table.insert(menu,{text=_("Voice: Ito female (American English)"),enabled=false})
+    elseif plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.RHVOICE then
+        table.insert(menu, {
+            text = T(_("Voice: %1 (English)"),plugin:getSetting("rhvoice_voice","Slt")),
+            enabled = false,
+        })
     elseif plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.SANOTTS_JP then
         table.insert(menu, {
             text = _("Voice: Japanese (sanoTTS-jp)"),
@@ -495,7 +531,6 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
 end
 
 function MenuBuilder.buildAlsaDeviceMenu(plugin)
-    local pb_default = plugin.tts_engine._pb_has_tts_sm and "tts_sm" or ""
     local devices = {
         { id = "tts_sm",   label = _("PocketBook pipeline - tts_sm (recommended)"),
           help = _("Routes through the PocketBook audio daemon (softvol, dmix, resampling). Best compatibility on devices that expose tts_sm in /etc/asound.conf.") },
@@ -506,6 +541,12 @@ function MenuBuilder.buildAlsaDeviceMenu(plugin)
         { id = "inkview",  label = _("System player (InkView) - experimental"),
           help = _("Uses the PocketBook InkView PlayFile API. Some firmwares (PB740, PB631) export PlayFile but do not actually play audio; if no sound comes out, switch back to tts_sm or Auto.") },
     }
+    if plugin.tts_engine:supportsPocketBookSpeaker() then
+        table.insert(devices, 1, {
+            id = "era-speaker", label = _("Era built-in speaker (firmware audio routing)"),
+            help = _("Plays through the original Era's built-in speaker using the PocketBook audio service. Disconnect Bluetooth headphones and USB audio first. Install the release ZIP to include the speech engine and player."),
+        })
+    end
     -- hwout_mix: daemon-routed dmix without the softvol/nested-plug layers.
     -- Only offered when present in asound.conf; it is the fallback for
     -- devices whose alsa-lib aborts opening tts_sm (issue #49).
@@ -522,14 +563,17 @@ function MenuBuilder.buildAlsaDeviceMenu(plugin)
             text = d.label,
             help_text = d.help,
             checked_func = function()
-                return plugin:getSetting("pb_alsa_device", pb_default) == d.id
+                return plugin.tts_engine:getPocketBookAudioDevice() == d.id
             end,
             callback = function()
-                plugin:setSetting("pb_alsa_device", d.id)
                 -- Invalidate cached player so the next playback uses the new device
                 if plugin.tts_engine then
+                    plugin.tts_engine:stop()
                     plugin.tts_engine._cached_player = nil
+                    plugin.tts_engine._wav_play_force_prefix = nil
+                    plugin.tts_engine._pb_speaker_active = false
                 end
+                plugin:setSetting("pb_alsa_device", d.id)
             end,
         })
     end
@@ -547,13 +591,41 @@ function MenuBuilder.buildSpeechRateMenu(plugin)
                 return plugin:getSetting("speech_rate", 1.0) == rate
             end,
             callback = function()
-                plugin:setSetting("speech_rate", rate)
-                plugin.tts_engine:setRate(rate)
+                if plugin.sync_controller then plugin.sync_controller:setSpeechRate(rate)
+                else
+                    plugin:setSetting("speech_rate", rate)
+                    plugin.tts_engine:setRate(rate)
+                end
             end,
         })
     end
 
     return menu
+end
+
+function MenuBuilder.buildPronunciationMenu(plugin)
+    local rates={}
+    for _,rate in ipairs({0.25,0.5,0.75,1,1.25,1.5,1.75,2}) do
+        rates[#rates+1]={text=string.format("%.2fx",rate),
+            checked_func=function() return plugin:getSetting("word_speech_rate",0.75)==rate end,
+            callback=function() plugin:setSetting("word_speech_rate",rate) end}
+    end
+    return {
+        {text_func=function() return T(_("Pronunciation speed: %1x"),plugin:getSetting("word_speech_rate",0.75)) end,
+            sub_item_table=rates},
+        {text=_("Cache word pronunciations"),checked_func=function() return plugin:getSetting("word_cache_enabled",true) end,
+            callback=function() plugin:toggleSetting("word_cache_enabled",true) end},
+        {text=_("Clear pronunciation cache"),callback=function() plugin:clearWordCache() end},
+    }
+end
+
+function MenuBuilder.buildAudioDiagnosticsMenu(plugin)
+    return {
+        {text=_("Audio status and latest failure"),callback=function() plugin:showAudioDiagnostics() end},
+        {text=_("Test audio output"),callback=function() plugin:previewVoice(nil,true) end},
+        {text=_("Stop test or preview"),callback=function() if plugin.word_reader then plugin.word_reader:stop() end end},
+        {text=_("Clear saved audio failure"),callback=function() plugin:setSetting("last_audio_failure",nil) end},
+    }
 end
 
 function MenuBuilder.buildPitchMenu(plugin)
@@ -582,18 +654,27 @@ function MenuBuilder.buildPitchMenu(plugin)
     return menu
 end
 
+function MenuBuilder.volumeValues()
+    local values={}
+    for percent=5,100,5 do values[#values+1]=percent/100 end
+    return values
+end
+
 function MenuBuilder.buildVolumeMenu(plugin)
-    local volumes = {0.25, 0.50, 0.75, 1.0}
+    local volumes = MenuBuilder.volumeValues()
     local menu = {}
     for _i, v in ipairs(volumes) do
         table.insert(menu, {
-            text = string.format("%d%%", math.floor(v * 100)),
+            text = string.format("%d%%", math.floor(v * 100 + 0.5)),
             checked_func = function()
                 return plugin:getSetting("speech_volume", 1.0) == v
             end,
             callback = function()
-                plugin:setSetting("speech_volume", v)
-                plugin.tts_engine:setVolume(v)
+                if plugin.sync_controller then plugin.sync_controller:setSpeechVolumePct(v*100)
+                else
+                    plugin:setSetting("speech_volume", v)
+                    plugin.tts_engine:setVolume(v)
+                end
             end,
         })
     end
@@ -965,6 +1046,16 @@ function MenuBuilder.buildEngineSelectMenu(plugin)
         })
     end
 
+    if engine.ito_bin then
+        table.insert(available,{id=engine.BACKENDS.ITO,label=_("Ito (offline English neural voice)")})
+    end
+    if engine.rhvoice_bin then
+        table.insert(available, {
+            id = engine.BACKENDS.RHVOICE,
+            label = _("RHVoice (English voices)"),
+        })
+    end
+
     -- sanoTTS-jp: Japanese, bring-your-own-weights.  Selectable only once
     -- the weights and dictionary are downloaded (getSntJpStatus().complete).
     if engine:getSntJpStatus().complete then
@@ -1001,13 +1092,17 @@ function MenuBuilder.buildEngineSelectMenu(plugin)
         return menu
     end
 
-    for _, backend in ipairs(available) do
+    for _i, backend in ipairs(available) do
         table.insert(menu, {
             text = backend.label,
             checked_func = function()
                 return engine.backend == backend.id
             end,
             callback = function(touchmenu_instance)
+                if (backend.id == engine.BACKENDS.RHVOICE or engine.backend == engine.BACKENDS.RHVOICE or backend.id=="ito" or engine.backend=="ito")
+                        and plugin.stopReadAlong then
+                    plugin:stopReadAlong()
+                end
                 engine:setBackend(backend.id)
                 plugin:setSetting("tts_backend", backend.id)
                 -- An explicit engine choice clears the espeak-only mode
@@ -1019,6 +1114,13 @@ function MenuBuilder.buildEngineSelectMenu(plugin)
                 if touchmenu_instance then
                     touchmenu_instance:closeMenu()
                 end
+            end,
+        })
+        table.insert(menu,{
+            text=T(_("Preview: %1"),backend.label),
+            callback=function(touchmenu_instance)
+                if touchmenu_instance then touchmenu_instance:closeMenu() end
+                plugin:previewVoice(backend.id)
             end,
         })
     end
@@ -2185,7 +2287,11 @@ function MenuBuilder.showVoicePicker(plugin)
         return
     end
     local items, current
-    if backend == plugin.tts_engine.BACKENDS.SANOTTS then
+    if backend=="ito" then
+        items,current=MenuBuilder.buildItoMenu(plugin),1
+    elseif backend==plugin.tts_engine.BACKENDS.RHVOICE then
+        items,current=MenuBuilder.buildRHVoiceMenu(plugin)[1].sub_item_table,1
+    elseif backend == plugin.tts_engine.BACKENDS.SANOTTS then
         -- sanoTTS has its own small voice inventory.  Without this branch it
         -- fell through to the espeak language list, offering languages the
         -- backend cannot synthesize.
@@ -2251,6 +2357,8 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
                 if v.name == name then voice_label = v.label break end
             end
         end
+    elseif backend=="ito" then voice_label=_("Ito female (American English)")
+    elseif backend==plugin.tts_engine.BACKENDS.RHVOICE then voice_label=plugin:getSetting("rhvoice_voice","Slt")
     else
         voice_label = plugin:getSetting("tts_voice_label", "English (GB)")
     end
@@ -2385,22 +2493,25 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
         })
     end
     table.insert(items, {
-        text = T(_("Volume: %1%%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100)),
+        text = T(_("Volume: %1%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100 + 0.5)),
         callback = function()
-            _valuePicker(_("Volume"), {0.25, 0.5, 0.75, 1.0},
+            _valuePicker(_("Volume"), MenuBuilder.volumeValues(),
                 plugin:getSetting("speech_volume", 1.0),
-                function(v) return string.format("%d%%", math.floor(v * 100)) end,
+                function(v) return string.format("%d%%", math.floor(v * 100 + 0.5)) end,
                 function(v)
-                    plugin:setSetting("speech_volume", v)
-                    if plugin.tts_engine then plugin.tts_engine:setVolume(v) end
+                    if plugin.sync_controller then plugin.sync_controller:setSpeechVolumePct(v*100)
+                    else
+                        plugin:setSetting("speech_volume", v)
+                        if plugin.tts_engine then plugin.tts_engine:setVolume(v) end
+                    end
                     if plugin.sync_controller and plugin.sync_controller.playback_bar
                         and plugin.sync_controller.playback_bar.updateVolume then
                         pcall(function()
-                            plugin.sync_controller.playback_bar:updateVolume(math.floor(v * 100))
+                            plugin.sync_controller.playback_bar:updateVolume(math.floor(v * 100 + 0.5))
                         end)
                     end
                     UIManager:show(InfoMessage:new{
-                        text = T(_("Volume: %1%%"), math.floor(v * 100)),
+                        text = T(_("Volume: %1%"), math.floor(v * 100 + 0.5)),
                         timeout = 1.5,
                     })
                 end)
@@ -2410,6 +2521,129 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
         title = _("TTS settings"),
         items = items,
     })
+end
+
+-- RHVoice-specific controls keep espeak pitch and pause settings independent.
+function MenuBuilder.buildRHVoiceMenu(plugin)
+    local Settings=dofile(_dir.."rhvoicesettings.lua")
+    local function values(key,choices,suffix,default)
+        local menu={}
+        for _i,value in ipairs(choices) do
+            menu[#menu+1]={text=tostring(value)..suffix,
+                checked_func=function() return plugin:getSetting(key,default)==value end,
+                callback=function() plugin:stopReadAlong();plugin:setSetting(key,value) end}
+        end
+        return menu
+    end
+    local voices={}
+    for _i,voice in ipairs(Settings.installed(plugin.tts_engine)) do
+        voices[#voices+1]={text=voice.label,
+            checked_func=function() return plugin:getSetting("rhvoice_voice","Slt")==voice.id end,
+            callback=function() plugin:stopReadAlong();plugin:setSetting("rhvoice_voice",voice.id) end}
+        voices[#voices+1]={text=T(_("Preview: %1"),voice.label),callback=function(touchmenu)
+            if touchmenu then touchmenu:closeMenu() end
+            plugin:previewVoice(plugin.tts_engine.BACKENDS.RHVOICE,false,voice.id)
+        end}
+    end
+    local presets={}
+    for _i,preset in ipairs(Settings.presets) do
+        presets[#presets+1]={text=_(preset.name),callback=function() Settings.applyPreset(plugin,preset) end,
+            help_text=T(_("Reading speed %1x; word speed %2x. Also sets RHVoice pitch and pauses. Voice and output stay selected."),preset.rate,preset.word_rate)}
+    end
+    return {
+        {text_func=function() return T(_("English voice: %1"),plugin:getSetting("rhvoice_voice","Slt")) end,sub_item_table=voices},
+        {text=_("Reading presets"),sub_item_table=presets},
+        {text_func=function() return T(_("Pitch: %1%"),math.floor(Settings.options(plugin).pitch*100+0.5)) end,
+            sub_item_table=values("rhvoice_pitch",{0.85,0.9,0.95,1,1.05,1.1,1.15},"x",1)},
+        {text_func=function() return T(_("Comma pause: %1s (0 = natural)"),Settings.options(plugin).comma) end,
+            sub_item_table=values("rhvoice_comma_pause",{0,0.1,0.12,0.2,0.25,0.3,0.5,0.75,1,1.5},"s",0)},
+        {text_func=function() return T(_("Added sentence pause: %1s"),Settings.options(plugin).sentence) end,
+            sub_item_table=values("rhvoice_sentence_pause",{0,0.1,0.2,0.3,0.4,0.5,0.75,1,1.5,2,3},"s",plugin:getSetting("sentence_pause",0.1))},
+        {text_func=function() return T(_("Added paragraph pause: %1s"),Settings.options(plugin).paragraph) end,
+            sub_item_table=values("rhvoice_paragraph_pause",{0,0.2,0.4,0.6,0.8,1,1.2,1.4,1.5,2,3,5},"s",plugin:getSetting("paragraph_pause",0.8))},
+        {text=_("Pronunciation corrections"),sub_item_table_func=function() return MenuBuilder.buildRHCorrectionsMenu(plugin) end},
+        {text=_("Pre-synthesize next sentence"),checked_func=function() return plugin:getSetting("rhvoice_prefetch",true) end,
+            callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_prefetch",true) end},
+        {text=_("Keep Era speaker open between sentences"),checked_func=function() return plugin:getSetting("rhvoice_keep_speaker",false) end,
+            callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_keep_speaker",false) end,
+            enabled_func=function() return plugin.tts_engine:supportsPocketBookSpeaker() end},
+        {text=_("Natural English phrasing"),
+            help_text=_("Keep titles and initials with their sentence. Normalize curly quotes, ligatures, non-breaking spaces and soft hyphens for pronunciation. Book text stays unchanged."),
+            checked_func=function() return plugin:getSetting("rhvoice_natural_english",true) end,
+            callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_natural_english",true) end},
+    }
+end
+
+function MenuBuilder.buildRHCorrectionsMenu(plugin)
+    local entries=plugin:getSetting("rhvoice_corrections",{})
+    local menu={{text=_("Add pronunciation correction"),callback=function()
+        MenuBuilder.editRHCorrection(plugin,nil)
+    end}}
+    local keys={};for key in pairs(entries) do keys[#keys+1]=key end;table.sort(keys)
+    for _i,key in ipairs(keys) do
+        menu[#menu+1]={text=key.." → "..entries[key],sub_item_table={
+            {text=_("Edit pronunciation"),callback=function() MenuBuilder.editRHCorrection(plugin,key) end},
+            {text=_("Remove correction"),callback=function()
+                plugin:stopReadAlong()
+                local updated={};for k,v in pairs(plugin:getSetting("rhvoice_corrections",{})) do if k~=key then updated[k]=v end end
+                plugin:setSetting("rhvoice_corrections",updated)
+            end},
+        }}
+    end
+    return menu
+end
+
+function MenuBuilder.editRHCorrection(plugin,key)
+    local InputDialog=require("ui/widget/inputdialog")
+    local function replacement(from)
+        local dialog
+        dialog=InputDialog:new{title=T(_("Say “%1” as:"),from),
+            input=plugin:getSetting("rhvoice_corrections",{})[from] or "",input_hint=_("Spoken spelling or expansion"),
+            buttons={{{text=_("Cancel"),callback=function() UIManager:close(dialog) end},
+                {text=_("Save"),is_enter_default=true,callback=function()
+                    local spoken=(dialog:getInputText() or ""):gsub("^%s+",""):gsub("%s+$","")
+                    if spoken=="" or #spoken>160 or spoken:find("[\r\n]") then
+                        UIManager:show(InfoMessage:new{text=_("Keep the pronunciation short and on one line."),timeout=3});return
+                    end
+                    local updated={};local count=0
+                    for k,v in pairs(plugin:getSetting("rhvoice_corrections",{})) do updated[k]=v;count=count+1 end
+                    if not updated[from] and count>=200 then
+                        UIManager:show(InfoMessage:new{text=_("Remove a correction before adding another (limit 200)."),timeout=3});return
+                    end
+                    plugin:stopReadAlong();updated[from]=spoken;plugin:setSetting("rhvoice_corrections",updated)
+                    UIManager:close(dialog)
+                end}}}}
+        UIManager:show(dialog);dialog:onShowKeyboard()
+    end
+    if key then replacement(key);return end
+    local dialog
+    dialog=InputDialog:new{title=_("Word, name or abbreviation"),
+        input=plugin.word_reader and plugin.word_reader.last_word or "",
+        buttons={{{text=_("Cancel"),callback=function() UIManager:close(dialog) end},
+            {text=_("Next"),is_enter_default=true,callback=function()
+                local from=(dialog:getInputText() or ""):gsub("^%s+",""):gsub("%s+$",""):lower()
+                if from=="" or #from>80 or from:find("[\r\n]") then
+                    UIManager:show(InfoMessage:new{text=_("Keep the word or abbreviation short and on one line."),timeout=3});return
+                end
+                UIManager:close(dialog);replacement(from)
+            end}}}}
+    UIManager:show(dialog);dialog:onShowKeyboard()
+end
+
+
+function MenuBuilder.buildItoMenu(plugin)
+    local tuning=MenuBuilder.buildRHVoiceMenu(plugin)
+    return {
+        {text=_("Ito female — American English"),enabled=false},
+        {text=_("Preview Ito voice"),callback=function(menu)
+            if menu then menu:closeMenu() end
+            plugin:previewVoice("ito")
+        end},
+        tuning[5],tuning[6],tuning[10],
+        {text=_("Pronunciation corrections"),sub_item_table_func=function() return MenuBuilder.buildRHCorrectionsMenu(plugin) end},
+        {text=_("Pre-synthesize next sentence"),checked_func=function() return plugin:getSetting("rhvoice_prefetch",true) end,
+            callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_prefetch",true) end},
+    }
 end
 
 return MenuBuilder

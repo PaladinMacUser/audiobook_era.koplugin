@@ -59,6 +59,12 @@ local function _pool_count(engine)
     if engine and engine.backend == engine.BACKENDS.SANOTTS then
         return 1
     end
+    -- The Era has two cores but only 512 MB RAM. Two ONNX processes each
+    -- load a complete neural model; keep one resident model on this device.
+    if engine and engine.backend == engine.BACKENDS.PIPER
+            and engine.supportsPocketBookSpeaker and engine:supportsPocketBookSpeaker() then
+        return 1
+    end
     return SERVER_COUNT
 end
 
@@ -74,6 +80,7 @@ sentence arrives after one synthesis instead of a full multi-sentence batch.
 --]]
 function PiperQueue:_batchSize()
     local engine = self.engine
+    if engine.getSanoTempoSpeed and engine:getSanoTempoSpeed() then return 1 end
     if engine._piperLowResource and engine:_piperLowResource() then
         return 1
     end
@@ -338,21 +345,10 @@ function PiperQueue:buildBaseCommand()
     end
     -- sanoTTS engine: same FIFO/JSON protocol, different binary and args.
     if engine.backend == engine.BACKENDS.SANOTTS and engine.sanotts_server then
-        local exec_prefix = ""
         local plugin_dir = engine.plugin_dir
             or "/mnt/onboard/.adds/koreader/plugins/audiobook.koplugin"
-        local espeak_lib = plugin_dir .. "/espeak-ng/lib"
-        local ld_linux = espeak_lib .. "/ld-linux-armhf.so.3"
-        local ld_f = io.open(ld_linux, "r")
-        if ld_f then
-            ld_f:close()
-            local lib_path = espeak_lib .. ":/usr/lib:/lib"
-            exec_prefix = string.format('"%s" --library-path "%s" ',
-                ld_linux, lib_path)
-        else
-            exec_prefix = string.format('LD_LIBRARY_PATH="%s:/usr/lib:/lib" ',
-                espeak_lib)
-        end
+        -- The bundled snt_server is static musl: execute it directly.
+        -- Only its optional espeak child needs the glibc loader below.
         local espeak_bin = engine.espeak_bin
             or (plugin_dir .. "/espeak-ng/bin/espeak-ng")
         local espeak_data = engine.espeak_data_path
@@ -388,7 +384,11 @@ function PiperQueue:buildBaseCommand()
         local rate = engine.rate or 1.0
         local ls = 1.0 / math.max(0.25, rate)
         local length_flag = ""
-        if math.abs(ls - 1.0) > 0.01 then
+        -- On the Era, render Kristin at its native scale. Slow playback is
+        -- applied to the finished audio by Sonic, preserving pitch instead
+        -- of asking this small model to generate elongated phonemes.
+        local tempo = engine.getSanoTempoSpeed and engine:getSanoTempoSpeed()
+        if not tempo and math.abs(ls - 1.0) > 0.01 then
             length_flag = string.format(" --length-scale %.2f", ls)
         end
         if vengine == "int8" then
@@ -419,8 +419,8 @@ function PiperQueue:buildBaseCommand()
         -- for the one core.
         local threads_prefix = _cpu_cores > 1 and "SNT_THREADS=2 " or ""
         return string.format(
-            '%snice -n 19 %s%s --model "%s" --espeak-bin "%s" --espeak-data "%s"%s%s%s%s%s',
-            threads_prefix, exec_prefix, engine.sanotts_server, engine.sanotts_voice_dir,
+            '%snice -n 19 "%s" --model "%s" --espeak-bin "%s" --espeak-data "%s"%s%s%s%s%s',
+            threads_prefix, engine.sanotts_server, engine.sanotts_voice_dir,
             espeak_bin, espeak_data, loader_flag, engine_args,
             g2p_flag, espeak_voice_flag, phoneme_flag)
     end
@@ -497,6 +497,16 @@ Build the shell command for per-process Piper synthesis.
 @param audio_file string
 @return string cmd, string text_file
 --]]
+-- audio_argument is an already quoted shell argument (or "$wav_path" in
+-- the resident server script). Book text is never part of this command.
+function PiperQueue:_tempoCommand(audio_argument)
+    local engine = self.engine
+    local speed = engine.getSanoTempoSpeed and engine:getSanoTempoSpeed()
+    if not speed or math.abs(speed - 1.0) < 0.001 then return nil end
+    local binary = "'" .. engine.sanotts_tempo:gsub("'", "'\\''") .. "'"
+    return string.format("%s --speed %.3f %s", binary, speed, audio_argument)
+end
+
 function PiperQueue:buildCommand(text, audio_file)
     local base = self:buildBaseCommand()
     local engine = self.engine
@@ -514,6 +524,12 @@ function PiperQueue:buildCommand(text, audio_file)
             tf:close()
         end
         cmd = string.format('%s < "%s" 2>&1', base, text_file)
+        local audio_arg = "'" .. audio_file:gsub("'", "'\\''") .. "'"
+        local tempo = self:_tempoCommand(audio_arg)
+        if tempo then
+            cmd = cmd .. " && (" .. tempo .. " || { rm -f " .. audio_arg
+                .. "; exit 1; })"
+        end
     else
         if tf then
             tf:write(self:_cleanText(text) .. "\n")
@@ -686,7 +702,13 @@ PIPER_INNER_PID_FILE="${FIFO}.piper_pid"
 } | while IFS= read -r wav_path; do
   wav_path=$(echo "$wav_path" | tr -d '\r\n')
   if [ -n "$wav_path" ]; then
-    echo "0" > "${wav_path}.done"
+    if %s; then
+      echo "0" > "${wav_path}.done"
+    else
+      # Never play the native-speed clip after failed tempo conversion.
+      rm -f "$wav_path" "${wav_path}.timing"
+      echo "1" > "${wav_path}.done"
+    fi
   fi
 done &
 PIPE_PID=$!
@@ -705,7 +727,7 @@ trap cleanup EXIT TERM
 wait $PIPE_PID 2>/dev/null
 exec 3>&-
 rm -f "$FIFO" "${FIFO}.pid" "${FIFO}.piper_pid"
-]=], fifo, log_file, base_cmd)
+]=], fifo, log_file, base_cmd, self:_tempoCommand('"$wav_path"') or "true")
 
         local sf = io.open(script_path, "w")
         if sf then

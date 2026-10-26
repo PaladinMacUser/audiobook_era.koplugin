@@ -215,6 +215,14 @@ local function collectPluginInfo(plugin)
         info.tts_backend = engine.backend or "nil (none detected)"
         info.tts_backend_cmd = engine.backend_cmd and sanitizePath(engine.backend_cmd) or "nil"
         info.tts_backend_error = engine.backend_error or "none"
+        info.rhvoice_binary = engine.rhvoice_bin and sanitizePath(engine.rhvoice_bin) or "not available"
+        info.rhvoice_voice = engine.backend == engine.BACKENDS.RHVOICE and "SLT (American English)" or "not active"
+        info.sanotts_voice_active = engine.sanotts_voice_name or "not set"
+        info.sanotts_tempo_binary = engine.sanotts_tempo and sanitizePath(engine.sanotts_tempo) or "not available"
+        info.sanotts_rate_mode = engine.getSanoTempoSpeed and engine:getSanoTempoSpeed()
+            and "native synthesis + pitch-preserving audio tempo" or "engine duration scaling"
+        info.espeak_fallback_sentences = plugin.sync_controller
+            and plugin.sync_controller._espeak_fallback_count or 0
         info.player_error = engine.player_error and "yes" or "no"
         info.audio_player_type = engine.audio_player_type or "not set"
         info.audio_player_cached = engine._cached_player or "not set"
@@ -313,6 +321,13 @@ local function collectPluginInfo(plugin)
             info.android_pcm_auto = tostring(engine._android_pcm_auto or false)
         end
 
+        if engine._pb_speaker then
+            local speaker = engine._pb_speaker
+            info.pb_speaker_pcm = speaker.pcm or "not found"
+            info.pb_speaker_prepared = tostring(speaker.prepared == true)
+            info.pb_speaker_output = tostring(speaker.output or "unknown")
+            info.pb_speaker_error = speaker.error or "none"
+        end
         -- PocketBook pre-flight snapshot from the most recent play() attempt
         -- (BT-adapter gate that prevents direct ALSA on PB632/PB700c).
         if engine._pb_pre_flight_state then
@@ -380,6 +395,8 @@ local function collectPluginInfo(plugin)
         info.settings = {
             tts_backend = plugin:getSetting("tts_backend", "auto"),
             speech_rate = plugin:getSetting("speech_rate", 1.0),
+            word_speech_rate = plugin:getSetting("word_speech_rate", 0.75),
+            word_cache_enabled = plugin:getSetting("word_cache_enabled", true),
             speech_pitch = plugin:getSetting("speech_pitch", 50),
             speech_volume = plugin:getSetting("speech_volume", 1.0),
             highlight_style = plugin:getSetting("highlight_style", "background"),
@@ -461,6 +478,11 @@ local function collectAudioInfo(plugin, skip_intensive)
     if skip_intensive then
         info._skipped_intensive = "true"
     end
+
+    local diagnostic_ok, diagnostic = pcall(function()
+        return dofile(_utils_dir .. "speechdiagnostics.lua").describe(plugin,plugin.tts_engine)
+    end)
+    if diagnostic_ok then info.speech_status = diagnostic end
 
     -- TTS command availability
     local tts_cmds = {"espeak-ng", "espeak", "piper", "pico2wave", "flite", "festival"}
@@ -547,6 +569,9 @@ local function collectAudioInfo(plugin, skip_intensive)
         end
         -- Device config (model, variant, BT name)
         info.pb_device_cfg = readFileLines("/ebrmain/config/device.cfg", 30) or "not found"
+        -- Discover native voice/library names without loading unknown ABIs
+        -- or reading proprietary voice/license payloads.
+        info.pb_stock_tts_files = shellCapture([[find /mnt/ext1/system/tts /ebrmain/tts /ebrmain/lib /usr/lib -maxdepth 7 \( -iname '*julie*' -o -iname '*readspeaker*' -o -iname '*voicetext*' -o -iname '*tts*.so*' \) 2>/dev/null | head -60]], 4) or "not found"
     end
 
     -- Bluetooth

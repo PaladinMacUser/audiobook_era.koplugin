@@ -34,6 +34,13 @@ local CRITICAL_FILES = {
     "downloader.lua",
     "mediaaligner.lua",
     "ttsengine.lua",
+    "wordreader.lua",
+    "wordcache.lua",
+    "rhvoiceclient.lua",
+    "rhvoicesettings.lua",
+    "speechdiagnostics.lua",
+    "gestureguard.lua",
+    "pocketbookaudio.lua",
     "synccontroller.lua",
     "menubuilder.lua",
     "bugreport.lua",
@@ -53,7 +60,7 @@ local function verifyPluginDir(plugin_dir)
     return true
 end
 
-local REPO = "stradichenko/audiobook.koplugin"
+local REPO = "PaladinMacUser/audiobook_era.koplugin"
 local API_URL = "https://api.github.com/repos/" .. REPO .. "/releases/latest"
 
 -- Resolve the plugin directory from this file's location.

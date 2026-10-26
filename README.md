@@ -1,3 +1,79 @@
+# PocketBook Era fork
+
+Offline English read-aloud through the original Era's built-in speaker,
+targeting **U700.6.10.3209** and **KOReader 2026.03**.
+
+Version **0.9.1** offers volume levels **5%, 10%, 15%, …, 100%** in
+both the Voice settings submenu and the playback TTS settings picker.
+
+Version **0.9.0** adds **Ito**, an optional offline English neural female voice,
+using a 3.8 MB model. The ARM runtime is bundled; its gated voice file stays
+separate. Copy your downloaded `ito_female_esp32s3.bin` into
+`audiobook.koplugin/ito/`, restart KOReader, then select **Voice settings →
+TTS engine → Ito (offline English neural voice)**. Preview before choosing it.
+See [Ito installation, behavior and source](ito/README.md).
+
+Ito supports Read word, cached pronunciations, previews, continuous reading,
+resident model reuse, one-sentence prefetch, speed, volume and mute. It always
+uses the established guarded clip player. The existing reading engine and
+RHVoice voices remain available; selecting Ito is explicit. Runtime speech
+needs no Wi-Fi, Python, account or external service. Actual Era latency and
+voice preference still require a device listening check.
+
+Version **0.8.2** improves RHVoice English phrasing: titles and name initials
+stay in their sentence, trailing quotes stay with the spoken line, and curly
+quotes, ligatures, non-breaking spaces and soft hyphens are normalized in the
+synthesis copy. **Natural English phrasing** is enabled by default under
+**Voice settings → RHVoice voices and tuning** and can be disabled for comparison.
+Corrections apply after cleanup; displayed text and source offsets stay intact.
+The existing maximum-quality 24 kHz models are retained; this improves input
+and sentence rhythm rather than replacing RHVoice's acoustic model.
+
+Retains the 0.8.1 playback/control fixes: continuous speech uses the established
+clip player by default, volume and speed regenerate current speech or apply
+on resume, volume supports mute, and Repeat last word menu entries are removed.
+Persistent speaker mode stays off by default. Failed startup retries the same
+clip and preserves the failure in diagnostics. It includes four offline RHVoice voices: **SLT** and **CLB**
+(American English, female), **BDL** (American English, male), and **Alan**
+(Scottish English, male). Open **Tools → Audiobook Read-Along → Voice settings
+→ RHVoice voices and tuning** to select or preview a voice.
+
+The same menu provides gentle pitch adjustment, separate comma/sentence/
+paragraph pauses, saved pronunciation corrections, and the **Slow and clear**,
+**Everyday reading**, and **Word practice** presets. Corrections apply to
+continuous reading and **Read word**. Voice previews preserve the selected
+reading voice.
+
+RHVoice pre-synthesizes one upcoming sentence while the current one plays.
+Continuous reading can keep one firmware-routed speaker stream open between
+sentences, feeding silence during pauses. Stop, book close, suspend and exit
+release it; the player also unloads after ten idle seconds. Fresh playback
+retains the 350 ms guard that protects word beginnings. Single-word playback
+and previews use the established guarded clip player.
+
+The earlier word cache, independent pronunciation speed,
+persistent RHVoice engine, audio test and saved-failure diagnostics remain
+included, together with Kristin, eSpeak, pitch-preserving slow speech,
+speaker routing and highlighting fixes, and the KOReader 2026.03 gesture
+guard. The Preview socket-type crash fix is retained. Saved engine, SLT voice,
+speed and output choices are preserved on upgrade; presets apply only when
+selected explicitly. Word timing remains estimated, especially with large
+pauses or pronunciation expansions.
+
+See [installation and device checks](INSTALL-ERA.md),
+[RHVoice details and pinned sources](rhvoice/README.md), and
+[the Era package workflow](../../actions/workflows/era.yml).
+The new stream is tested under ARM emulation and with a deterministic ALSA
+fixture; physical speaker latency and voice preference need an Era listening
+check. The stock PocketBook Julie engine is not integrated.
+
+Build with `python3 tools/package-era.py` (Python 3, Git, curl, CMake and
+`g++-arm-linux-gnueabihf`); add `--with-piper` for the larger Piper/Danny
+alternative. The in-app updater points to this fork. The upstream
+documentation follows; some optional features require its larger runtime.
+
+---
+
 <p align="center">
   <img src="new_audio_logo.svg" alt="Audiobook Read-Along logo" width="200">
 </p>

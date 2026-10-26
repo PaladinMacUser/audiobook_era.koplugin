@@ -145,6 +145,8 @@ Parse text into sentences.
 function TextParser:parseSentences(text, max_chunk)
     max_chunk = max_chunk or MAX_CHUNK_CHARS
     local sentences = {}
+    local english=self.english_phrasing_fn and self.english_phrasing_fn()
+        and dofile(_utils_dir.."englishspeech.lua")
     local sentence_index = 1
 
     -- Helper: add a sentence if non-empty
@@ -204,8 +206,12 @@ function TextParser:parseSentences(text, max_chunk)
                         best_s, best_e = s, e
                     end
                 end
-                consider(line:find("[%.%?!]+%s", pos))
-                consider(line:find("[%.%?!]+$", pos))
+                if english then
+                    consider(english.boundary(line,pos))
+                else
+                    consider(line:find("[%.%?!]+%s", pos))
+                    consider(line:find("[%.%?!]+$", pos))
+                end
                 for _, term in ipairs(cjk_endings) do
                     consider(line:find(term .. cjk_closers, pos))
                 end

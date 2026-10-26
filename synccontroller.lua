@@ -922,6 +922,7 @@ function SyncController:readNextSentence()
         -- While Piper hasn't delivered any audio yet, keep playing via
         -- espeak so the user never hits a dead stall on slow hardware.
         local use_espeak_early = self.plugin
+            and not self.tts_engine:preferPiperVoice()
             and self.plugin:getSetting("espeak_cold_start", true)
             and self.tts_engine.espeak_bin
             and not self._piper_warmed_up
@@ -1133,6 +1134,7 @@ function SyncController:readNextSentence()
         -- espeak-ng (~300ms) so there's no dead silence while Piper
         -- warms up.  Subsequent sentences use Piper as normal.
         local use_espeak_fallback = self.plugin
+            and not self.tts_engine:preferPiperVoice()
             and self.plugin:getSetting("espeak_cold_start", true)
             and self.tts_engine.espeak_bin
             and not self._piper_warmed_up
@@ -1221,8 +1223,10 @@ function SyncController:readNextSentence()
         if not synth_success then
             logger.warn("SyncController: Synthesis failed for sentence", controller.reading_sentence_idx)
             -- Piper failure: degrade the voice rather than drop book content
-            if controller.tts_engine.backend == controller.tts_engine.BACKENDS.PIPER or controller.tts_engine.backend == controller.tts_engine.BACKENDS.SANOTTS then
-                controller:_playViaEspeakOrSkip(sentence, "piper synthesize failed")
+            if controller.tts_engine.backend == controller.tts_engine.BACKENDS.PIPER
+                    or controller.tts_engine.backend == controller.tts_engine.BACKENDS.SANOTTS
+                    or (controller.tts_engine.backend == controller.tts_engine.BACKENDS.RHVOICE or controller.tts_engine.backend=="ito") then
+                controller:_playViaEspeakOrSkip(sentence, "synthesize failed")
             elseif controller.tts_engine.backend == controller.tts_engine.BACKENDS.ANDROID then
                 -- Neural Android engines (VoxSherpa/Kokoro) get force-stopped
                 -- for RAM. One miss can be a page-turn race: retry the same
@@ -1245,7 +1249,11 @@ function SyncController:readNextSentence()
 
     if success == false then
         -- synthesize() returned false immediately (no backend, etc.)
-        if self.tts_engine.backend == self.tts_engine.BACKENDS.ANDROID then
+        if (self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE or self.tts_engine.backend=="ito") then
+            if self.state ~= self.STATE.STOPPED then
+                self:_playViaEspeakOrSkip(sentence, "synthesize returned false")
+            end
+        elseif self.tts_engine.backend == self.tts_engine.BACKENDS.ANDROID then
             self:_onAndroidSynthFailed("synthesize returned false")
         else
             self:readNextSentence()
@@ -1566,6 +1574,7 @@ function SyncController:beginSentencePlayback(sentence)
         return
     end
 
+    self.tts_engine._rhvoice_continuous=self.tts_engine.backend==self.tts_engine.BACKENDS.RHVOICE
     -- Start TTS audio playback with callbacks
     local play_ok = self.tts_engine:play(
         -- Word callback
@@ -1663,6 +1672,9 @@ function SyncController:beginSentencePlayback(sentence)
                 -- Gap always padded into audio for Piper — minimal scheduling delay
                 delay = 0.05
                 logger.warn("SyncController: Piper gap padded in audio (", last_sent.end_type, "), delay=0.05s")
+            elseif controller.tts_engine.backend==controller.tts_engine.BACKENDS.RHVOICE or controller.tts_engine.backend=="ito" then
+                local options=controller.tts_engine:getRHVoiceOptions()
+                delay=last_sent.end_type=="paragraph" and options.paragraph or options.sentence
             elseif last_sent.end_type == "paragraph" then
                 delay = (controller.plugin and controller.plugin:getSetting("paragraph_pause", 0.8)) or 0.8
             else
@@ -1842,7 +1854,9 @@ function SyncController:_prefetchNextSentence(explicit_idx)
     -- Piper abandoned for the session: prefetch via espeak synthesis
     -- instead of the dead Piper queue.
     local use_espeak = self._piper_abandoned and true or false
+    local chain_generation=self._chain_generation
     UIManager:scheduleIn(0.2, function()
+        if self.state==self.STATE.STOPPED or self._chain_generation~=chain_generation then return end
         engine:prefetch(text, use_espeak)
     end)
 end
@@ -2578,6 +2592,14 @@ function SyncController:startSentenceSyncLoop(sentence)
             adjusted = (st.pos_ms or 0) - (self.tts_engine._audioout_start_ms or 0)
         end
 
+        if self.tts_engine._era_pending then
+            if not self.tts_engine._era_playing_at then
+                UIManager:scheduleIn(0.05,syncUpdate);return
+            end
+            adjusted=time.to_ms(UIManager:getTime()-self.tts_engine._era_playing_at)
+                -(self.tts_engine.playback_latency_ms or 0)
+        end
+
         if not adjusted then
         -- Dynamic BT latency detection: poll GStreamer's stderr for the
         -- PLAYING transition.  Once detected, anchor the sync timer to NOW
@@ -2886,6 +2908,11 @@ function SyncController:resume(auto)
             self.sentence_sync_start = self.sentence_sync_start + pause_duration
         end
 
+        if self._speech_settings_dirty then
+            self._speech_settings_dirty=nil
+            self:_restartFromCurrentSentence()
+            return
+        end
         self.tts_engine:resume()
         self:_ttsMarkPlay()
 
@@ -3050,6 +3077,26 @@ through to readNextSentence() only when espeak is unavailable or fails.
 @return boolean  true when the sentence is being played via espeak
 --]]
 function SyncController:_playViaEspeakOrSkip(sentence, reason)
+    if self.tts_engine and (self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE or self.tts_engine.backend=="ito") then
+        logger.err("SyncController:", self.tts_engine.backend,"synthesis failed:", reason)
+        self:stop()
+        local InfoMessage = require("ui/widget/infomessage")
+        UIManager:show(InfoMessage:new{
+            text = T(_("%1 could not generate this sentence.\n\nTry again, choose another TTS engine, or generate a bug report."),self.tts_engine.backend=="ito" and "Ito" or "RHVoice"),
+            timeout = 10,
+        })
+        return false
+    end
+    if self.tts_engine and self.tts_engine:preferPiperVoice() then
+        logger.err("SyncController: Piper voice could not be generated:", reason)
+        self:stop()
+        local InfoMessage = require("ui/widget/infomessage")
+        UIManager:show(InfoMessage:new{
+            text = _("Piper could not generate this sentence.\n\nTry again, or choose espeak-ng in Voice settings for faster speech. Generate a bug report if the problem repeats."),
+            timeout = 10,
+        })
+        return false
+    end
     if self.tts_engine and self.tts_engine.espeak_bin then
         logger.warn("SyncController: espeak fallback for sentence",
             self.reading_sentence_idx, "(", reason, ")")
@@ -3090,6 +3137,7 @@ modified, and Piper is tried again on the next playback session.
 function SyncController:_checkPiperRtfEscalation()
     if self._piper_abandoned then return end
     if not self.tts_engine or not self.tts_engine._piper then return end
+    if self.tts_engine:preferPiperVoice() then return end
     if self.tts_engine.backend ~= self.tts_engine.BACKENDS.PIPER and self.tts_engine.backend ~= self.tts_engine.BACKENDS.SANOTTS then return end
     local pq = self.tts_engine._piper
     local rtf = pq:getRtf()
@@ -3208,6 +3256,7 @@ end
 Stop playback completely.
 --]]
 function SyncController:stop(opts)
+    self._speech_settings_dirty=nil
     -- Log at WARN level with traceback when stopping from an active state
     -- so we can diagnose unexpected stops (e.g. "Chain BLOCKED" on Kindle).
     -- Mirror the reason into the plugin debug log: bug reports usually
@@ -3535,9 +3584,7 @@ function SyncController:setSpeechRate(speed)
     -- the user hears no change for a long time and the control looks dead.
     -- Re-read the current sentence at the new rate instead.  Only while
     -- playing: restarting a paused session would start playback again.
-    if self.state == self.STATE.PLAYING then
-        pcall(function() self:_restartFromCurrentSentence() end)
-    end
+    self:_applySpeechSettingsChange()
     return speed
 end
 
@@ -3557,7 +3604,7 @@ function SyncController:_restartFromCurrentSentence()
     if not target or target < 1 then return end
     if target > self.total_sentences then target = self.total_sentences end
     logger.warn("SyncController: restarting at sentence", target,
-        "to apply the new speech rate")
+        "to apply the new speech settings")
     self:_cleanConcatFiles()
     pcall(function() self.tts_engine:stop() end)
     if self.highlight_manager then
@@ -3584,6 +3631,17 @@ function SyncController:cycleSpeechRate()
     self:setSpeechRate(next_speed)
 end
 
+-- RHVoice bakes volume and rate into each WAV. Rebuild current speech,
+-- or defer until explicit resume so a settings dialog cannot unpause it.
+function SyncController:_applySpeechSettingsChange()
+    if self.state==self.STATE.PAUSED then
+        self._speech_settings_dirty=true
+    elseif self.state==self.STATE.PLAYING or self.state==self.STATE.LOADING then
+        self._speech_settings_dirty=nil
+        self:_restartFromCurrentSentence()
+    end
+end
+
 function SyncController:setSpeechVolumePct(pct)
     pct = tonumber(pct) or 100
     if pct < 0 then pct = 0 end
@@ -3594,6 +3652,9 @@ function SyncController:setSpeechVolumePct(pct)
     end
     if self.tts_engine and self.tts_engine.setVolume then
         self.tts_engine:setVolume(vol)
+    end
+    if self.tts_engine and (self.tts_engine.backend=="rhvoice" or self.tts_engine.backend=="ito") then
+        self:_applySpeechSettingsChange()
     end
 end
 
