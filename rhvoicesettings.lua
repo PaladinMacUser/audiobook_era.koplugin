@@ -46,7 +46,7 @@ end
 function Settings.escape(text)
     return (text:gsub('&','&amp;'):gsub('<','&lt;'):gsub('>','&gt;'):gsub('"','&quot;'):gsub("'",'&apos;'))
 end
-function Settings.ssml(text,options)
+function Settings.prepare(text,options)
     local English=dofile((debug.getinfo(1,"S").source:match("^@(.*/)") or "./").."englishspeech.lua")
     local corrections=options.corrections
     if options.natural~=false then
@@ -67,6 +67,10 @@ function Settings.ssml(text,options)
         corrections=normalized
     end
     text=Settings.correct(text,corrections)
+    return text
+end
+function Settings.ssml(text,options)
+    text=Settings.prepare(text,options)
     local out={"<speak>"}
     for i=1,#text do
         local c=text:sub(i,i);out[#out+1]=Settings.escape(c)

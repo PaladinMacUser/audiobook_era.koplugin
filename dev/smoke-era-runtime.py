@@ -206,6 +206,15 @@ def main():
         print(f"ARM tempo check: four clips at half speed in {time.monotonic()-tempo_started:.2f}s under emulation")
         # Copy the RHVoice runtime to tmpfs for ARM's 32-bit directory API.
         # Omit --data: this also checks relocation beside the executable.
+        # The public package contains the Ito runtime, never gated weights.
+        ito=plugin/"ito"
+        assert (ito/"ito-speak").is_file() and (ito/"phonemize.sh").is_file()
+        assert not list(ito.glob("ito_*esp32s3*.bin")), "Public package must not contain gated voice files"
+        missing=subprocess.run([args.qemu,str(ito/"ito-speak"),"--data",str(root/"missing-voice.bin"),
+            "--input",str(root/"none.txt"),"--output",str(root/"none.wav")],capture_output=True,text=True,timeout=10)
+        assert missing.returncode==1 and "cannot load compatible female voice" in missing.stderr
+        assert not (root/"none.wav").exists()
+        print("Ito ARM runtime starts and reports missing user-supplied model clearly; gated weights absent from public package")
         rh = Path(data_directory) / "rhvoice"
         shutil.copytree(plugin / "rhvoice/data", rh / "data")
         shutil.copy2(plugin / "rhvoice/rhvoice-slt", rh / "rhvoice-slt")

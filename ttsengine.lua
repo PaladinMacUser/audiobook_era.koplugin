@@ -72,6 +72,7 @@ local TTSEngine = {
         PIPER = "piper",
         SANOTTS = "sanotts",
         RHVOICE = "rhvoice",
+        ITO = "ito",
         SANOTTS_JP = "sanotts-jp",
         KINDLE_NATIVE = "kindle-native",
         NATIVE = "platform-native",
@@ -485,6 +486,13 @@ function TTSEngine:detectBackend()
             self.snt_jp_weights = nil
             self.snt_jp_dict = nil
         end
+
+        self.ito_bin=nil
+        local ito_bin=plugin_dir.."/ito/ito-speak"
+        local ito_model=io.open(plugin_dir.."/ito/ito_female_esp32s3.bin","rb")
+        local ito_ready=ito_model and ito_model:seek("end")==3806656
+        if ito_model then ito_model:close() end
+        if ito_ready and found_espeak and fileAccessible(plugin_dir.."/ito/phonemize.sh") and ensureBinary(ito_bin) and binaryRunsOnHost(ito_bin) then self.ito_bin=ito_bin end
 
         -- RHVoice is an optional addition. Detect its runtime without
         -- changing the current/default engine or any saved voice choice.
@@ -1006,6 +1014,9 @@ end
 
 function TTSEngine:getRHVoiceOptions()
     local options=dofile(_utils_dir.."rhvoicesettings.lua").options(self.plugin,self.rhvoice_voice_override)
+    if self.backend=="ito" then
+        options.voice="ItoFemale";options.pitch=1;options.comma=0
+    end
     return options
 end
 
@@ -1017,10 +1028,12 @@ end
 function TTSEngine:_getRHVoiceClient()
     local owner=self.plugin or self
     local client=owner._rhvoice_service
-    if not client or client.closed or client.binary~=self.rhvoice_bin then
+    local binary=self.rhvoice_bin
+    if self.backend=="ito" then binary=self.ito_bin end
+    if not client or client.closed or client.binary~=binary then
         if client then client:shutdown() end
         local Client=dofile(_utils_dir.."rhvoiceclient.lua")
-        client=self.rhvoice_bin and Client:new{binary=self.rhvoice_bin}
+        client=binary and Client:new{binary=binary}
         owner._rhvoice_service=client
     end
     return client
@@ -1028,16 +1041,20 @@ end
 
 function TTSEngine:_requestRHVoice(text,audio_file,current,callback)
     local client=self:_getRHVoiceClient()
-    if not client then callback(false,"Cannot create the resident RHVoice session");return nil end
+    if not client then callback(false,"Cannot create the resident speech session");return nil end
     local Settings=dofile(_utils_dir.."rhvoicesettings.lua")
     local options=self:getRHVoiceOptions()
     local lead=self:supportsPocketBookSpeaker() and self:getPocketBookAudioDevice()=="era-speaker" and 350 or 0
-    options.format="ssml"
-    local job=client:request(Settings.ssml(text,options,self.rate),audio_file,self.rate or 1,self.volume or 1,lead,current,
+    options.label=self.backend=="ito" and "Ito" or "RHVoice"
+    options.format=self.backend=="ito" and "text" or "ssml"
+    local prepared
+    if self.backend=="ito" then prepared=dofile(_utils_dir.."itosettings.lua").prepare(text,options)
+    else prepared=Settings.ssml(text,options,self.rate) end
+    local job=client:request(prepared,audio_file,self.rate or 1,self.volume or 1,lead,current,
         function(ok,reason)
             if not current() then return end
             if ok and WavUtils.getDurationMs(audio_file)<=lead then
-                ok=false;reason="RHVoice returned an invalid or empty WAV";os.remove(audio_file)
+                ok=false;reason="Speech engine returned an invalid or empty WAV";os.remove(audio_file)
             end
             callback(ok,reason,lead)
         end,options)
@@ -1057,7 +1074,7 @@ function TTSEngine:_synthesizeRHVoice(text,audio_file,callback)
         if not current() then return end
         self._rhvoice_pending=nil
         if ok then self:_adoptRHVoice(text,file or audio_file,lead)
-        else self:recordAudioFailure("RHVoice",reason or "Resident synthesis failed") end
+        else self:recordAudioFailure(self.backend=="ito" and "Ito" or "RHVoice",reason or "Resident synthesis failed") end
         if callback then callback(ok,ok and self.timing_data or nil) end
     end
     local slot=self._rhvoice_slot
@@ -1468,7 +1485,7 @@ function TTSEngine:synthesizeCommand(text, callback)
     elseif self.backend == self.BACKENDS.NATIVE then
         -- Platform-native TTS via user-supplied helper binary/script.
         return self:_synthesizeNative(text, audio_file, callback)
-    elseif self.backend == self.BACKENDS.RHVOICE then
+    elseif self.backend == self.BACKENDS.RHVOICE or self.backend=="ito" then
         return self:_synthesizeRHVoice(text,audio_file,callback)
     end
     if not cmd then
@@ -2250,7 +2267,7 @@ function TTSEngine:prefetch(text, use_espeak)
     if not self.backend or not text or text == "" then
         return false
     end
-    if self.backend == self.BACKENDS.RHVOICE then return self:prefetchRHVoice(text) end
+    if self.backend == self.BACKENDS.RHVOICE or self.backend=="ito" then return self:prefetchRHVoice(text) end
     -- Android TTS: dedicated async lookahead (issue #96).  The generic
     -- synchronous slot fill below cannot be used (synthesizeAndroid is async
     -- and would clobber current_audio_file), so prefetchAndroid fills the
@@ -2555,7 +2572,7 @@ Check if prefetched audio matches the given text and swap it in.
 @return boolean true if prefetch was used
 --]]
 function TTSEngine:usePrefetched(text)
-    if self.backend==self.BACKENDS.RHVOICE then
+    if self.backend==self.BACKENDS.RHVOICE or self.backend=="ito" then
         local slot=self._rhvoice_slot
         if slot and slot.state=="ready" and slot.signature==self:_rhvoiceSignature(text) then
             self._rhvoice_slot=nil;self:_adoptRHVoice(text,slot.file,slot.lead);return true
@@ -7617,6 +7634,8 @@ function TTSEngine:setBackend(backend)
     -- Restore correct backend_cmd for the selected backend
     if backend == self.BACKENDS.PIPER then
         self.backend_cmd = self.piper_cmd or "piper"
+    elseif backend == self.BACKENDS.ITO then
+        self.backend_cmd = self.ito_bin
     elseif backend == self.BACKENDS.RHVOICE then
         self.backend_cmd = self.rhvoice_bin
     elseif backend == self.BACKENDS.SANOTTS then

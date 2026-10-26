@@ -3,6 +3,20 @@
 Offline English read-aloud through the original Era's built-in speaker,
 targeting **U700.6.10.3209** and **KOReader 2026.03**.
 
+Version **0.9.0** adds **Ito**, an optional offline English neural female voice,
+using a 3.8 MB model. The ARM runtime is bundled; its gated voice file stays
+separate. Copy your downloaded `ito_female_esp32s3.bin` into
+`audiobook.koplugin/ito/`, restart KOReader, then select **Voice settings →
+TTS engine → Ito (offline English neural voice)**. Preview before choosing it.
+See [Ito installation, behavior and source](ito/README.md).
+
+Ito supports Read word, cached pronunciations, previews, continuous reading,
+resident model reuse, one-sentence prefetch, speed, volume and mute. It always
+uses the established guarded clip player. The existing reading engine and
+RHVoice voices remain available; selecting Ito is explicit. Runtime speech
+needs no Wi-Fi, Python, account or external service. Actual Era latency and
+voice preference still require a device listening check.
+
 Version **0.8.2** improves RHVoice English phrasing: titles and name initials
 stay in their sentence, trailing quotes stay with the spoken line, and curly
 quotes, ligatures, non-breaking spaces and soft hyphens are normalized in the

@@ -19,11 +19,11 @@ function Diagnostics.describe(plugin,engine)
         lines[#lines+1]="Audio player: "..tostring(engine.audio_player_type or "not opened yet")
         lines[#lines+1]="Speaker PCM: "..tostring(engine._pb_speaker and engine._pb_speaker.pcm or "not opened yet")
     end
-    if engine and engine.backend=="rhvoice" and engine.getRHVoiceOptions then
+    if engine and (engine.backend=="rhvoice" or engine.backend=="ito") and engine.getRHVoiceOptions then
         local o=engine:getRHVoiceOptions()
-        lines[#lines+1]=string.format("RHVoice voice: %s; pitch %.2fx; comma %.2fs",o.voice,o.pitch,o.comma)
+        lines[#lines+1]=string.format("Speech voice: %s; pitch %.2fx; comma %.2fs",o.voice,o.pitch,o.comma)
         lines[#lines+1]="Natural English phrasing: "..tostring(o.natural~=false)
-        lines[#lines+1]="RHVoice prefetch: "..tostring(engine._rhvoice_slot and engine._rhvoice_slot.state or "empty")
+        lines[#lines+1]="Speech prefetch: "..tostring(engine._rhvoice_slot and engine._rhvoice_slot.state or "empty")
     end
     if engine and engine._era_service then
         local status=engine._era_service:status()
@@ -31,7 +31,7 @@ function Diagnostics.describe(plugin,engine)
     end
     local service=plugin._rhvoice_service
     if service then local s=service:status()
-        lines[#lines+1]=string.format("RHVoice: %s; starts %d; requests %d; pending %d",
+        lines[#lines+1]=string.format("Resident speech engine: %s; starts %d; requests %d; pending %d",
             s.running and "loaded" or "idle",s.starts,s.requests,s.pending)
     end
     if plugin._last_audio_engine then lines[#lines+1]="Last audio request: "..plugin._last_audio_engine end

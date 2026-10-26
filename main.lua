@@ -366,7 +366,7 @@ function Audiobook:_initSubmodules()
                 plugin_dir = Utils.normalizeDirPath(pp),
             }
             self.text_parser.english_phrasing_fn=function()
-                return self.tts_engine.backend==self.tts_engine.BACKENDS.RHVOICE
+                return (self.tts_engine.backend==self.tts_engine.BACKENDS.RHVOICE or self.tts_engine.backend=="ito")
                     and self:getSetting("rhvoice_natural_english",true)
             end
             self.word_reader = dofile(pp .. "wordreader.lua"):new{engine = self.tts_engine}
@@ -709,7 +709,7 @@ function Audiobook:addToMainMenu(menu_items)
                         local model_label = self:getSetting("piper_model_label", "default")
                         return T(_("Voice settings (Piper - %1)"), model_label)
                     end
-                    if self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE then
+                    if self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE or self.tts_engine.backend=="ito" then
                         return T(_("Voice settings (RHVoice - %1)"),self:getSetting("rhvoice_voice","Slt"))
                     end
                     local voice_label = self:getSetting("tts_voice_label", "English (GB)")

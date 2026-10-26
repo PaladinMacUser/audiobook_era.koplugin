@@ -1225,7 +1225,7 @@ function SyncController:readNextSentence()
             -- Piper failure: degrade the voice rather than drop book content
             if controller.tts_engine.backend == controller.tts_engine.BACKENDS.PIPER
                     or controller.tts_engine.backend == controller.tts_engine.BACKENDS.SANOTTS
-                    or controller.tts_engine.backend == controller.tts_engine.BACKENDS.RHVOICE then
+                    or (controller.tts_engine.backend == controller.tts_engine.BACKENDS.RHVOICE or controller.tts_engine.backend=="ito") then
                 controller:_playViaEspeakOrSkip(sentence, "synthesize failed")
             elseif controller.tts_engine.backend == controller.tts_engine.BACKENDS.ANDROID then
                 -- Neural Android engines (VoxSherpa/Kokoro) get force-stopped
@@ -1249,7 +1249,7 @@ function SyncController:readNextSentence()
 
     if success == false then
         -- synthesize() returned false immediately (no backend, etc.)
-        if self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE then
+        if (self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE or self.tts_engine.backend=="ito") then
             if self.state ~= self.STATE.STOPPED then
                 self:_playViaEspeakOrSkip(sentence, "synthesize returned false")
             end
@@ -1672,7 +1672,7 @@ function SyncController:beginSentencePlayback(sentence)
                 -- Gap always padded into audio for Piper — minimal scheduling delay
                 delay = 0.05
                 logger.warn("SyncController: Piper gap padded in audio (", last_sent.end_type, "), delay=0.05s")
-            elseif controller.tts_engine.backend==controller.tts_engine.BACKENDS.RHVOICE then
+            elseif controller.tts_engine.backend==controller.tts_engine.BACKENDS.RHVOICE or controller.tts_engine.backend=="ito" then
                 local options=controller.tts_engine:getRHVoiceOptions()
                 delay=last_sent.end_type=="paragraph" and options.paragraph or options.sentence
             elseif last_sent.end_type == "paragraph" then
@@ -3077,12 +3077,12 @@ through to readNextSentence() only when espeak is unavailable or fails.
 @return boolean  true when the sentence is being played via espeak
 --]]
 function SyncController:_playViaEspeakOrSkip(sentence, reason)
-    if self.tts_engine and self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE then
-        logger.err("SyncController: RHVoice synthesis failed:", reason)
+    if self.tts_engine and (self.tts_engine.backend == self.tts_engine.BACKENDS.RHVOICE or self.tts_engine.backend=="ito") then
+        logger.err("SyncController:", self.tts_engine.backend,"synthesis failed:", reason)
         self:stop()
         local InfoMessage = require("ui/widget/infomessage")
         UIManager:show(InfoMessage:new{
-            text = _("RHVoice could not generate this sentence.\n\nTry again, choose another TTS engine, or generate a bug report."),
+            text = T(_("%1 could not generate this sentence.\n\nTry again, choose another TTS engine, or generate a bug report."),self.tts_engine.backend=="ito" and "Ito" or "RHVoice"),
             timeout = 10,
         })
         return false
@@ -3653,7 +3653,7 @@ function SyncController:setSpeechVolumePct(pct)
     if self.tts_engine and self.tts_engine.setVolume then
         self.tts_engine:setVolume(vol)
     end
-    if self.tts_engine and self.tts_engine.backend=="rhvoice" then
+    if self.tts_engine and (self.tts_engine.backend=="rhvoice" or self.tts_engine.backend=="ito") then
         self:_applySpeechSettingsChange()
     end
 end

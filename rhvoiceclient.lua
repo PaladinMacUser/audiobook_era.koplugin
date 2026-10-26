@@ -96,7 +96,7 @@ function Client:request(text,output,rate,volume,lead,current,callback,options)
         local marker=read(job.path..".done")
         if marker then
             if fd then ffi.C.close(fd);fd=nil end
-            done(active and marker:match("^OK")~=nil,marker:match("^ERR") and (options.no_output and marker:gsub("%s+$","") or "RHVoice synthesis failed") or nil)
+            done(active and marker:match("^OK")~=nil,marker:match("^ERR") and (options.no_output and marker:gsub("%s+$","") or (options.label or "RHVoice").." synthesis failed") or nil)
             return
         end
         local elapsed=time.to_s(UIManager:getTime()-started)-(job.paused_seconds or 0)

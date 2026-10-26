@@ -55,3 +55,13 @@ The additional `rhvoice/era-player` is built from this repository's GPL source
 `rhvoice/era-player.c` with `tools/build-era-player.py`. It uses the existing
 bundled ALSA and glibc libraries, with no firmware library replacement or
 additional hardware driver.
+
+## Ito addition (0.9.0)
+
+`tools/build-ito.py` pins the GPLv3 portable core to upstream commit
+`118a238b3fbb754d3364c52a167f11b9142ca6a2`, builds a static ARM adapter with
+Sonic, and includes the exact core, adapter and recipe under
+`ito/corresponding-source.tar.gz`. Runtime/source/license files are whitelisted
+by the package tool. Gated voice weights supplied by a user are never included
+in public packages or uploaded to GitHub. See `ito/README.md` for model origin,
+checksum, license references, tests and installation.

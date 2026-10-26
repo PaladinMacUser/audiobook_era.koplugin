@@ -311,6 +311,12 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
             sub_item_table_func=function() return MenuBuilder.buildRHVoiceMenu(plugin) end})
     end
 
+    if plugin.tts_engine.backend=="ito" then
+        table.insert(menu,{text=_("Ito voice and pronunciation"),sub_item_table_func=function()
+            return MenuBuilder.buildItoMenu(plugin)
+        end})
+    end
+
     -- Speech rate submenu
     table.insert(menu,{
         text=_("Word pronunciation"),
@@ -456,9 +462,11 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
                 return MenuBuilder.buildSanottsVoiceMenu(plugin)
             end,
         })
+    elseif plugin.tts_engine.backend=="ito" then
+        table.insert(menu,{text=_("Voice: Ito female (American English)"),enabled=false})
     elseif plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.RHVOICE then
         table.insert(menu, {
-            text = _("Voice: SLT (American English)"),
+            text = T(_("Voice: %1 (English)"),plugin:getSetting("rhvoice_voice","Slt")),
             enabled = false,
         })
     elseif plugin.tts_engine.backend == plugin.tts_engine.BACKENDS.SANOTTS_JP then
@@ -1032,6 +1040,9 @@ function MenuBuilder.buildEngineSelectMenu(plugin)
         })
     end
 
+    if engine.ito_bin then
+        table.insert(available,{id=engine.BACKENDS.ITO,label=_("Ito (offline English neural voice)")})
+    end
     if engine.rhvoice_bin then
         table.insert(available, {
             id = engine.BACKENDS.RHVOICE,
@@ -1082,7 +1093,7 @@ function MenuBuilder.buildEngineSelectMenu(plugin)
                 return engine.backend == backend.id
             end,
             callback = function(touchmenu_instance)
-                if (backend.id == engine.BACKENDS.RHVOICE or engine.backend == engine.BACKENDS.RHVOICE)
+                if (backend.id == engine.BACKENDS.RHVOICE or engine.backend == engine.BACKENDS.RHVOICE or backend.id=="ito" or engine.backend=="ito")
                         and plugin.stopReadAlong then
                     plugin:stopReadAlong()
                 end
@@ -2270,7 +2281,11 @@ function MenuBuilder.showVoicePicker(plugin)
         return
     end
     local items, current
-    if backend == plugin.tts_engine.BACKENDS.SANOTTS then
+    if backend=="ito" then
+        items,current=MenuBuilder.buildItoMenu(plugin),1
+    elseif backend==plugin.tts_engine.BACKENDS.RHVOICE then
+        items,current=MenuBuilder.buildRHVoiceMenu(plugin)[1].sub_item_table,1
+    elseif backend == plugin.tts_engine.BACKENDS.SANOTTS then
         -- sanoTTS has its own small voice inventory.  Without this branch it
         -- fell through to the espeak language list, offering languages the
         -- backend cannot synthesize.
@@ -2336,6 +2351,8 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
                 if v.name == name then voice_label = v.label break end
             end
         end
+    elseif backend=="ito" then voice_label=_("Ito female (American English)")
+    elseif backend==plugin.tts_engine.BACKENDS.RHVOICE then voice_label=plugin:getSetting("rhvoice_voice","Slt")
     else
         voice_label = plugin:getSetting("tts_voice_label", "English (GB)")
     end
@@ -2605,6 +2622,22 @@ function MenuBuilder.editRHCorrection(plugin,key)
                 UIManager:close(dialog);replacement(from)
             end}}}}
     UIManager:show(dialog);dialog:onShowKeyboard()
+end
+
+
+function MenuBuilder.buildItoMenu(plugin)
+    local tuning=MenuBuilder.buildRHVoiceMenu(plugin)
+    return {
+        {text=_("Ito female — American English"),enabled=false},
+        {text=_("Preview Ito voice"),callback=function(menu)
+            if menu then menu:closeMenu() end
+            plugin:previewVoice("ito")
+        end},
+        tuning[5],tuning[6],tuning[10],
+        {text=_("Pronunciation corrections"),sub_item_table_func=function() return MenuBuilder.buildRHCorrectionsMenu(plugin) end},
+        {text=_("Pre-synthesize next sentence"),checked_func=function() return plugin:getSetting("rhvoice_prefetch",true) end,
+            callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_prefetch",true) end},
+    }
 end
 
 return MenuBuilder

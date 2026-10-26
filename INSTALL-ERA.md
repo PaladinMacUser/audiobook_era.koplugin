@@ -1,5 +1,24 @@
 # PocketBook Era: English read-aloud through the built-in speaker
 
+## Ito offline neural voice (0.9.0)
+
+1. Install this plugin ZIP, replacing the previous `audiobook.koplugin` folder.
+2. Copy the **`ito_female_esp32s3.bin`** you downloaded from Hugging Face into
+   **`audiobook.koplugin/ito/`**. Keep that exact filename. The gated model is
+   separate from the public plugin download; it is 3,806,656 bytes.
+3. Restart KOReader. Open **Tools → Audiobook Read-Along → Voice settings →
+   TTS engine** and try **Preview: Ito (offline English neural voice)**.
+4. Select **Ito (offline English neural voice)**, then try **Read word** and
+   **Read aloud from here**. Speed and volume work as usual; Read word retains
+   its separate pronunciation speed. RHVoice remains available in the engine menu.
+
+Ito requires no Wi-Fi or account after the model is copied. It uses its own
+neural waveform generator with the bundled eSpeak phonemizer, keeps its model
+loaded between requests, and uses the same guarded speaker clip path as RHVoice.
+Pitch controls apply to RHVoice only. Shared pronunciation corrections and pauses
+are available under **Ito voice and pronunciation**. See [details](ito/README.md).
+
+
 Target: **original Era (PB700), firmware U700.6.10.3209, KOReader 2026.03**.
 Version **0.8.1** adds SLT/BDL/CLB/Alan English voices, per-voice previews,
 one-sentence RHVoice lookahead, a persistent Era speaker stream, gentle pitch,
@@ -18,7 +37,7 @@ emulation in the development check; actual Era speed needs a device test.
 2. If an older `audiobook.koplugin` or `audiobook_era.koplugin` is installed,
    move it outside the `plugins` folder as a backup. Keep only one installed
    copy of this plugin.
-3. Extract **`audiobook-era-v0.8.2.zip`**. Copy its **`audiobook.koplugin`**
+3. Extract **`audiobook-era-v0.9.0.zip`**. Copy its **`audiobook.koplugin`**
    folder into **`applications/koreader/plugins/`** on the Era's USB drive.
    The device path is `/mnt/ext1/applications/koreader/plugins/audiobook.koplugin/`.
    Do not use GitHub's “Source code” ZIP: it lacks the speech runtime.
@@ -253,7 +272,7 @@ Run `LUAJIT=luajit sh dev/run_pocketbook_tests.sh` for the native ABI and engine
 regression tests. These require a host C compiler and LuaJIT, not the reader.
 Run `python3 dev/test_wav_tempo.py` for pitch, duration, word-ending and
 malformed-input checks of the tempo converter.
-Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.8.2.zip` with
+Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.9.0.zip` with
 `qemu-arm` installed to verify the packaged ARM English engine and player.
 
 In 0.8.1, continuous-reading speed and volume changes regenerate the current

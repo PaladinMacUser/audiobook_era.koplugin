@@ -64,7 +64,7 @@ function Cache.key(engine,word)
         engine.sanotts_voice_name,engine.sanotts_tempo,engine.sanotts_voice_dir,engine.sanotts_server,
         engine.rhvoice_bin,engine.backend_cmd,engine.getPocketBookAudioDevice and engine:getPocketBookAudioDevice())
     local rhvoice_model
-    if engine.backend=="rhvoice" then
+    if engine.backend=="rhvoice" or engine.backend=="ito" then
         local Settings=dofile(dir.."rhvoicesettings.lua")
         local options=engine.getRHVoiceOptions and engine:getRHVoiceOptions() or Settings.options(engine.plugin,engine.rhvoice_voice_override)
         add(Settings.signature(options))
@@ -84,6 +84,8 @@ function Cache.key(engine,word)
         add(path,a and a.size,a and a.modification)
     end
     fingerprint(engine.piper_model);fingerprint(engine.rhvoice_bin)
+    fingerprint(engine.ito_bin)
+    if engine.backend=="ito" and engine.ito_bin then fingerprint(engine.ito_bin:match("^(.*)/[^/]+$").."/ito_female_esp32s3.bin") end
     fingerprint(engine.sanotts_server);fingerprint(engine.backend_cmd);fingerprint(rhvoice_model)
     return table.concat(out,"|")
 end

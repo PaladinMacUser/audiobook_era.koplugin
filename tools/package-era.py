@@ -15,7 +15,7 @@ RUNTIME_SHA256 = "a479409534cea65af60923cab69716a9affcb9357ab160f4bad5c03925d96b
 PREFIX = "audiobook.koplugin/"
 
 
-def package(runtime_zip, output, with_piper=False, tempo_binary=None, rhvoice_dir=None):
+def package(runtime_zip, output, with_piper=False, tempo_binary=None, rhvoice_dir=None, ito_dir=None):
     if hashlib.sha256(runtime_zip.read_bytes()).hexdigest() != RUNTIME_SHA256:
         raise ValueError("Upstream runtime ZIP checksum mismatch")
     content = {}
@@ -65,6 +65,16 @@ def package(runtime_zip, output, with_piper=False, tempo_binary=None, rhvoice_di
         if source.is_file():
             relative = source.relative_to(rhvoice_dir).as_posix()
             content[PREFIX + "rhvoice/" + relative] = (source.read_bytes(), stat.S_IFREG | (0o755 if relative in ("rhvoice-slt","era-player") else 0o644))
+    if ito_dir is None:
+        subprocess.run([sys.executable,str(ROOT/"tools/build-ito.py")],check=True)
+        ito_dir=ROOT/".cache/ito-runtime"
+    # Gated voice files are deliberately never included in public artifacts.
+    for name in ("ito-speak","LICENSE-Ito","NOTICE-Ito","LICENSE-WEIGHTS","TERMS.md","SOURCE-REVISION","corresponding-source.tar.gz"):
+        source=ito_dir/name
+        content[PREFIX+"ito/"+name]=(source.read_bytes(),stat.S_IFREG|(0o755 if name=="ito-speak" else 0o644))
+    for source in sorted((ROOT/"ito").iterdir()):
+        if source.is_file():
+            content[PREFIX+"ito/"+source.name]=(source.read_bytes(),stat.S_IFREG|(0o755 if source.suffix==".sh" else 0o644))
     for source in sorted((ROOT / "rhvoice").iterdir()):
         if source.is_file():
             content[PREFIX + "rhvoice/" + source.name] = (source.read_bytes(), stat.S_IFREG | 0o644)
@@ -81,7 +91,7 @@ def package(runtime_zip, output, with_piper=False, tempo_binary=None, rhvoice_di
                 "tempo/wav-tempo", "tempo/LICENSE", "rhvoice/rhvoice-slt", "gestureguard.lua",
                 "rhvoice/data/languages/English/cmulex.fst", "rhvoice/data/voices/slt/24000/voice.data",
                 "rhvoice/data/voices/bdl/24000/voice.data", "rhvoice/data/voices/clb/24000/voice.data", "rhvoice/data/voices/alan/24000/voice.data",
-                "rhvoice/data/config/RHVoice.conf", "rhvoice/corresponding-source.tar.gz", "rhvoice/era-player", "rhvoicesettings.lua", "wordcache.lua", "rhvoiceclient.lua", "speechdiagnostics.lua")
+                "rhvoice/data/config/RHVoice.conf", "rhvoice/corresponding-source.tar.gz", "rhvoice/era-player", "ito/ito-speak", "ito/phonemize.sh", "ito/corresponding-source.tar.gz", "itosettings.lua", "rhvoicesettings.lua", "wordcache.lua", "rhvoiceclient.lua", "speechdiagnostics.lua")
     if with_piper:
         required += (
                 "piper/piper.bin", "piper/lib/libonnxruntime.so.1.14.1",
@@ -109,15 +119,16 @@ def main():
     parser.add_argument("--with-piper", action="store_true", help="Also include the slower Piper engine and Danny voice")
     parser.add_argument("--tempo-binary", type=Path, help="Use an already built static ARM wav-tempo")
     parser.add_argument("--rhvoice-dir", type=Path, help="Use a runtime already built by tools/build-rhvoice.py")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.8.2.zip")
+    parser.add_argument("--ito-dir",type=Path,help="Use an already built Ito runtime (weights stay separate)")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.9.0.zip")
     args = parser.parse_args()
     if args.runtime_zip:
-        package(args.runtime_zip, args.output, args.with_piper, args.tempo_binary, args.rhvoice_dir)
+        package(args.runtime_zip, args.output, args.with_piper, args.tempo_binary, args.rhvoice_dir, args.ito_dir)
     else:
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary) / "upstream.zip"
             subprocess.run(["curl", "--fail", "--location", "--retry", "3", "--output", str(runtime), RUNTIME_URL], check=True)
-            package(runtime, args.output, args.with_piper, args.tempo_binary, args.rhvoice_dir)
+            package(runtime, args.output, args.with_piper, args.tempo_binary, args.rhvoice_dir, args.ito_dir)
 
 
 if __name__ == "__main__":

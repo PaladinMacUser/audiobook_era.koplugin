@@ -28,7 +28,7 @@ local inventory={
     ["/reader/rhvoice/data/voices/slt/24000/voice.data"]=true,
 }
 io.open=function(path,mode)
-    if inventory[path] then return {close=function() end,read=function() return "#!/bin/sh" end} end
+    if inventory[path] then return {close=function() end,read=function() return "#!/bin/sh" end,seek=function() return 3806656 end} end
     return real_open(path,mode)
 end
 os.execute=function() return 0 end
@@ -39,6 +39,12 @@ check(detected.backend==Engine.BACKENDS.ESPEAK, "detecting RHVoice does not repl
 inventory["/reader/rhvoice/data/voices/slt/24000/voice.data"]=nil
 detected:detectBackend()
 check(detected.rhvoice_bin==nil, "missing voice data disables the RHVoice option on re-detection")
+inventory["/reader/ito/ito-speak"]=true;inventory["/reader/ito/phonemize.sh"]=true
+inventory["/reader/ito/ito_female_esp32s3.bin"]=true
+detected:detectBackend()
+check(detected.ito_bin=="/reader/ito/ito-speak" and detected.backend==Engine.BACKENDS.ESPEAK,"Ito detection requires its user-installed model and preserves the current engine")
+inventory["/reader/ito/ito_female_esp32s3.bin"]=nil;detected:detectBackend()
+check(detected.ito_bin==nil,"removing the model disables Ito on re-detection")
 io.open,os.execute=real_open,real_execute
 local settings={tts_backend="sanotts",speech_rate=0.5}
 local stops=0
