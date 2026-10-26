@@ -120,7 +120,7 @@ def main():
     parser.add_argument("--tempo-binary", type=Path, help="Use an already built static ARM wav-tempo")
     parser.add_argument("--rhvoice-dir", type=Path, help="Use a runtime already built by tools/build-rhvoice.py")
     parser.add_argument("--ito-dir",type=Path,help="Use an already built Ito runtime (weights stay separate)")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.9.0.zip")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist/audiobook-era-v0.9.1.zip")
     args = parser.parse_args()
     if args.runtime_zip:
         package(args.runtime_zip, args.output, args.with_piper, args.tempo_binary, args.rhvoice_dir, args.ito_dir)

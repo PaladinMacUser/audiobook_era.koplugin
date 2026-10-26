@@ -3,6 +3,9 @@
 Offline English read-aloud through the original Era's built-in speaker,
 targeting **U700.6.10.3209** and **KOReader 2026.03**.
 
+Version **0.9.1** offers volume levels **5%, 10%, 15%, …, 100%** in
+both the Voice settings submenu and the playback TTS settings picker.
+
 Version **0.9.0** adds **Ito**, an optional offline English neural female voice,
 using a 3.8 MB model. The ARM runtime is bundled; its gated voice file stays
 separate. Copy your downloaded `ito_female_esp32s3.bin` into

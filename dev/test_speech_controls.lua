@@ -19,7 +19,7 @@ local sync=setmetatable({plugin=plugin,tts_engine=engine,state=Sync.STATE.PLAYIN
 plugin.sync_controller=sync
 Menu.buildSpeechRateMenu(plugin)[2].callback()
 check(engine.rate==.5 and saved.speech_rate==.5 and restarts==1,'main rate menu restarts current speech')
-Menu.buildVolumeMenu(plugin)[1].callback()
+Menu.buildVolumeMenu(plugin)[5].callback()
 check(engine.volume==.25 and saved.speech_volume==.25 and restarts==2,'main volume menu restarts current RHVoice speech')
 sync.state=Sync.STATE.PAUSED
 sync:setSpeechRate(.75);sync:setSpeechVolumePct(50)

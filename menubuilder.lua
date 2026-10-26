@@ -346,7 +346,7 @@ function MenuBuilder.buildVoiceSettingsMenu(plugin)
     -- Volume submenu
     table.insert(menu, {
         text_func = function()
-            return T(_("Volume: %1%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100))
+            return T(_("Volume: %1%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100 + 0.5))
         end,
         sub_item_table = MenuBuilder.buildVolumeMenu(plugin),
     })
@@ -654,12 +654,18 @@ function MenuBuilder.buildPitchMenu(plugin)
     return menu
 end
 
+function MenuBuilder.volumeValues()
+    local values={}
+    for percent=5,100,5 do values[#values+1]=percent/100 end
+    return values
+end
+
 function MenuBuilder.buildVolumeMenu(plugin)
-    local volumes = {0.25, 0.50, 0.75, 1.0}
+    local volumes = MenuBuilder.volumeValues()
     local menu = {}
     for _i, v in ipairs(volumes) do
         table.insert(menu, {
-            text = string.format("%d%%", math.floor(v * 100)),
+            text = string.format("%d%%", math.floor(v * 100 + 0.5)),
             checked_func = function()
                 return plugin:getSetting("speech_volume", 1.0) == v
             end,
@@ -2487,11 +2493,11 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
         })
     end
     table.insert(items, {
-        text = T(_("Volume: %1%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100)),
+        text = T(_("Volume: %1%"), math.floor(plugin:getSetting("speech_volume", 1.0) * 100 + 0.5)),
         callback = function()
-            _valuePicker(_("Volume"), {0.25, 0.5, 0.75, 1.0},
+            _valuePicker(_("Volume"), MenuBuilder.volumeValues(),
                 plugin:getSetting("speech_volume", 1.0),
-                function(v) return string.format("%d%%", math.floor(v * 100)) end,
+                function(v) return string.format("%d%%", math.floor(v * 100 + 0.5)) end,
                 function(v)
                     if plugin.sync_controller then plugin.sync_controller:setSpeechVolumePct(v*100)
                     else
@@ -2501,11 +2507,11 @@ function MenuBuilder.showTtsSettingsPicker(plugin)
                     if plugin.sync_controller and plugin.sync_controller.playback_bar
                         and plugin.sync_controller.playback_bar.updateVolume then
                         pcall(function()
-                            plugin.sync_controller.playback_bar:updateVolume(math.floor(v * 100))
+                            plugin.sync_controller.playback_bar:updateVolume(math.floor(v * 100 + 0.5))
                         end)
                     end
                     UIManager:show(InfoMessage:new{
-                        text = T(_("Volume: %1%"), math.floor(v * 100)),
+                        text = T(_("Volume: %1%"), math.floor(v * 100 + 0.5)),
                         timeout = 1.5,
                     })
                 end)
