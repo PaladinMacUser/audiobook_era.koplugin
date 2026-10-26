@@ -22,6 +22,7 @@ function Diagnostics.describe(plugin,engine)
     if engine and engine.backend=="rhvoice" and engine.getRHVoiceOptions then
         local o=engine:getRHVoiceOptions()
         lines[#lines+1]=string.format("RHVoice voice: %s; pitch %.2fx; comma %.2fs",o.voice,o.pitch,o.comma)
+        lines[#lines+1]="Natural English phrasing: "..tostring(o.natural~=false)
         lines[#lines+1]="RHVoice prefetch: "..tostring(engine._rhvoice_slot and engine._rhvoice_slot.state or "empty")
     end
     if engine and engine._era_service then

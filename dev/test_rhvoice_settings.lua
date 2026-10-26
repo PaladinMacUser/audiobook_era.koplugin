@@ -75,6 +75,8 @@ check(settings.speech_rate==.5 and settings.word_speech_rate==.5 and settings.rh
 check(settings.rhvoice_voice=='Bdl' and settings.tts_backend=='rhvoice' and settings.pb_alsa_device=='era-speaker','presets retain voice, engine and speaker choice')
 menu[8].callback();check(settings.rhvoice_prefetch==false,'prefetch toggle is available')
 menu[9].callback();check(settings.rhvoice_keep_speaker==true,'persistent speaker toggle is available')
+key=Cache.key(engine,'reader');menu[10].callback()
+check(settings.rhvoice_natural_english==false and Cache.key(engine,'reader')~=key,'natural phrasing toggle invalidates cached pronunciations')
 settings.rhvoice_pitch=99;settings.rhvoice_comma_pause=-5
 check(Settings.options(plugin).pitch==1.15 and Settings.options(plugin).comma==0,'saved prosody settings are clamped')
 local function remove(p) for name in lfs.dir(p) do if name~='.' and name~='..' then local c=p..'/'..name;if lfs.attributes(c,'mode')=='directory' then remove(c) else os.remove(c) end end end;lfs.rmdir(p) end

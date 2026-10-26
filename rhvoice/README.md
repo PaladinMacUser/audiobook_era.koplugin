@@ -160,3 +160,14 @@ Host fixture tests compare exact speech frames, one-PCM reuse and lifecycle.
 ARM tests exercise all voices, pitch, SSML, cancellation, idle restart, and
 real ALSA null playback through the packaged loader. Physical Era listening
 and latency still require device validation. Highlighting remains estimated.
+
+## English input and phrasing (0.8.2)
+
+The Lua pipeline optionally normalizes ebook typography before applying saved
+pronunciation corrections and escaping SSML. RHVoice-only sentence boundaries
+keep common English titles and initials with names and preserve closing quotes.
+The normalizer never modifies visible text or source offsets. The option is
+part of word-cache and prefetch identity. Voice previews exercise curly quotes,
+contractions, titles and ligatures; the ARM smoke check renders that exact
+Lua-generated SSML with the packaged resident engine. Maximum-quality 24 kHz
+models, firmware clip output and per-request volume/rate controls are retained.

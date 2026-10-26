@@ -88,6 +88,18 @@ def check_resident_rhvoice(binary, qemu):
                     assert Path(str(job)+".done").read_text().strip()=="OK"
                     with wave.open(str(audio)) as wav: pause_frames.append(wav.getnframes())
                 assert 8500<pause_frames[1]-pause_frames[0]<11000,"SSML comma pause controls actual PCM duration at half speed"
+                # Render the exact Lua-generated SSML used for ebook cleanup.
+                lua = os.environ.get("LUAJIT") or shutil.which("luajit")
+                assert lua, "LuaJIT is required for the plugin-to-engine speech check"
+                sample = 'Dr. Morgan said, “Don’t rush. This is a ﬁne day to read.”'
+                script = 'local S=dofile("rhvoicesettings.lua");io.write(S.ssml(' + json.dumps(sample,ensure_ascii=False) + ',S.options(nil)))'
+                cleaned = subprocess.check_output([lua,"-e",script],cwd=Path(__file__).resolve().parents[1],text=True)
+                assert 'fine day' in cleaned and 'Don&apos;t' in cleaned
+                job, audio = submit(44,cleaned,mode="ssml")
+                wait(lambda: Path(str(job)+".done").exists())
+                assert Path(str(job)+".done").read_text().strip()=="OK"
+                with wave.open(str(audio)) as wav:
+                    assert wav.getnframes()>8400 and any(wav.readframes(wav.getnframes())),"Cleaned English SSML produces actual speech"
                 job, audio = submit(2, "reader " * 1000)
                 # Cancel a potentially running long request, then enqueue a fresh word.
                 Path(str(job) + ".cancel").write_text("cancel")

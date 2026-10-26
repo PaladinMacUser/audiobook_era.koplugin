@@ -365,6 +365,10 @@ function Audiobook:_initSubmodules()
                 plugin = self,
                 plugin_dir = Utils.normalizeDirPath(pp),
             }
+            self.text_parser.english_phrasing_fn=function()
+                return self.tts_engine.backend==self.tts_engine.BACKENDS.RHVOICE
+                    and self:getSetting("rhvoice_natural_english",true)
+            end
             self.word_reader = dofile(pp .. "wordreader.lua"):new{engine = self.tts_engine}
             local saved_backend = self.tts_engine:applyEraFastVoiceDefault(self:getSetting("tts_backend", nil))
             if saved_backend then
@@ -1415,7 +1419,9 @@ function Audiobook:previewVoice(backend,is_test,rhvoice_voice)
     self._speech_engine.rhvoice_voice_override=rhvoice_voice
     self._audio_test_status=is_test and "Running" or self._audio_test_status
     local text=is_test and "Hello. This is the PocketBook speaker test. One, two, three."
-        or "Hello. This is a sample of this English reading voice."
+        or (self._speech_engine.backend=="rhvoice"
+            and "Dr. Morgan said, “Don’t rush. This is a ﬁne day to read.”"
+            or "Hello. This is a sample of this English reading voice.")
     UIManager:show(InfoMessage:new{text=is_test and _("Audio test: listen for the spoken sentence.")
         or _("Playing a voice sample. Your selected reading engine is unchanged."),timeout=2})
     self.word_reader:preview(text,function(ok)

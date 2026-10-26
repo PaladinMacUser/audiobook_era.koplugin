@@ -24,8 +24,8 @@ jobs:
       - name: Assemble installable English package
         run: python3 tools/package-era.py
       - name: Verify bundled ARM English speech and WAV playback
-        run: python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.8.1.zip
+        run: python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.8.2.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: audiobook-era-v0.8.1
+          name: audiobook-era-v0.8.2
           path: dist/*

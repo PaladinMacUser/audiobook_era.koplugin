@@ -3,12 +3,20 @@
 Offline English read-aloud through the original Era's built-in speaker,
 targeting **U700.6.10.3209** and **KOReader 2026.03**.
 
-Version **0.8.1** restores the established clip player as the default for
-continuous reading after an Era report of silence. Persistent speaker mode
-is opt-in; startup failures retry the same WAV through the clip player and
-retain the failure in diagnostics. Speed and volume controls regenerate the current
-sentence, or apply on resume when paused. Volume labels show one percent sign,
-and the Repeat last word menu entries have been removed. It includes four offline RHVoice voices: **SLT** and **CLB**
+Version **0.8.2** improves RHVoice English phrasing: titles and name initials
+stay in their sentence, trailing quotes stay with the spoken line, and curly
+quotes, ligatures, non-breaking spaces and soft hyphens are normalized in the
+synthesis copy. **Natural English phrasing** is enabled by default under
+**Voice settings → RHVoice voices and tuning** and can be disabled for comparison.
+Corrections apply after cleanup; displayed text and source offsets stay intact.
+The existing maximum-quality 24 kHz models are retained; this improves input
+and sentence rhythm rather than replacing RHVoice's acoustic model.
+
+Retains the 0.8.1 playback/control fixes: continuous speech uses the established
+clip player by default, volume and speed regenerate current speech or apply
+on resume, volume supports mute, and Repeat last word menu entries are removed.
+Persistent speaker mode stays off by default. Failed startup retries the same
+clip and preserves the failure in diagnostics. It includes four offline RHVoice voices: **SLT** and **CLB**
 (American English, female), **BDL** (American English, male), and **Alan**
 (Scottish English, male). Open **Tools → Audiobook Read-Along → Voice settings
 → RHVoice voices and tuning** to select or preview a voice.

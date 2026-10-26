@@ -2530,7 +2530,7 @@ function MenuBuilder.buildRHVoiceMenu(plugin)
     return {
         {text_func=function() return T(_("English voice: %1"),plugin:getSetting("rhvoice_voice","Slt")) end,sub_item_table=voices},
         {text=_("Reading presets"),sub_item_table=presets},
-        {text_func=function() return T(_("Pitch: %1%%"),math.floor(Settings.options(plugin).pitch*100+0.5)) end,
+        {text_func=function() return T(_("Pitch: %1%"),math.floor(Settings.options(plugin).pitch*100+0.5)) end,
             sub_item_table=values("rhvoice_pitch",{0.85,0.9,0.95,1,1.05,1.1,1.15},"x",1)},
         {text_func=function() return T(_("Comma pause: %1s (0 = natural)"),Settings.options(plugin).comma) end,
             sub_item_table=values("rhvoice_comma_pause",{0,0.1,0.12,0.2,0.25,0.3,0.5,0.75,1,1.5},"s",0)},
@@ -2544,6 +2544,10 @@ function MenuBuilder.buildRHVoiceMenu(plugin)
         {text=_("Keep Era speaker open between sentences"),checked_func=function() return plugin:getSetting("rhvoice_keep_speaker",false) end,
             callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_keep_speaker",false) end,
             enabled_func=function() return plugin.tts_engine:supportsPocketBookSpeaker() end},
+        {text=_("Natural English phrasing"),
+            help_text=_("Keep titles and initials with their sentence. Normalize curly quotes, ligatures, non-breaking spaces and soft hyphens for pronunciation. Book text stays unchanged."),
+            checked_func=function() return plugin:getSetting("rhvoice_natural_english",true) end,
+            callback=function() plugin:stopReadAlong();plugin:toggleSetting("rhvoice_natural_english",true) end},
     }
 end
 

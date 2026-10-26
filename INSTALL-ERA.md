@@ -18,7 +18,7 @@ emulation in the development check; actual Era speed needs a device test.
 2. If an older `audiobook.koplugin` or `audiobook_era.koplugin` is installed,
    move it outside the `plugins` folder as a backup. Keep only one installed
    copy of this plugin.
-3. Extract **`audiobook-era-v0.8.1.zip`**. Copy its **`audiobook.koplugin`**
+3. Extract **`audiobook-era-v0.8.2.zip`**. Copy its **`audiobook.koplugin`**
    folder into **`applications/koreader/plugins/`** on the Era's USB drive.
    The device path is `/mnt/ext1/applications/koreader/plugins/audiobook.koplugin/`.
    Do not use GitHub's “Source code” ZIP: it lacks the speech runtime.
@@ -253,10 +253,25 @@ Run `LUAJIT=luajit sh dev/run_pocketbook_tests.sh` for the native ABI and engine
 regression tests. These require a host C compiler and LuaJIT, not the reader.
 Run `python3 dev/test_wav_tempo.py` for pitch, duration, word-ending and
 malformed-input checks of the tempo converter.
-Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.8.1.zip` with
+Run `python3 dev/smoke-era-runtime.py dist/audiobook-era-v0.8.2.zip` with
 `qemu-arm` installed to verify the packaged ARM English engine and player.
 
 In 0.8.1, continuous-reading speed and volume changes regenerate the current
 sentence. If paused, new settings apply when you press play. RHVoice volume
 is applied directly to PCM, including true mute. **Read word** uses its
 separate **Word pronunciation → Pronunciation speed** setting.
+
+## Natural English phrasing (0.8.2)
+
+Enabled by default in **Voice settings → RHVoice voices and tuning**. This
+keeps English titles/initials with the following name and closing quotes with
+their sentence, avoiding separate clips such as “Dr.” then “Brown arrived.”
+The synthesis copy normalizes curly quotes, ligatures (ﬁ → fi), soft hyphens,
+joiners and non-breaking spaces before applying your pronunciation corrections.
+Book text is unchanged and source positions remain valid for highlighting.
+Other engines retain their existing sentence splitting. Toggle the option off
+to compare, then use a voice preview or **Read aloud from here** again.
+
+This build retains maximum-quality 24 kHz RHVoice synthesis. It does not add
+a neural model or change saved voice, speed, pitch, pauses, volume or output.
+Speech quality is subjective; compare a paragraph on the actual Era speaker.

@@ -12,12 +12,13 @@ Settings.presets = {
     {name="Word practice",rate=0.5,word_rate=0.4,pitch=0.95,comma=0.3,sentence=0.5,paragraph=1.4},
 }
 function Settings.options(plugin,override)
-    local function get(k,d) return plugin and plugin:getSetting(k,d) or d end
+    local function get(k,d) if plugin then return plugin:getSetting(k,d) end;return d end
     return {voice=override or get("rhvoice_voice","Slt"),
         pitch=math.max(0.85,math.min(1.15,tonumber(get("rhvoice_pitch",1)) or 1)),
         comma=math.max(0,math.min(1.5,tonumber(get("rhvoice_comma_pause",0)) or 0)),
         sentence=math.max(0,math.min(3,tonumber(get("rhvoice_sentence_pause",get("sentence_pause",0.1))) or 0.1)),
         paragraph=math.max(0,math.min(5,tonumber(get("rhvoice_paragraph_pause",get("paragraph_pause",0.8))) or 0.8)),
+        natural=get("rhvoice_natural_english",true),
         corrections=get("rhvoice_corrections",{})}
 end
 local function word_byte(s) return s~="" and (s:match("[%w_']")~=nil or s:byte()>=128) end
@@ -46,7 +47,26 @@ function Settings.escape(text)
     return (text:gsub('&','&amp;'):gsub('<','&lt;'):gsub('>','&gt;'):gsub('"','&quot;'):gsub("'",'&apos;'))
 end
 function Settings.ssml(text,options)
-    text=Settings.correct(text,options.corrections)
+    local English=dofile((debug.getinfo(1,"S").source:match("^@(.*/)") or "./").."englishspeech.lua")
+    local corrections=options.corrections
+    if options.natural~=false then
+        text=English.prepare(text)
+        -- Existing corrections may themselves contain curly apostrophes or
+        -- ligatures. Normalize a copy; keep saved entries and one-pass rules.
+        local keys,normalized={},{}
+        for k,v in pairs(type(corrections)=="table" and corrections or {}) do
+            if type(k)=="string" and type(v)=="string" then keys[#keys+1]=k end
+        end
+        table.sort(keys)
+        for _,key in ipairs(keys) do
+            local plain=English.prepare(key)
+            if normalized[plain]==nil or key==plain then
+                normalized[plain]=English.prepare(corrections[key])
+            end
+        end
+        corrections=normalized
+    end
+    text=Settings.correct(text,corrections)
     local out={"<speak>"}
     for i=1,#text do
         local c=text:sub(i,i);out[#out+1]=Settings.escape(c)
@@ -59,7 +79,7 @@ function Settings.ssml(text,options)
     out[#out+1]="</speak>";return table.concat(out)
 end
 function Settings.signature(options)
-    local fields={options.voice,tostring(options.pitch),tostring(options.comma)}
+    local fields={options.voice,tostring(options.pitch),tostring(options.comma),tostring(options.natural~=false)}
     local keys={};for k,v in pairs(type(options.corrections)=="table" and options.corrections or {}) do
         if type(k)=="string" and type(v)=="string" then keys[#keys+1]=k end
     end
